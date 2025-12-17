@@ -50,15 +50,18 @@ export const useAudioPlayer = (
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioIntervalRef = useRef<number | null>(null);
+  const lastAudioUrlRef = useRef<string | undefined>(undefined);
 
   /**
    * Setup audio element and drift correction when URL is available
+   * Only recreates the Audio element when audioUrl actually changes
    */
   useEffect(() => {
     console.log('[AudioPlayer] useEffect triggered', {
       hasAudioUrl: !!audioUrl,
       audioUrl: audioUrl ? audioUrl.substring(0, 50) + '...' : 'none',
-      segmentCount: segments.length
+      segmentCount: segments.length,
+      lastUrl: lastAudioUrlRef.current?.substring(0, 50) || 'none'
     });
 
     if (!audioUrl) {
@@ -68,6 +71,13 @@ export const useAudioPlayer = (
       return;
     }
 
+    // Skip if audioUrl hasn't changed - prevents destroying audio element on re-renders
+    if (audioUrl === lastAudioUrlRef.current && audioRef.current) {
+      console.log('[AudioPlayer] Skipping - audioUrl unchanged and audio element exists');
+      return;
+    }
+
+    lastAudioUrlRef.current = audioUrl;
     console.log('[AudioPlayer] Creating Audio element with URL:', audioUrl.substring(0, 80));
     const audio = new Audio(audioUrl);
     audioRef.current = audio;
