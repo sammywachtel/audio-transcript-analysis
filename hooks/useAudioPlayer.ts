@@ -55,19 +55,55 @@ export const useAudioPlayer = (
    * Setup audio element and drift correction when URL is available
    */
   useEffect(() => {
+    console.log('[AudioPlayer] useEffect triggered', {
+      hasAudioUrl: !!audioUrl,
+      audioUrl: audioUrl ? audioUrl.substring(0, 50) + '...' : 'none',
+      segmentCount: segments.length
+    });
+
     if (!audioUrl) {
       // No audio URL means mock/demo mode
+      console.log('[AudioPlayer] No audio URL - running in mock/demo mode');
       setDuration(initialDuration);
       return;
     }
 
+    console.log('[AudioPlayer] Creating Audio element with URL:', audioUrl.substring(0, 80));
     const audio = new Audio(audioUrl);
     audioRef.current = audio;
+
+    // Log audio element errors
+    audio.addEventListener('error', (e) => {
+      const error = audio.error;
+      console.error('[AudioPlayer] Audio element error:', {
+        code: error?.code,
+        message: error?.message,
+        event: e
+      });
+    });
+
+    // Log when audio can start playing
+    audio.addEventListener('canplay', () => {
+      console.log('[AudioPlayer] Audio can start playing (canplay event)');
+    });
+
+    audio.addEventListener('canplaythrough', () => {
+      console.log('[AudioPlayer] Audio can play through without buffering (canplaythrough event)');
+    });
 
     // Handle metadata loaded
     const handleMetadata = () => {
       const audioDurMs = audio.duration * 1000;
-      if (!Number.isFinite(audioDurMs) || audioDurMs === 0) return;
+      console.log('[AudioPlayer] Metadata loaded', {
+        durationMs: audioDurMs,
+        durationSec: audio.duration,
+        readyState: audio.readyState
+      });
+
+      if (!Number.isFinite(audioDurMs) || audioDurMs === 0) {
+        console.warn('[AudioPlayer] Invalid duration, skipping metadata handling');
+        return;
+      }
 
       setDuration(audioDurMs);
 
@@ -170,15 +206,34 @@ export const useAudioPlayer = (
    * Toggle play/pause
    */
   const togglePlay = useCallback(() => {
+    console.log('[AudioPlayer] togglePlay called', {
+      hasAudioRef: !!audioRef.current,
+      currentlyPlaying: isPlaying,
+      readyState: audioRef.current?.readyState,
+      currentTime: audioRef.current?.currentTime,
+      duration: audioRef.current?.duration
+    });
+
     if (audioRef.current) {
       if (isPlaying) {
         audioRef.current.pause();
+        console.log('[AudioPlayer] Paused');
       } else {
-        audioRef.current.play();
+        const playPromise = audioRef.current.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              console.log('[AudioPlayer] Playback started successfully');
+            })
+            .catch((error) => {
+              console.error('[AudioPlayer] Playback failed:', error);
+            });
+        }
       }
       setIsPlaying(!isPlaying);
     } else {
       // Fallback for mock data
+      console.log('[AudioPlayer] No audio ref - using mock playback');
       setIsPlaying(prev => !prev);
     }
   }, [isPlaying]);

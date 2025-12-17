@@ -43,20 +43,36 @@ export class ConversationStorageService {
 
     let audioBlob: Blob | undefined;
 
+    console.log('[Storage] Saving conversation:', {
+      id: conversation.conversationId,
+      hasAudioUrl: !!conversation.audioUrl,
+      audioUrlPrefix: conversation.audioUrl?.substring(0, 30)
+    });
+
     // If we have a blob URL, fetch the actual blob data
     if (conversation.audioUrl && conversation.audioUrl.startsWith('blob:')) {
       try {
+        console.log('[Storage] Fetching blob from URL...');
         const response = await fetch(conversation.audioUrl);
         if (!response.ok) throw new Error('Network response was not ok');
         audioBlob = await response.blob();
+        console.log('[Storage] Blob fetched successfully:', {
+          size: audioBlob.size,
+          type: audioBlob.type
+        });
       } catch (e) {
-        console.warn("Could not fetch blob from URL for saving. Attempting to preserve existing blob if update.", e);
+        console.warn("[Storage] Could not fetch blob from URL for saving. Attempting to preserve existing blob if update.", e);
         // Fallback: Preserve existing blob if this is an update operation
         const existing = await db.get('conversations', conversation.conversationId);
         if (existing && existing.audioBlob) {
           audioBlob = existing.audioBlob;
+          console.log('[Storage] Using existing blob from previous save');
+        } else {
+          console.warn('[Storage] No existing blob found - audio will be lost!');
         }
       }
+    } else {
+      console.log('[Storage] No blob URL to fetch (audioUrl missing or not a blob URL)');
     }
 
     // Store without the ephemeral URL, but with the permanent Blob
@@ -77,6 +93,8 @@ export class ConversationStorageService {
     const db = await this.getDB();
     const items = await db.getAll('conversations');
 
+    console.log('[Storage] Loading all conversations:', { count: items.length });
+
     // Sort by newest first
     items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
@@ -87,6 +105,14 @@ export class ConversationStorageService {
       // Recreate the Blob URL for this session
       if (audioBlob) {
         audioUrl = URL.createObjectURL(audioBlob);
+        console.log('[Storage] Recreated blob URL for:', {
+          id: item.conversationId,
+          blobSize: audioBlob.size,
+          blobType: audioBlob.type,
+          newUrl: audioUrl.substring(0, 50)
+        });
+      } else {
+        console.warn('[Storage] No audio blob stored for:', item.conversationId);
       }
 
       return {
