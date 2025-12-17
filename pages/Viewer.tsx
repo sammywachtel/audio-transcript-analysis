@@ -48,9 +48,14 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
     duration,
     activeSegmentIndex,
     isSyncing,
+    driftCorrectionApplied,
+    driftRatio,
+    driftMs,
+    syncOffset,
     togglePlay,
     seek,
-    scrub
+    scrub,
+    setSyncOffset
   } = useAudioPlayer(conversation, {
     audioUrl: conversation.audioUrl,
     initialDuration: conversation.durationMs,
@@ -139,6 +144,9 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
         createdAt={conversation.createdAt}
         isSyncing={isSyncing}
         onBack={onBack}
+        driftCorrectionApplied={driftCorrectionApplied}
+        driftRatio={driftRatio}
+        driftMs={driftMs}
       />
 
       {/* Main Content Split */}
@@ -179,6 +187,8 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
         onPlayPause={togglePlay}
         onSeek={seek}
         onScrub={scrub}
+        syncOffset={syncOffset}
+        onSyncOffsetChange={setSyncOffset}
       />
 
       {/* Rename Speaker Modal */}

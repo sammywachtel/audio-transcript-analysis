@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Conversation, Segment } from '../types';
 
 interface UseAudioPlayerOptions {
@@ -16,6 +16,14 @@ interface UseAudioPlayerReturn {
   activeSegmentIndex: number;
   isSyncing: boolean;
 
+  // Drift correction metrics
+  driftRatio: number;
+  driftCorrectionApplied: boolean;
+  driftMs: number;
+
+  // Manual sync offset (ms) - positive = transcript ahead, negative = transcript behind
+  syncOffset: number;
+
   // Refs
   audioRef: React.RefObject<HTMLAudioElement | null>;
 
@@ -24,6 +32,7 @@ interface UseAudioPlayerReturn {
   seek: (ms: number) => void;
   scrub: (ms: number) => void;
   setIsPlaying: (playing: boolean) => void;
+  setSyncOffset: (offset: number) => void;
 }
 
 /**
@@ -32,10 +41,13 @@ interface UseAudioPlayerReturn {
  * Handles all the gnarly audio element lifecycle, drift correction,
  * fallback simulation mode for mock data, and active segment tracking.
  *
- * Drift correction kicks in when the audio duration differs >5% from
+ * Drift correction kicks in when the audio duration differs by >1 second from
  * the transcript's last segment timestamp. We linearly scale all segments
- * to match the actual audio duration. This happens because sometimes
- * sample rates mess with Gemini's timestamp predictions.
+ * to match the actual audio duration. This happens because Gemini's timestamps
+ * often have linear drift (e.g., 8-10 seconds off in a 2-minute file).
+ *
+ * Phase 1: More aggressive threshold (>1s vs previous >5% AND >2s)
+ * Exposes drift metrics for UI display: ratio, correctionApplied, and absolute drift in ms.
  */
 export const useAudioPlayer = (
   conversation: Conversation,
@@ -47,6 +59,16 @@ export const useAudioPlayer = (
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(initialDuration);
   const [isSyncing, setIsSyncing] = useState(false);
+
+  // Drift correction metrics
+  const [driftRatio, setDriftRatio] = useState(1.0);
+  const [driftCorrectionApplied, setDriftCorrectionApplied] = useState(false);
+  const [driftMs, setDriftMs] = useState(0);
+
+  // Manual sync offset (ms) - user-adjustable fine-tuning
+  // Positive = shift transcript forward (highlight later segments for current audio time)
+  // Negative = shift transcript backward (highlight earlier segments)
+  const [syncOffset, setSyncOffset] = useState(0);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioIntervalRef = useRef<number | null>(null);
@@ -146,17 +168,47 @@ export const useAudioPlayer = (
         const diff = Math.abs(audioDurMs - transcriptDurMs);
         const ratio = audioDurMs / transcriptDurMs;
 
-        // Threshold: >5% difference AND >2 seconds (avoid tiny rounding jitter)
-        if (diff > 2000 && (ratio < 0.95 || ratio > 1.05)) {
-          console.log(`[Auto-Sync] Drift detected. Audio: ${audioDurMs}ms, Transcript: ${transcriptDurMs}ms. Ratio: ${ratio}`);
-          setIsSyncing(true);
+        // ALWAYS log drift analysis for debugging
+        console.log(`[Drift Analysis] Audio vs Transcript comparison:`, {
+          audioDurationMs: audioDurMs,
+          audioDurationFormatted: `${Math.floor(audioDurMs / 60000)}:${((audioDurMs % 60000) / 1000).toFixed(1)}`,
+          transcriptDurationMs: transcriptDurMs,
+          transcriptDurationFormatted: `${Math.floor(transcriptDurMs / 60000)}:${((transcriptDurMs % 60000) / 1000).toFixed(1)}`,
+          driftMs: diff,
+          driftRatio: ratio.toFixed(4),
+          percentageDrift: ((ratio - 1) * 100).toFixed(2) + '%',
+          willCorrect: diff > 1000
+        });
 
-          // Apply linear scaling to all segments
+        // Set drift metrics for UI display
+        setDriftRatio(ratio);
+        setDriftMs(diff);
+
+        // Phase 1: More aggressive threshold - apply drift compensation when >1 second difference
+        // Removed the 5% requirement to catch linear drift (e.g., 8-10 seconds in 2-minute files)
+        if (diff > 1000) {
+          console.log(`[Auto-Sync] 🔧 Applying drift correction...`);
+          setIsSyncing(true);
+          setDriftCorrectionApplied(true);
+
+          // Apply linear scaling to all segments with improved rounding
           const scaledSegments = currentSegments.map(seg => ({
             ...seg,
-            startMs: Math.floor(seg.startMs * ratio),
-            endMs: Math.floor(seg.endMs * ratio)
+            startMs: Math.round(seg.startMs * ratio),
+            endMs: Math.round(seg.endMs * ratio)
           }));
+
+          // Log first and last segment before/after for verification
+          console.log(`[Auto-Sync] Segment adjustment preview:`, {
+            firstSegment: {
+              before: { start: currentSegments[0].startMs, end: currentSegments[0].endMs },
+              after: { start: scaledSegments[0].startMs, end: scaledSegments[0].endMs }
+            },
+            lastSegment: {
+              before: { start: lastSeg.startMs, end: lastSeg.endMs },
+              after: { start: scaledSegments[scaledSegments.length - 1].startMs, end: scaledSegments[scaledSegments.length - 1].endMs }
+            }
+          });
 
           // Create fixed conversation
           const fixedConversation = {
@@ -168,11 +220,20 @@ export const useAudioPlayer = (
           // Notify parent to update conversation
           if (currentOnDriftCorrected) {
             currentOnDriftCorrected(fixedConversation, currentConversation);
+            console.log(`[Auto-Sync] ✅ Drift correction applied and saved`);
           }
 
           // Reset syncing state after a short delay (for UI feedback)
           setTimeout(() => setIsSyncing(false), 1500);
+        } else {
+          console.log(`[Drift Analysis] ℹ️ No correction needed (diff ${diff}ms < 1000ms threshold)`);
+          setDriftCorrectionApplied(false);
         }
+      } else {
+        console.log(`[Drift Analysis] ⚠️ Skipped:`, {
+          hasLastSegment: !!lastSeg,
+          isSyncing: currentIsSyncing
+        });
       }
     };
 
@@ -299,10 +360,12 @@ export const useAudioPlayer = (
   }, []);
 
   /**
-   * Find the currently active segment based on playback time
+   * Find the currently active segment based on playback time + manual offset
+   * The offset shifts which segment is highlighted relative to audio position
    */
+  const adjustedTime = currentTime + syncOffset;
   const activeSegmentIndex = segments.findIndex(
-    seg => currentTime >= seg.startMs && currentTime < seg.endMs
+    seg => adjustedTime >= seg.startMs && adjustedTime < seg.endMs
   );
 
   return {
@@ -311,10 +374,15 @@ export const useAudioPlayer = (
     duration,
     activeSegmentIndex,
     isSyncing,
+    driftRatio,
+    driftCorrectionApplied,
+    driftMs,
+    syncOffset,
     audioRef,
     togglePlay,
     seek,
     scrub,
-    setIsPlaying
+    setIsPlaying,
+    setSyncOffset
   };
 };

@@ -7,6 +7,10 @@ interface ViewerHeaderProps {
   createdAt: string;
   isSyncing: boolean;
   onBack: () => void;
+  // Drift correction metrics
+  driftCorrectionApplied?: boolean;
+  driftRatio?: number;
+  driftMs?: number;
 }
 
 /**
@@ -19,8 +23,18 @@ export const ViewerHeader: React.FC<ViewerHeaderProps> = ({
   title,
   createdAt,
   isSyncing,
-  onBack
+  onBack,
+  driftCorrectionApplied,
+  driftRatio,
+  driftMs
 }) => {
+  // Format drift info for display (e.g., "+2.3s" or "-1.5s")
+  const formatDrift = () => {
+    if (!driftMs || !driftRatio) return '';
+    const sign = driftRatio > 1 ? '+' : '';
+    const seconds = ((driftRatio - 1) * 100).toFixed(1);
+    return `${sign}${seconds}%`;
+  };
   return (
     <header className="h-14 bg-white border-b border-slate-200 flex items-center justify-between px-4 z-10 shrink-0">
       <div className="flex items-center gap-4">
@@ -35,6 +49,14 @@ export const ViewerHeader: React.FC<ViewerHeaderProps> = ({
             {isSyncing && (
               <span className="flex items-center gap-1 text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full animate-pulse">
                 <RefreshCw size={10} className="animate-spin" /> Auto-Syncing
+              </span>
+            )}
+            {!isSyncing && driftCorrectionApplied && (
+              <span
+                className="flex items-center gap-1 text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full cursor-help"
+                title={`Timestamps adjusted by ${formatDrift()} (${Math.round(driftMs || 0)}ms drift detected)`}
+              >
+                ⚡ Sync Adjusted
               </span>
             )}
           </div>
