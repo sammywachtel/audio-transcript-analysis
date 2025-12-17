@@ -1,0 +1,71 @@
+# Adaptive Pre-commit Configuration
+# Generated based on detected project structure
+
+repos:
+  # Universal hooks (always enabled)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=1024']
+      - id: check-yaml
+      - id: check-json
+
+  # Frontend hooks (TypeScript/JavaScript)
+  - repo: local
+    hooks:
+      - id: eslint-check
+        name: ESLint Check
+        entry: bash -c 'cd frontend && npm run lint'
+        language: system
+        files: '^frontend/.*\.(js|jsx|ts|tsx)$'
+        pass_filenames: false
+
+      - id: typescript-check
+        name: TypeScript Check
+        entry: bash -c 'cd frontend && npx tsc --noEmit'
+        language: system
+        files: '^frontend/.*\.(ts|tsx)$'
+        pass_filenames: false
+
+  # Python hooks
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+        language_version: python3
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile", "black"]
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.1.1
+    hooks:
+      - id: flake8
+        args: ["--max-line-length=88", "--extend-ignore=E203,W503"]
+        exclude: '^(tools/|demo/|\.local_docs/)'
+
+  # MyPy type checking
+  # Note: Enabled by default to match CI behavior. Add project-specific dependencies below.
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        args: []
+        additional_dependencies: []
+        # Common dependencies to add: pydantic, fastapi, httpx, types-*, numpy, etc.
+        files: '^(src|backend|app)/.*\.py$'
+
+  # Security hooks
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: package-lock.json

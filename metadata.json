@@ -1,0 +1,5 @@
+{
+  "name": "Audio Transcript Analysis App",
+  "description": "A transcript viewer that teaches you what you heard with interactive context, topic segmentation, and synchronized playback.",
+  "requestFramePermissions": []
+}

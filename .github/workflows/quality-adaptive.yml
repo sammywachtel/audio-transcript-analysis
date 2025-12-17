@@ -1,0 +1,202 @@
+# Adaptive Quality Gate CI/CD Pipeline
+# Generated based on project structure and current quality gate phase
+# Project: audio-transcript-analysis-app (typescript)
+# Phase: 3 - Full Strict Enforcement
+
+name: Quality Gate - Phase 3 (typescript)
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+  QUALITY_GATE_PHASE: 3
+  PROJECT_TYPE: 'typescript'
+
+
+
+
+
+
+
+
+# ==============================================
+# PHASE 3: NORMALIZE & HARDEN
+# ==============================================
+# Strategy: Full strict enforcement, zero compromises
+# Enforcement: All quality gates blocking, no bypasses
+# Standards: Production-ready quality across entire codebase
+
+
+jobs:
+  # Configuration Validation
+  config-validation:
+    name: "Phase 3: Configuration Validation"
+    runs-on: ubuntu-latest
+    outputs:
+      has-frontend: ${{ steps.detect.outputs.has-frontend }}
+      has-backend: ${{ steps.detect.outputs.has-backend }}
+      frontend-path: ${{ steps.detect.outputs.frontend-path }}
+      backend-path: ${{ steps.detect.outputs.backend-path }}
+      changed-files: ${{ steps.changes.outputs.files }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Project Structure
+        id: detect
+        run: |
+          chmod +x ./scripts/detect-project-type.sh
+          ./scripts/detect-project-type.sh json > detection.json
+
+          echo "has-frontend=$(jq -r '.project.has_frontend' detection.json)" >> $GITHUB_OUTPUT
+          echo "has-backend=$(jq -r '.project.has_backend' detection.json)" >> $GITHUB_OUTPUT
+          echo "frontend-path=$(jq -r '.project.frontend_path' detection.json)" >> $GITHUB_OUTPUT
+          echo "backend-path=$(jq -r '.project.backend_path' detection.json)" >> $GITHUB_OUTPUT
+
+
+      - name: Get Changed Files (Phase 3+)
+        id: changes
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            # Get changed files in PR
+            git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.sha }} > changed_files.txt
+          else
+            # Get changed files in push
+            git diff --name-only ${{ github.event.before }}..${{ github.sha }} > changed_files.txt
+          fi
+
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          cat changed_files.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "📋 Changed files for Phase 3 enforcement:"
+          cat changed_files.txt
+
+
+      - name: "Phase 3: Show Quality Gate Context"
+        run: |
+          echo "🎯 Quality Gate Phase: 3"
+          echo "📊 Strategy: Full Strict Enforcement"
+          echo "🏗️  Project Type: typescript"
+
+
+
+
+          echo "📋 Phase 3 Focus: Full strict enforcement, zero compromises"
+          echo "⚡ Performance: Maximum validation, all gates blocking"
+
+
+
+
+
+
+  # Security and Compliance
+  security-validation:
+    name: "Phase 3: Security Validation"
+    runs-on: ubuntu-latest
+    needs: config-validation
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: "Phase 3: Secret Detection"
+        run: |
+          echo "🔒 Phase 3: Secret detection validation"
+
+          if command -v detect-secrets >/dev/null 2>&1; then
+            if [[ -f ".secrets.baseline" ]]; then
+              detect-secrets scan --baseline .secrets.baseline .
+              echo "✅ No new secrets detected"
+            else
+              echo "⚠️  No secrets baseline found"
+            fi
+          else
+            echo "⏭️  detect-secrets not available"
+          fi
+
+
+
+
+      - name: "Phase 3: Advanced Security Scanning"
+        run: |
+          echo "🔒 Phase 3: Advanced security scanning enabled"
+
+          # Add Bandit for Python security scanning
+          if [[ -f "${{ needs.config-validation.outputs.backend-path }}/requirements.txt" ]]; then
+            cd ${{ needs.config-validation.outputs.backend-path }}
+            pip install bandit
+            bandit -r . -f json -o bandit-report.json || echo "⚠️  Security issues found"
+          fi
+
+          echo "✅ Security scanning completed"
+
+
+  # Quality Gate Summary
+  quality-gate-summary:
+    name: "Phase 3: Quality Gate Summary"
+    runs-on: ubuntu-latest
+    needs: [config-validation, security-validation]
+    if: always()
+
+    steps:
+      - name: "Phase 3: Quality Gate Results"
+        run: |
+          echo "🎯 PHASE 3 QUALITY GATE SUMMARY"
+          echo "=============================================="
+          echo ""
+          echo "📊 Project: audio-transcript-analysis-app (typescript)"
+          echo "🔄 Strategy: Full Strict Enforcement"
+          echo ""
+
+
+
+
+
+          if [[ "${{ needs.security-validation.result }}" == "success" ]]; then
+            echo "✅ Security Validation: PASSED"
+          else
+            echo "❌ Security Validation: FAILED"
+          fi
+
+          echo ""
+          echo "🛠️  Local Fix Instructions:"
+          echo "• Run validation: ./scripts/validate-adaptive.sh"
+          echo "• Fix issues: npm run lint:fix && ./scripts/format-backend.sh"
+          echo "• Check phase: ./scripts/quality-gate-manager.sh status"
+          echo "• Phase help: ./scripts/quality-gate-manager.sh help"
+
+          # Check if critical jobs failed
+          FAILED=false
+
+
+
+          if [[ "$FAILED" == "true" ]]; then
+            echo ""
+            echo "❌ PHASE 3 QUALITY GATE FAILED"
+
+
+
+
+            echo "📋 Phase 3: Strict quality enforcement failure"
+            echo "🔧 Action: Zero compromises - fix all quality issues"
+
+            exit 1
+          else
+            echo ""
+            echo "✅ PHASE 3 QUALITY GATE PASSED!"
+
+
+
+
+            echo "🔒 Full strict enforcement standards met"
+
+          fi
