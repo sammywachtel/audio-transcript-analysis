@@ -1,24 +1,29 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { Conversation } from '../types';
-import { formatTime, processAudioWithGemini, cn } from '../utils';
+import { formatTime, cn } from '../utils';
+import { transcriptionService } from '../services/transcriptionService';
+import { useConversations } from '../contexts/ConversationContext';
 import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Database } from 'lucide-react';
 import { Button } from '../components/Button';
 
 interface LibraryProps {
   onOpen: (id: string) => void;
-  onUpload: (conversation: Conversation) => Promise<void>;
-  onDelete: (id: string) => void;
-  conversations: Conversation[];
 }
 
-export const Library: React.FC<LibraryProps> = ({ onOpen, onUpload, onDelete, conversations }) => {
+export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const { conversations, addConversation, deleteConversation } = useConversations();
 
   const handleDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (confirm('Are you sure you want to delete this conversation?')) {
-      onDelete(id);
+      deleteConversation(id);
     }
+  };
+
+  const handleUpload = async (conversation: Conversation) => {
+    await addConversation(conversation);
+    setIsModalOpen(false);
   };
 
   return (
@@ -119,10 +124,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onUpload, onDelete, co
       {isModalOpen && (
         <UploadModal
           onClose={() => setIsModalOpen(false)}
-          onUpload={async (conv) => {
-            await onUpload(conv);
-            setIsModalOpen(false);
-          }}
+          onUpload={handleUpload}
         />
       )}
     </div>
@@ -176,7 +178,7 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
     setErrorMessage(null);
 
     try {
-      const conversation = await processAudioWithGemini(selectedFile);
+      const conversation = await transcriptionService.processAudio(selectedFile);
 
       setUploadState('saving');
       await onUpload(conversation);

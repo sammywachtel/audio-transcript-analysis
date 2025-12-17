@@ -1,0 +1,42 @@
+# Dependencies (will be installed fresh in container)
+node_modules
+
+# Build outputs (will be generated in container)
+dist
+dist-ssr
+
+# Development files
+.docker-dev
+.private_docs
+.git
+.gitignore
+
+# Environment files (secrets should be passed as build args)
+.env
+.env.local
+.env*.local
+
+# IDE and editor files
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+
+# Test and quality files
+coverage
+.coverage
+htmlcov
+.pytest_cache
+.mypy_cache
+quality-reports
+.quality-baseline.json
+
+# Documentation (not needed in production image)
+docs
+*.md
+!README.md
+
+# Logs
+*.log
+npm-debug.log*
