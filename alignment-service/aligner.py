@@ -441,38 +441,35 @@ def find_best_match(
     best_match: Optional[MatchResult] = None
     best_score = 0.0
 
-    # OPTIMIZATION 1: Fewer window sizes (5 instead of 9)
+    # Window sizes to try - balanced between accuracy and speed
+    # Using 6 sizes (down from original 9, but more than aggressive 5)
     window_sizes = sorted(
         set(
             [
                 expected_word_count,
                 max(1, expected_word_count - 1),
                 expected_word_count + 1,
-                max(1, int(expected_word_count * 0.75)),
-                int(expected_word_count * 1.25),
+                max(1, expected_word_count - 2),
+                expected_word_count + 2,
+                max(1, int(expected_word_count * 0.7)),
             ]
         )
     )
 
-    # OPTIMIZATION 2: Early exit threshold - if we find excellent match, stop
-    EARLY_EXIT_THRESHOLD = 0.92
+    # Early exit threshold - stop on excellent match
+    EARLY_EXIT_THRESHOLD = 0.95
 
-    # OPTIMIZATION 3: Coarse search first (stride of 2), then refine
     for window_size in window_sizes:
         if window_size <= 0:
             continue
 
-        # Phase 1: Coarse search with stride
-        stride = 2 if (search_end - search_start) > 30 else 1
-        candidates = []
-
-        for i in range(search_start, search_end - window_size + 1, stride):
+        for i in range(search_start, search_end - window_size + 1):
             window_words = words[i : i + window_size]
             window_text = " ".join(w.word for w in window_words)
 
-            # OPTIMIZATION 4: Fast pre-filter with partial_ratio only
+            # Quick pre-filter - only skip very bad matches
             quick_score = fuzz.partial_ratio(norm_text, normalize_text(window_text))
-            if quick_score < 50:  # Skip obviously bad matches
+            if quick_score < 35:  # Very permissive threshold
                 continue
 
             score = compute_similarity(text, window_text)
@@ -490,35 +487,6 @@ def find_best_match(
                 # Early exit on excellent match
                 if score >= EARLY_EXIT_THRESHOLD:
                     return best_match
-
-            # Track good candidates for refinement
-            if score > 0.5:
-                candidates.append(i)
-
-        # Phase 2: Refine around good candidates (check adjacent positions)
-        if stride > 1 and candidates:
-            for candidate_idx in candidates[:3]:  # Only refine top 3
-                for offset in [-1, 1]:
-                    i = candidate_idx + offset
-                    if i < search_start or i >= search_end - window_size + 1:
-                        continue
-
-                    window_words = words[i : i + window_size]
-                    window_text = " ".join(w.word for w in window_words)
-                    score = compute_similarity(text, window_text)
-
-                    if score > best_score:
-                        best_score = score
-                        best_match = MatchResult(
-                            start_idx=i,
-                            end_idx=i + window_size,
-                            start_ms=int(window_words[0].start * 1000),
-                            end_ms=int(window_words[-1].end * 1000),
-                            confidence=score,
-                        )
-
-                        if score >= EARLY_EXIT_THRESHOLD:
-                            return best_match
 
     return best_match
 
