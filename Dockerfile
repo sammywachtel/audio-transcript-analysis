@@ -25,7 +25,8 @@ ARG VITE_ALIGNMENT_SERVICE_URL
 # Create .env file for Vite's loadEnv() to read
 # vite.config.ts expects GEMINI_API_KEY (without VITE_ prefix)
 RUN echo "GEMINI_API_KEY=${VITE_GEMINI_API_KEY}" > .env && \
-    echo "ALIGNMENT_SERVICE_URL=${VITE_ALIGNMENT_SERVICE_URL}" >> .env
+    echo "ALIGNMENT_SERVICE_URL=${VITE_ALIGNMENT_SERVICE_URL}" >> .env && \
+    echo "=== DEBUG: .env contents ===" && cat .env && echo "=== END DEBUG ==="
 
 # Build the application
 RUN npm run build

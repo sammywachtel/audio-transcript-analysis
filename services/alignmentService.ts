@@ -5,7 +5,18 @@ import { Conversation, Segment } from '../types';
  * Uses process.env which is defined by Vite at build time
  */
 declare const process: { env: { ALIGNMENT_SERVICE_URL?: string } };
-const ALIGNMENT_SERVICE_URL = process.env.ALIGNMENT_SERVICE_URL || 'http://localhost:8080';
+
+// Empty string is falsy in JS, so we need explicit check
+const configuredUrl = process.env.ALIGNMENT_SERVICE_URL;
+const ALIGNMENT_SERVICE_URL = (configuredUrl && configuredUrl.trim() !== '')
+  ? configuredUrl
+  : 'http://localhost:8080';
+
+// Debug logging in production to help diagnose deployment issues
+if (typeof window !== 'undefined') {
+  console.log('[AlignmentService] Configured URL:', ALIGNMENT_SERVICE_URL);
+  console.log('[AlignmentService] Raw env value:', JSON.stringify(process.env.ALIGNMENT_SERVICE_URL));
+}
 
 /**
  * Response from the alignment service
