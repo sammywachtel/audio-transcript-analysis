@@ -1,0 +1,56 @@
+# Local Development Stack
+# Run both frontend and alignment service with a single command
+#
+# Usage:
+#   docker compose up              # Start all services
+#   docker compose up -d           # Start in background
+#   docker compose logs -f         # Follow logs
+#   docker compose down            # Stop all services
+#
+# Prerequisites:
+#   - Copy .env.example to .env.local and fill in your API keys
+#   - REPLICATE_API_TOKEN is required for timestamp alignment
+
+services:
+  # React Frontend (Vite dev server)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: audio-transcript-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_GEMINI_API_KEY=${GEMINI_API_KEY}
+      - VITE_ALIGNMENT_SERVICE_URL=http://localhost:8080
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - alignment-service
+    networks:
+      - app-network
+
+  # WhisperX Alignment Service (FastAPI)
+  alignment-service:
+    build:
+      context: ./alignment-service
+      dockerfile: Dockerfile
+    container_name: audio-transcript-alignment
+    ports:
+      - "8080:8080"
+    environment:
+      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+      - PORT=8080
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

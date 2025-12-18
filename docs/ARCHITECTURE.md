@@ -33,9 +33,17 @@ Components
 
 ```
 /
+├── alignment-service/     # WhisperX timestamp alignment backend
+│   ├── main.py                   # FastAPI endpoints (/align, /health)
+│   ├── aligner.py                # Replicate API + fuzzy matching
+│   ├── Dockerfile                # Python 3.11 container
+│   ├── requirements.txt          # Python dependencies
+│   └── cloudbuild.yaml           # CI/CD config
+│
 ├── services/              # Data layer - external interactions
 │   ├── conversationStorage.ts    # IndexedDB operations
 │   ├── transcriptionService.ts   # Gemini API integration
+│   ├── alignmentService.ts       # WhisperX alignment client
 │   └── index.ts                  # Barrel export
 │
 ├── contexts/              # State management layer
@@ -94,6 +102,46 @@ Components
   - `processAudio(file)` - Process audio file with AI
 
 **Why this matters**: If we switch AI providers (Whisper, AssemblyAI, etc.), only this file changes.
+
+#### `alignmentService.ts`
+- Encapsulates WhisperX alignment via Replicate API
+- Handles audio blob → base64 conversion
+- Sends segments + audio to alignment backend
+- Returns corrected timestamps
+- Provides singleton instance: `alignmentService`
+- Methods:
+  - `align(conversation, audioBlob)` - Get aligned timestamps
+
+**Why this matters**: If we switch alignment providers (local WhisperX, AssemblyAI, etc.), only this file changes.
+
+---
+
+### Alignment Service (Python Backend)
+
+The `alignment-service/` directory contains a FastAPI backend that provides precision timestamp alignment using WhisperX via Replicate API.
+
+**Architecture:**
+```
+Frontend → Alignment Service → Replicate API → WhisperX Model
+```
+
+**Why a separate service?**
+- WhisperX requires significant compute (runs on Replicate's GPUs)
+- Keeps API keys server-side (security)
+- Enables caching and rate limiting
+- Can evolve independently (e.g., switch to self-hosted WhisperX)
+
+**Key files:**
+- `main.py` - FastAPI app with `/align` and `/health` endpoints
+- `aligner.py` - Replicate API integration + fuzzy matching algorithm
+
+**Alignment algorithm:**
+1. Call Replicate WhisperX to get word-level timestamps
+2. For each Gemini segment, fuzzy-match text to word sequence
+3. Use first/last matched word timestamps as segment boundaries
+4. Return aligned segments with confidence scores
+
+See [TIMESTAMP_ALIGNMENT_ARCHITECTURE.md](TIMESTAMP_ALIGNMENT_ARCHITECTURE.md) for details.
 
 ---
 

@@ -45,33 +45,42 @@ function compensateDrift(segments, audioDuration) {
 
 This leverages the existing drift detection code but applies it more aggressively.
 
-### Phase 2: Python Backend with WhisperX (1-2 Week Sprint)
-**Status**: Planned
-**Effort**: 40-60 hours
-**Accuracy Target**: <1 second
+### Phase 2: WhisperX via Replicate API
+**Status**: ✅ Complete
+**Effort**: 14-21 hours
+**Accuracy Target**: <1 second (~50ms with forced alignment)
 
 Architecture:
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  React Client   │────▶│  FastAPI Backend │────▶│  WhisperX GPU   │
-│  (Gemini API)   │◀────│  (Alignment)     │◀────│  Processing     │
+│  React Client   │────▶│  FastAPI Backend │────▶│  Replicate API  │
+│  (Gemini API)   │◀────│  (Cloud Run)     │◀────│  (WhisperX)     │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
-         │                       │
-         │                       ▼
-         │              ┌──────────────────┐
-         └─────────────▶│  Redis Cache     │
-                        └──────────────────┘
 ```
 
-Components:
-1. **FastAPI service** (~400 lines Python)
-2. **WhisperX** for word-level timestamp extraction
-3. **Fuzzy matching** to align Gemini segments to Whisper timestamps
-4. **Redis cache** for processed results (audio processing is expensive)
+**Why WhisperX over OpenAI Whisper API?**
+- OpenAI's API has word-level timestamps but they can still drift on long-form audio
+- WhisperX adds **forced alignment** with wav2vec2 phoneme model
+- Forced alignment matches audio waveforms to phonemes = ~50ms accuracy
 
-Deployment options:
-- Railway/Render: ~$20/month
-- Self-hosted GPU (g4dn.xlarge spot): ~$0.0125/audio hour
+**Implementation:**
+1. **alignment-service/** - FastAPI backend on Cloud Run (no GPU needed)
+   - `main.py` - API endpoints (/align, /health)
+   - `aligner.py` - Replicate API + fuzzy matching logic
+   - `Dockerfile` - Python 3.11 container
+   - `cloudbuild.yaml` - CI/CD config
+
+2. **Frontend integration:**
+   - `services/alignmentService.ts` - API client
+   - "Improve Timestamps" button in ViewerHeader
+   - Status indicators: idle → aligning → aligned/error
+
+3. **Alignment Algorithm:**
+   - Call Replicate WhisperX to get word-level timestamps
+   - Fuzzy-match each Gemini segment to word sequence
+   - Use first/last matched word timestamps as segment boundaries
+
+**Cost:** ~$0.02 per 10-minute audio file
 
 ### Phase 3: Manual Offset Control (Optional)
 **Status**: ✅ Complete
@@ -131,9 +140,85 @@ Rationale:
 - No user-reported sync issues
 - Processing time under 30 seconds for 2-hour files
 
+## Phase 2 Deployment Instructions
+
+### Prerequisites
+1. Google Cloud account with Cloud Run enabled
+2. Replicate account with API token
+
+### Deploy Alignment Service
+
+```bash
+# 1. Set your project ID
+export PROJECT_ID=your-project-id
+
+# 2. Build and push Docker image
+cd alignment-service
+gcloud builds submit --tag gcr.io/$PROJECT_ID/alignment-service
+
+# 3. Deploy to Cloud Run
+gcloud run deploy alignment-service \
+  --image gcr.io/$PROJECT_ID/alignment-service \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars "REPLICATE_API_TOKEN=your-token-here"
+
+# 4. Get the service URL
+gcloud run services describe alignment-service --region us-central1 --format='value(status.url)'
+```
+
+### Configure Frontend
+
+Add to `.env`:
+```
+ALIGNMENT_SERVICE_URL=https://alignment-service-xxxxx.run.app
+```
+
+### Run Locally with Docker
+
+The easiest way to run the full stack locally:
+
+```bash
+# 1. Setup environment
+cp .env.example .env.local
+# Edit .env.local with your API keys
+
+# 2. Start all services
+docker compose up
+
+# Frontend: http://localhost:3000
+# Alignment: http://localhost:8080
+```
+
+### Run Alignment Service Standalone
+
+```bash
+# Option A: With Docker
+docker compose up alignment-service
+
+# Option B: With Python directly
+cd alignment-service
+pip install -r requirements.txt
+REPLICATE_API_TOKEN=your-token python main.py
+
+# Service runs on http://localhost:8080
+```
+
+### Test Alignment Service
+
+```bash
+# Health check
+curl http://localhost:8080/health
+# Expected: {"status":"ok","replicate_configured":true}
+```
+
+See [LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md) for detailed development setup.
+
 ## References
 
 - [WhisperX GitHub](https://github.com/m-bain/whisperX)
+- [Replicate WhisperX](https://replicate.com/victor-upmeet/whisperx)
 - [Montreal Forced Aligner](https://montreal-forced-aligner.readthedocs.io/)
 - [Gentle Forced Aligner](https://github.com/lowerquality/gentle)
 - [stable-ts (Stable Whisper)](https://github.com/jianfch/stable-ts)
