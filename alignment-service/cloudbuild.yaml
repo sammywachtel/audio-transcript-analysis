@@ -1,0 +1,40 @@
+# Cloud Build configuration for Alignment Service
+# Handles Docker build for Python FastAPI service
+# Does NOT include deployment - that's handled by GitHub Actions
+
+steps:
+  # Build the Docker image (context is alignment-service/ directory)
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_IMAGE_NAME}:${_TAG}'
+      - '-t'
+      - '${_IMAGE_NAME}:latest'
+      - '.'
+
+  # Push the tagged image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_IMAGE_NAME}:${_TAG}'
+
+  # Push the latest tag
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_IMAGE_NAME}:latest'
+
+# Images to be pushed (for logging purposes)
+images:
+  - '${_IMAGE_NAME}:${_TAG}'
+  - '${_IMAGE_NAME}:latest'
+
+# Substitution defaults (overridden by gcloud builds submit)
+substitutions:
+  _IMAGE_NAME: ''
+  _TAG: 'latest'
+
+# Build options
+options:
+  logging: CLOUD_LOGGING_ONLY

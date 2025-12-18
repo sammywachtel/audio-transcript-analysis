@@ -10,6 +10,9 @@ import { TranscriptView } from '../components/viewer/TranscriptView';
 import { Sidebar } from '../components/viewer/Sidebar';
 import { AudioPlayer } from '../components/viewer/AudioPlayer';
 import { RenameSpeakerModal } from '../components/viewer/RenameSpeakerModal';
+import { alignmentService, fetchAudioBlob } from '../services/alignmentService';
+
+type AlignmentStatus = 'idle' | 'aligning' | 'aligned' | 'error';
 
 interface ViewerProps {
   onBack: () => void;
@@ -40,6 +43,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
 
   const [conversation, setConversation] = useState(activeConversation);
   const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
+  const [alignmentStatus, setAlignmentStatus] = useState<AlignmentStatus>('idle');
 
   // Audio playback logic (drift correction, play/pause, seeking)
   const {
@@ -136,6 +140,43 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
     }
   }, []);
 
+  /**
+   * Improve timestamps using WhisperX alignment
+   * Calls the alignment service to get precise timestamps from forced alignment
+   */
+  const handleImproveTimestamps = useCallback(async () => {
+    if (!conversation.audioUrl) {
+      console.error('[Alignment] No audio URL available');
+      return;
+    }
+
+    setAlignmentStatus('aligning');
+    console.log('[Alignment] Starting timestamp improvement...');
+
+    try {
+      // Fetch the audio blob from the blob URL
+      const audioBlob = await fetchAudioBlob(conversation.audioUrl);
+      console.log('[Alignment] Audio blob fetched:', audioBlob.size, 'bytes');
+
+      // Call alignment service
+      const alignedConversation = await alignmentService.align(conversation, audioBlob);
+
+      console.log('[Alignment] Alignment complete, updating conversation');
+
+      // Update state and persist
+      setConversation(alignedConversation);
+      updateConversation(alignedConversation);
+      setAlignmentStatus('aligned');
+
+    } catch (error) {
+      console.error('[Alignment] Failed:', error);
+      setAlignmentStatus('error');
+
+      // Reset to idle after showing error briefly
+      setTimeout(() => setAlignmentStatus('idle'), 3000);
+    }
+  }, [conversation, updateConversation]);
+
   return (
     <div className="flex flex-col h-screen bg-slate-50">
       {/* Header */}
@@ -147,6 +188,9 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
         driftCorrectionApplied={driftCorrectionApplied}
         driftRatio={driftRatio}
         driftMs={driftMs}
+        alignmentStatus={alignmentStatus}
+        onImproveTimestamps={handleImproveTimestamps}
+        hasAudio={!!conversation.audioUrl}
       />
 
       {/* Main Content Split */}

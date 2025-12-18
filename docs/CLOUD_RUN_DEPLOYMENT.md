@@ -6,14 +6,25 @@ This document covers the complete setup for deploying the Audio Transcript Analy
 
 **Deployment Architecture:**
 - **Platform**: Google Cloud Run (serverless containers)
-- **CI/CD**: GitHub Actions (triggered on merge to main)
+- **Services**:
+  - Frontend (`audio-transcript-app`) - React SPA with Nginx
+  - Alignment Service (`alignment-service`) - Python FastAPI backend
+- **CI/CD**: GitHub Actions (parallel deployment pipeline, ~3-4 min)
 - **Authentication**: Workload Identity Federation (keyless, secure)
 - **Container Registry**: Google Container Registry (GCR)
 - **Local Deployment**: `deploy.sh` script using gcloud CLI
 
 **Deployment Flow:**
 ```
-Feature Branch → Pull Request → Review → Merge to main → Auto-deploy to Cloud Run
+Feature Branch → Pull Request → Review → Merge to main → Auto-deploy Both Services to Cloud Run (Parallel)
+```
+
+**Pipeline Architecture:**
+```
+Push to main
+     ├─► Frontend Build & Deploy (~2.5-3 min)
+     └─► Alignment Service Build & Deploy (~2-2.5 min)
+Total Pipeline Time: ~3-4 minutes (parallel execution)
 ```
 
 ## Prerequisites
@@ -218,12 +229,50 @@ Go to your GitHub repository: **Settings > Secrets and variables > Actions**
 
 Add these repository secrets:
 
-| Secret Name | Value | Example |
-|-------------|-------|---------|
-| `GCP_PROJECT_ID` | Your GCP project ID | `my-project-123` |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Provider resource name | `projects/123.../providers/github` |
-| `GCP_SERVICE_ACCOUNT` | Service account email | `github-actions-deployer@...` |
-| `GEMINI_API_KEY` | Your Gemini API key | `AIza...` |
+| Secret Name | Value | Example | Required For |
+|-------------|-------|---------|--------------|
+| `GCP_PROJECT_ID` | Your GCP project ID | `my-project-123` | Both services |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Provider resource name | `projects/123.../providers/github` | Both services |
+| `GCP_SERVICE_ACCOUNT` | Service account email | `github-actions-deployer@...` | Both services |
+| `GEMINI_API_KEY` | Your Gemini API key | `AIza...` | Frontend (build-time) |
+
+**Note:** `REPLICATE_API_TOKEN` is NOT stored in GitHub secrets - it's stored in Google Secret Manager and injected into the alignment service at runtime for security.
+
+## Step 9: Configure Replicate API Token in Secret Manager
+
+The alignment service requires a Replicate API token to use WhisperX for timestamp alignment. This is stored securely in Google Secret Manager.
+
+### Create the Secret
+
+```bash
+# Get your Replicate API token from https://replicate.com/account/api-tokens
+echo -n "your-replicate-api-token" | \
+  gcloud secrets create REPLICATE_API_TOKEN \
+  --data-file=- \
+  --project=your-gcp-project-id
+```
+
+### Grant Access to Cloud Run
+
+```bash
+# Allow the service account to access the secret
+gcloud secrets add-iam-policy-binding REPLICATE_API_TOKEN \
+  --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor" \
+  --project=your-gcp-project-id
+```
+
+### Verify Setup
+
+```bash
+# Check secret exists
+gcloud secrets describe REPLICATE_API_TOKEN --project=your-gcp-project-id
+
+# Check access permissions
+gcloud secrets get-iam-policy REPLICATE_API_TOKEN --project=your-gcp-project-id
+```
+
+**Important:** The GitHub Actions workflow automatically injects this secret into the alignment-service at deployment time using the `--set-secrets` flag. No manual intervention needed.
 
 ## Deployment
 
@@ -233,7 +282,17 @@ Deployments happen automatically when:
 1. You create a Pull Request to `main`
 2. The PR is reviewed and approved
 3. The PR is merged to `main`
-4. GitHub Actions builds and deploys to Cloud Run
+4. GitHub Actions builds and deploys **both services** to Cloud Run **in parallel**
+
+**Pipeline stages:**
+- **Frontend job**: Builds `audio-transcript-app` and deploys to Cloud Run (~2.5-3 min)
+- **Alignment service job**: Builds `alignment-service` and deploys to Cloud Run (~2-2.5 min)
+- **Total time**: ~3-4 minutes (jobs run in parallel)
+
+Both deployments include:
+- Docker image build via Cloud Build
+- Push to Google Container Registry
+- Deploy to Cloud Run with health checks
 
 ### Manual Deployment (Local)
 

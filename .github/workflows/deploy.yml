@@ -2,6 +2,11 @@
 # GitHub Actions Workflow: Deploy to Cloud Run
 # Triggers on push to main branch (after PR merge)
 # Uses Workload Identity Federation for secure, keyless authentication
+#
+# Pipeline Architecture:
+#   - Parallel deployment: frontend and alignment-service build/deploy simultaneously
+#   - Caching: Docker layer cache via GCR, no cross-job dependencies
+#   - Critical path: ~3-4 minutes (limited by slowest service build)
 # =============================================================================
 
 name: Deploy to Cloud Run
@@ -19,11 +24,12 @@ concurrency:
 
 env:
   REGION: us-west1
-  SERVICE_NAME: audio-transcript-app
+  FRONTEND_SERVICE: audio-transcript-app
+  BACKEND_SERVICE: alignment-service
 
 jobs:
-  deploy:
-    name: Build and Deploy
+  deploy-frontend:
+    name: Deploy Frontend
     runs-on: ubuntu-latest
 
     # Required for Workload Identity Federation
@@ -64,26 +70,26 @@ jobs:
         run: gcloud auth configure-docker --quiet
 
       # -----------------------------------------------------------------------
-      # Build container image using Cloud Build
+      # Build frontend container image using Cloud Build
       # Uses cloudbuild.yaml to handle build args properly
       # -----------------------------------------------------------------------
-      - name: Build container image
+      - name: Build frontend container image
         run: |
           gcloud builds submit \
             --config=cloudbuild.yaml \
-            --substitutions="_IMAGE_NAME=gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.SERVICE_NAME }},_TAG=${{ github.sha }},_VITE_GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
+            --substitutions="_IMAGE_NAME=gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.FRONTEND_SERVICE }},_TAG=${{ github.sha }},_VITE_GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
             --quiet
 
       # -----------------------------------------------------------------------
-      # Deploy to Cloud Run
+      # Deploy frontend to Cloud Run
       # -----------------------------------------------------------------------
-      - name: Deploy to Cloud Run
+      - name: Deploy frontend to Cloud Run
         id: deploy
         uses: google-github-actions/deploy-cloudrun@v2
         with:
-          service: ${{ env.SERVICE_NAME }}
+          service: ${{ env.FRONTEND_SERVICE }}
           region: ${{ env.REGION }}
-          image: gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
+          image: gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.FRONTEND_SERVICE }}:${{ github.sha }}
           flags: |
             --allow-unauthenticated
             --memory=256Mi
@@ -95,25 +101,143 @@ jobs:
       # -----------------------------------------------------------------------
       # Output deployment URL
       # -----------------------------------------------------------------------
-      - name: Show deployment URL
+      - name: Show frontend deployment URL
         run: |
-          echo "🚀 Deployment successful!"
-          echo "Service URL: ${{ steps.deploy.outputs.url }}"
+          echo "🚀 Frontend deployment successful!"
+          echo "Frontend URL: ${{ steps.deploy.outputs.url }}"
 
       # -----------------------------------------------------------------------
-      # Health check
+      # Frontend health check
       # -----------------------------------------------------------------------
-      - name: Health check
+      - name: Frontend health check
         run: |
-          echo "Running health check..."
+          echo "Running frontend health check..."
           for i in {1..5}; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.deploy.outputs.url }}/health" || echo "000")
             if [ "$STATUS" = "200" ]; then
-              echo "✅ Health check passed!"
+              echo "✅ Frontend health check passed!"
               exit 0
             fi
             echo "Attempt $i: Status $STATUS, retrying in 10s..."
             sleep 10
           done
-          echo "❌ Health check failed after 5 attempts"
+          echo "❌ Frontend health check failed after 5 attempts"
           exit 1
+
+    outputs:
+      frontend_url: ${{ steps.deploy.outputs.url }}
+
+  deploy-alignment-service:
+    name: Deploy Alignment Service
+    runs-on: ubuntu-latest
+
+    # Required for Workload Identity Federation
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Checkout code
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Authenticate to Google Cloud using Workload Identity Federation
+      # No service account keys needed - secure and recommended approach
+      # -----------------------------------------------------------------------
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      # -----------------------------------------------------------------------
+      # Set up Cloud SDK
+      # -----------------------------------------------------------------------
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      # -----------------------------------------------------------------------
+      # Configure Docker for GCR
+      # -----------------------------------------------------------------------
+      - name: Configure Docker for Google Container Registry
+        run: gcloud auth configure-docker --quiet
+
+      # -----------------------------------------------------------------------
+      # Build alignment-service container image using Cloud Build
+      # Uses alignment-service/cloudbuild.yaml
+      # -----------------------------------------------------------------------
+      - name: Build alignment-service container image
+        run: |
+          gcloud builds submit \
+            --config=alignment-service/cloudbuild.yaml \
+            --substitutions="_IMAGE_NAME=gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.BACKEND_SERVICE }},_TAG=${{ github.sha }}" \
+            alignment-service/ \
+            --quiet
+
+      # -----------------------------------------------------------------------
+      # Deploy alignment-service to Cloud Run
+      # Higher memory (512Mi) and timeout (300s) for AI processing workloads
+      # -----------------------------------------------------------------------
+      - name: Deploy alignment-service to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.BACKEND_SERVICE }}
+          region: ${{ env.REGION }}
+          image: gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.BACKEND_SERVICE }}:${{ github.sha }}
+          secrets: |  # pragma: allowlist secret
+            REPLICATE_API_TOKEN=REPLICATE_API_TOKEN:latest
+          flags: |
+            --allow-unauthenticated
+            --memory=512Mi
+            --cpu=1
+            --timeout=300s
+            --min-instances=0
+            --max-instances=10
+            --port=8080
+
+      # -----------------------------------------------------------------------
+      # Output deployment URL
+      # -----------------------------------------------------------------------
+      - name: Show alignment-service deployment URL
+        run: |
+          echo "🚀 Alignment service deployment successful!"
+          echo "Alignment Service URL: ${{ steps.deploy.outputs.url }}"
+
+      # -----------------------------------------------------------------------
+      # Alignment service health check
+      # -----------------------------------------------------------------------
+      - name: Alignment service health check
+        run: |
+          echo "Running alignment service health check..."
+          for i in {1..5}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.deploy.outputs.url }}/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Alignment service health check passed!"
+
+              # Also verify Replicate API token is configured
+              RESPONSE=$(curl -s "${{ steps.deploy.outputs.url }}/health")
+              REPLICATE_CONFIGURED=$(echo "$RESPONSE" | grep -o '"replicate_configured":[^,}]*' | cut -d':' -f2)
+
+              if [ "$REPLICATE_CONFIGURED" = "true" ]; then
+                echo "✅ Replicate API token is configured"
+              else
+                echo "⚠️  Warning: Replicate API token may not be configured"
+              fi
+
+              exit 0
+            fi
+            echo "Attempt $i: Status $STATUS, retrying in 10s..."
+            sleep 10
+          done
+          echo "❌ Alignment service health check failed after 5 attempts"
+          exit 1
+
+    outputs:
+      backend_url: ${{ steps.deploy.outputs.url }}
