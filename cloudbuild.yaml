@@ -8,6 +8,8 @@ steps:
       - 'build'
       - '--build-arg'
       - 'VITE_GEMINI_API_KEY=${_VITE_GEMINI_API_KEY}'
+      - '--build-arg'
+      - 'VITE_ALIGNMENT_SERVICE_URL=${_VITE_ALIGNMENT_SERVICE_URL}'
       - '-t'
       - '${_IMAGE_NAME}:${_TAG}'
       - '-t'
@@ -34,6 +36,7 @@ images:
 # Substitution defaults (overridden by gcloud builds submit)
 substitutions:
   _VITE_GEMINI_API_KEY: ''
+  _VITE_ALIGNMENT_SERVICE_URL: ''
   _IMAGE_NAME: ''
   _TAG: 'latest'
 

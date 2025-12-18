@@ -18,12 +18,14 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Build argument for Gemini API key (injected at build time)
+# Build arguments (injected at build time)
 ARG VITE_GEMINI_API_KEY
+ARG VITE_ALIGNMENT_SERVICE_URL
 
 # Create .env file for Vite's loadEnv() to read
 # vite.config.ts expects GEMINI_API_KEY (without VITE_ prefix)
-RUN echo "GEMINI_API_KEY=${VITE_GEMINI_API_KEY}" > .env
+RUN echo "GEMINI_API_KEY=${VITE_GEMINI_API_KEY}" > .env && \
+    echo "ALIGNMENT_SERVICE_URL=${VITE_ALIGNMENT_SERVICE_URL}" >> .env
 
 # Build the application
 RUN npm run build
