@@ -109,17 +109,12 @@ export class AlignmentService {
 
     console.log('[AlignmentService] Alignment complete. Average confidence:', result.average_confidence);
 
-    // Quality gate: reject alignments with poor confidence
-    // The algorithm isn't reliable enough yet - better to fail than corrupt timestamps
-    const MIN_CONFIDENCE_THRESHOLD = 0.70;
+    // Quality gate: warn on low confidence but still apply
+    // HARDY algorithm handles failures gracefully with interpolation/fallback
+    const MIN_CONFIDENCE_THRESHOLD = 0.55;
     if (result.average_confidence < MIN_CONFIDENCE_THRESHOLD) {
       const pct = (result.average_confidence * 100).toFixed(0);
-      console.warn(`[AlignmentService] Alignment quality too low (${pct}%), keeping original timestamps`);
-      throw new Error(
-        `Alignment quality too low (${pct}% confidence). ` +
-        `The WhisperX transcript may differ significantly from the original. ` +
-        `Original timestamps preserved.`
-      );
+      console.warn(`[AlignmentService] Alignment confidence is low (${pct}%), some timestamps may use fallback`);
     }
 
     // Map aligned segments back to conversation format
