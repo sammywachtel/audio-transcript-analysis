@@ -545,11 +545,27 @@ def align_region(
             current_word_idx = match.end_idx
             matched_count += 1
         else:
-            # Fallback: interpolate within region
-            progress = i / max(segment_count, 1)
-            interp_start = region.time_start_ms + int(progress * region_duration)
-            interp_end = interp_start + (segment.end_ms - segment.start_ms)
+            # Fallback: interpolate evenly within region bounds
+            # DON'T use original Gemini durations - they're broken!
+            # Instead, distribute segments proportionally by word count
+            total_words_in_region = sum(len(s.text.split()) for s in region.segments)
+            words_before = sum(len(region.segments[j].text.split()) for j in range(i))
+            segment_words = len(segment.text.split())
+
+            # Calculate start/end based on word proportion within region
+            if total_words_in_region > 0:
+                start_ratio = words_before / total_words_in_region
+                end_ratio = (words_before + segment_words) / total_words_in_region
+            else:
+                start_ratio = i / max(segment_count, 1)
+                end_ratio = (i + 1) / max(segment_count, 1)
+
+            interp_start = region.time_start_ms + int(start_ratio * region_duration)
+            interp_end = region.time_start_ms + int(end_ratio * region_duration)
+
+            # Ensure we stay within region bounds
             interp_end = min(interp_end, region.time_end_ms)
+            interp_start = min(interp_start, interp_end - 50)  # Min 50ms duration
 
             aligned.append(
                 AlignedSegment(
@@ -581,7 +597,9 @@ def align_region(
 
 
 def validate_and_fix_alignment(
-    aligned: List[AlignedSegment], original_segments: List[Segment]
+    aligned: List[AlignedSegment],
+    original_segments: List[Segment],
+    audio_duration_ms: int = 0,
 ) -> List[AlignedSegment]:
     """
     Validate aligned segments and fix issues.
@@ -590,6 +608,7 @@ def validate_and_fix_alignment(
     1. Temporal monotonicity (times must increase)
     2. Duration sanity (reasonable ms per word)
     3. No gaps larger than reasonable
+    4. No timestamps exceeding audio duration (THE CLOUD BUG)
     """
     if not aligned:
         return aligned
@@ -643,6 +662,50 @@ def validate_and_fix_alignment(
             )
 
         fixed.append(seg)
+
+    # === CRITICAL FIX: Cap timestamps at audio duration ===
+    # This prevents the cloud bug where alignment produces timestamps
+    # longer than the actual audio (e.g., 690s timestamps for 596s audio)
+    if audio_duration_ms > 0 and fixed:
+        last_end = fixed[-1].end_ms
+        if last_end > audio_duration_ms:
+            overflow_ms = last_end - audio_duration_ms
+            logger.warning(
+                f"Timestamps exceed audio duration by {overflow_ms}ms "
+                f"({overflow_ms/1000:.1f}s). Applying proportional scaling."
+            )
+
+            # Find where timestamps start exceeding duration
+            # Scale all segments proportionally to fit within audio
+            scale_factor = audio_duration_ms / last_end
+            logger.info(f"Scaling all timestamps by {scale_factor:.4f}")
+
+            fixed = [
+                AlignedSegment(
+                    speaker_id=seg.speaker_id,
+                    text=seg.text,
+                    start_ms=int(seg.start_ms * scale_factor),
+                    end_ms=int(seg.end_ms * scale_factor),
+                    confidence=seg.confidence * 0.8,  # Penalize for needing scaling
+                    method=(
+                        seg.method + "_scaled"
+                        if "_scaled" not in seg.method
+                        else seg.method
+                    ),
+                )
+                for seg in fixed
+            ]
+
+            # Final sanity check - ensure last segment doesn't exceed duration
+            if fixed[-1].end_ms > audio_duration_ms:
+                fixed[-1] = AlignedSegment(
+                    speaker_id=fixed[-1].speaker_id,
+                    text=fixed[-1].text,
+                    start_ms=fixed[-1].start_ms,
+                    end_ms=audio_duration_ms,
+                    confidence=fixed[-1].confidence,
+                    method=fixed[-1].method,
+                )
 
     return fixed
 
@@ -722,8 +785,8 @@ def align_segments_hardy(
                 method="original",
             )
 
-    # Level 4: Validate and fix
-    aligned_final = validate_and_fix_alignment(aligned_all, segments)
+    # Level 4: Validate and fix (now with audio duration to prevent overflow)
+    aligned_final = validate_and_fix_alignment(aligned_all, segments, audio_duration_ms)
 
     # Log statistics
     methods = {}
