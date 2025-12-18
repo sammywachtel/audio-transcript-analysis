@@ -104,28 +104,44 @@ This maps the Secret Manager secret `REPLICATE_API_TOKEN` to environment variabl
 
 ## Setup Instructions
 
-### One-Time Setup (New Secrets)
+### One-Time Setup (Prerequisites & Secrets)
 
-1. **Create Replicate API token secret:**
+1. **Enable Secret Manager API** (required before creating secrets):
 ```bash
+gcloud services enable secretmanager.googleapis.com --project=your-gcp-project-id
+```
+
+2. **Create Replicate API token secret:**
+```bash
+# Get your token from https://replicate.com/account/api-tokens
 echo -n "your-replicate-api-token" | \
   gcloud secrets create REPLICATE_API_TOKEN \
   --data-file=- \
   --project=your-gcp-project-id
 ```
 
-2. **Grant service account access:**
+3. **Grant Cloud Run access to the secret:**
 ```bash
+# Cloud Run uses the Compute Engine service account at runtime
+# Replace PROJECT_NUMBER with your GCP project number
 gcloud secrets add-iam-policy-binding REPLICATE_API_TOKEN \
-  --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
+  --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
   --role="roles/secretmanager.secretAccessor" \
   --project=your-gcp-project-id
 ```
 
-3. **Verify setup:**
+> **Tip**: Get your project number with:
+> ```bash
+> gcloud projects describe your-gcp-project-id --format='value(projectNumber)'
+> ```
+
+4. **Verify setup:**
 ```bash
 # Check secret exists
-gcloud secrets describe REPLICATE_API_TOKEN
+gcloud secrets describe REPLICATE_API_TOKEN --project=your-gcp-project-id
+
+# Check access permissions
+gcloud secrets get-iam-policy REPLICATE_API_TOKEN --project=your-gcp-project-id
 
 # Test alignment service health (after deployment)
 curl https://your-alignment-service.run.app/health
@@ -214,6 +230,22 @@ The **critical path** is the longest sequence of dependent tasks. In our paralle
 
 ## Troubleshooting
 
+### Alignment Service Deploy Fails: "Secret Manager API has not been used"
+
+**Error:**
+```
+ERROR: (gcloud.run.deploy) Secret Manager API has not been used in project before or it is disabled.
+```
+
+**Solution:**
+```bash
+# Enable the API
+gcloud services enable secretmanager.googleapis.com --project=your-gcp-project-id
+
+# Wait 1-2 minutes, then re-run the workflow
+gh run rerun <run-id>
+```
+
 ### Alignment Service Deploy Fails: "Secret not found"
 
 **Error:**
@@ -224,21 +256,25 @@ ERROR: (gcloud.run.deploy) INVALID_ARGUMENT: Secret "REPLICATE_API_TOKEN" not fo
 **Solution:**
 ```bash
 # Check secret exists
-gcloud secrets describe REPLICATE_API_TOKEN
+gcloud secrets describe REPLICATE_API_TOKEN --project=your-gcp-project-id
 
 # If not, create it
-echo -n "your-token" | gcloud secrets create REPLICATE_API_TOKEN --data-file=-
+echo -n "your-token" | gcloud secrets create REPLICATE_API_TOKEN \
+  --data-file=- --project=your-gcp-project-id
 ```
 
 ### Health Check Shows `"replicate_configured": false`
 
-**Cause:** Secret exists but service account can't access it.
+**Cause:** Secret exists but Cloud Run service account can't access it.
 
 **Solution:**
 ```bash
+# Grant Compute Engine service account access (used by Cloud Run at runtime)
+# Replace PROJECT_NUMBER with your GCP project number
 gcloud secrets add-iam-policy-binding REPLICATE_API_TOKEN \
-  --member="serviceAccount:SA_EMAIL" \
-  --role="roles/secretmanager.secretAccessor"
+  --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor" \
+  --project=your-gcp-project-id
 ```
 
 ### Both Jobs Fail: "Workload Identity authentication error"

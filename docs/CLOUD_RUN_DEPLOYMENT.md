@@ -56,6 +56,7 @@ gcloud services enable \
   run.googleapis.com \
   artifactregistry.googleapis.com \
   cloudbuild.googleapis.com \
+  secretmanager.googleapis.com \
   --project=your-gcp-project-id
 ```
 
@@ -66,6 +67,7 @@ gcloud services enable cloudbuild.googleapis.com --project=your-gcp-project-id
 gcloud services enable run.googleapis.com --project=your-gcp-project-id
 gcloud services enable iamcredentials.googleapis.com --project=your-gcp-project-id
 gcloud services enable artifactregistry.googleapis.com --project=your-gcp-project-id
+gcloud services enable secretmanager.googleapis.com --project=your-gcp-project-id
 ```
 
 Console links (alternative):
@@ -73,6 +75,7 @@ Console links (alternative):
 - [Cloud Run API](https://console.developers.google.com/apis/api/run.googleapis.com/overview)
 - [IAM Credentials API](https://console.developers.google.com/apis/api/iamcredentials.googleapis.com/overview)
 - [Artifact Registry API](https://console.developers.google.com/apis/api/artifactregistry.googleapis.com/overview)
+- [Secret Manager API](https://console.developers.google.com/apis/api/secretmanager.googleapis.com/overview)
 
 ## Step 2: Create Workload Identity Pool
 
@@ -242,6 +245,11 @@ Add these repository secrets:
 
 The alignment service requires a Replicate API token to use WhisperX for timestamp alignment. This is stored securely in Google Secret Manager.
 
+> **Prerequisite**: Secret Manager API must be enabled (included in Step 1). If you skipped it:
+> ```bash
+> gcloud services enable secretmanager.googleapis.com --project=your-gcp-project-id
+> ```
+
 ### Create the Secret
 
 ```bash
@@ -254,13 +262,18 @@ echo -n "your-replicate-api-token" | \
 
 ### Grant Access to Cloud Run
 
+Cloud Run uses the default Compute Engine service account to access secrets at runtime:
+
 ```bash
-# Allow the service account to access the secret
+# Grant the Compute Engine service account access to the secret
+# Replace PROJECT_NUMBER with your GCP project number (found in Project Settings)
 gcloud secrets add-iam-policy-binding REPLICATE_API_TOKEN \
-  --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
+  --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
   --role="roles/secretmanager.secretAccessor" \
   --project=your-gcp-project-id
 ```
+
+> **Note**: The project number (e.g., `477045828994`) is different from the project ID. Find it in GCP Console > Project Settings or run `gcloud projects describe your-gcp-project-id --format='value(projectNumber)'`
 
 ### Verify Setup
 
@@ -272,7 +285,7 @@ gcloud secrets describe REPLICATE_API_TOKEN --project=your-gcp-project-id
 gcloud secrets get-iam-policy REPLICATE_API_TOKEN --project=your-gcp-project-id
 ```
 
-**Important:** The GitHub Actions workflow automatically injects this secret into the alignment-service at deployment time using the `--set-secrets` flag. No manual intervention needed.
+**Important:** The GitHub Actions workflow automatically injects this secret into the alignment-service at deployment time using the `--set-secrets` flag. No manual intervention needed after initial setup.
 
 ## Deployment
 
@@ -382,6 +395,20 @@ The service account exists but Workload Identity can't impersonate it:
 2. Verify attribute mappings are correct in the Workload Identity provider
 3. Ensure `id-token: write` permission is set in the workflow
 4. Check the attribute condition in the provider matches your repo exactly (case-sensitive)
+
+### "Secret Manager API has not been used in project" (PERMISSION_DENIED)
+
+The alignment service deployment requires Secret Manager API:
+
+1. Enable the API via CLI:
+   ```bash
+   gcloud services enable secretmanager.googleapis.com --project=your-gcp-project-id
+   ```
+2. Or enable via console: [Secret Manager API](https://console.developers.google.com/apis/api/secretmanager.googleapis.com/overview)
+3. Wait 1-2 minutes for the API to propagate, then re-run the workflow:
+   ```bash
+   gh run rerun <run-id>
+   ```
 
 ### "Cloud Build API has not been used in project" (PERMISSION_DENIED)
 
