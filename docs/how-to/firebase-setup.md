@@ -175,7 +175,8 @@ The service account needs these roles in [Google Cloud IAM](https://console.clou
 | **Cloud Datastore User** | Read/write Firestore data |
 | **Storage Admin** | Manage Firebase Storage |
 | **Firebase Admin** | Access Firebase Extensions API (required for deployments) |
-| **Secret Manager Secret Accessor** | Access secrets (GEMINI_API_KEY) during function deployment |
+| **Secret Manager Viewer** | Check if secrets exist during deployment |
+| **Secret Manager Secret Accessor** | Read secret values during function deployment |
 
 Via CLI:
 
@@ -206,6 +207,10 @@ gcloud projects add-iam-policy-binding $PROJECT \
 gcloud projects add-iam-policy-binding $PROJECT \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/firebase.admin"
+
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="serviceAccount:$SA_EMAIL" \
+  --role="roles/secretmanager.viewer"
 
 gcloud projects add-iam-policy-binding $PROJECT \
   --member="serviceAccount:$SA_EMAIL" \
@@ -267,10 +272,11 @@ npx firebase deploy --only firestore:rules
 
 ### "secretmanager.secrets.get" permission denied for GEMINI_API_KEY
 
-**Cause**: One of three issues:
+**Cause**: One of these issues:
 1. The secret doesn't exist
-2. The deployment service account (`firebase-adminsdk-*`) is missing Secret Accessor role
-3. The **runtime** service account (`your-project-id@appspot.gserviceaccount.com`) is missing Secret Accessor role
+2. The deployment service account is missing **Secret Manager Viewer** role (needed to check if secrets exist)
+3. The deployment service account is missing **Secret Manager Secret Accessor** role (needed to read values)
+4. The **runtime** service account (`your-project-id@appspot.gserviceaccount.com`) is missing Secret Accessor role
 
 **Solution**:
 
@@ -281,28 +287,35 @@ npx firebase deploy --only firestore:rules
    npx firebase functions:secrets:set GEMINI_API_KEY
    ```
 
-2. **Grant secret access to BOTH service accounts**:
+2. **Grant roles to the deployment service account**:
    ```bash
-   # Deployment service account
+   # Viewer role (check if secrets exist)
+   gcloud projects add-iam-policy-binding your-project-id \
+     --member="serviceAccount:firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com" \
+     --role="roles/secretmanager.viewer"
+
+   # Accessor role (read secret values)
    gcloud projects add-iam-policy-binding your-project-id \
      --member="serviceAccount:firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com" \
      --role="roles/secretmanager.secretAccessor"
+   ```
 
-   # Runtime service account (App Engine default - required!)
+3. **Grant accessor role to the runtime service account**:
+   ```bash
    gcloud projects add-iam-policy-binding your-project-id \
      --member="serviceAccount:your-project-id@appspot.gserviceaccount.com" \
      --role="roles/secretmanager.secretAccessor"
    ```
 
-3. **Verify both have the role**:
+4. **Verify roles are assigned**:
    ```bash
    gcloud projects get-iam-policy your-project-id \
      --flatten="bindings[].members" \
-     --filter="bindings.role:secretmanager.secretAccessor" \
-     --format="table(bindings.members)"
+     --filter="bindings.role:secretmanager" \
+     --format="table(bindings.role, bindings.members)"
    ```
 
-> **Note**: Firebase validates secret access for the **runtime** service account during deployment. Even if your deployment SA has access, the function's runtime SA also needs it.
+> **Note**: Firebase CLI needs **Viewer** to check secret metadata and **Accessor** to read values. The runtime SA only needs Accessor since it just reads values at function execution time.
 
 ## Verification
 
