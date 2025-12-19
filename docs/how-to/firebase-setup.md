@@ -36,6 +36,7 @@ Enable each API by clicking the links below:
 | **Cloud Run** | Cloud Functions v2 runtime + frontend hosting | [Enable](https://console.cloud.google.com/apis/library/run.googleapis.com) |
 | **IAM Credentials** | Workload Identity | [Enable](https://console.cloud.google.com/apis/library/iamcredentials.googleapis.com) |
 | **Eventarc** | Cloud Functions v2 event triggers | [Enable](https://console.cloud.google.com/apis/library/eventarc.googleapis.com) |
+| **Cloud Billing** | Verify project billing status | [Enable](https://console.cloud.google.com/apis/library/cloudbilling.googleapis.com) |
 | **Firebase Extensions** | Firebase deployment features | [Enable](https://console.cloud.google.com/apis/library/firebaseextensions.googleapis.com) |
 
 ### Via CLI
@@ -52,6 +53,7 @@ gcloud services enable \
   run.googleapis.com \
   iamcredentials.googleapis.com \
   eventarc.googleapis.com \
+  cloudbilling.googleapis.com \
   firebaseextensions.googleapis.com \
   --project=$PROJECT_ID
 ```
