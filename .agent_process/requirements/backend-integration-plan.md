@@ -722,7 +722,31 @@ These steps must be done once per environment and cannot be fully automated:
    - Download the JSON file
    - Add as GitHub Secret: `FIREBASE_SERVICE_ACCOUNT`  <!-- pragma: allowlist secret -->
 
-5. **Add GitHub Secrets**
+5. **Configure Service Account IAM Roles**
+
+   The service account needs these roles in Google Cloud IAM:
+   - Go to: https://console.cloud.google.com/iam-admin/iam?project=audio-transcript-app-67465
+   - Find the service account (email ends in `@audio-transcript-app-67465.iam.gserviceaccount.com`)
+   - Click Edit (pencil icon) and add these roles:
+     - **Firebase Rules Admin** - Deploy Firestore and Storage security rules
+     - **Cloud Functions Admin** - Deploy Cloud Functions
+     - **Service Account User** - Allow functions to run as service account
+     - **Cloud Datastore User** - Read/write Firestore data
+     - **Storage Admin** - Manage Firebase Storage
+
+   Or via CLI:
+   ```bash
+   SA_EMAIL="firebase-adminsdk-xxxxx@audio-transcript-app-67465.iam.gserviceaccount.com"
+   PROJECT="audio-transcript-app-67465"
+
+   gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/firebaserules.admin"
+   gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/cloudfunctions.admin"
+   gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/iam.serviceAccountUser"
+   gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/datastore.user"
+   gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/storage.admin"
+   ```
+
+6. **Add GitHub Secrets**
    - `FIREBASE_SERVICE_ACCOUNT`: Service account JSON key (for deployment)
    - `GEMINI_API_KEY`: Gemini API key (already set via Firebase secrets)
 
