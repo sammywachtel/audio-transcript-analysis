@@ -1,0 +1,132 @@
+# =============================================================================
+# Firebase Deployment Workflow
+#
+# Deploys Firebase components (Firestore rules, Storage rules, Cloud Functions)
+# to the production Firebase project.
+#
+# Triggers:
+#   - Push to main branch (auto-deploy)
+#   - Manual dispatch (for ad-hoc deployments)
+#
+# Required Secrets:
+#   - FIREBASE_SERVICE_ACCOUNT: JSON key for Firebase service account
+#   - GEMINI_API_KEY: API key for Gemini (set via firebase functions:secrets:set)
+# =============================================================================
+
+name: Firebase Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      # Only deploy when Firebase-related files change
+      - 'functions/**'
+      - 'firestore.rules'
+      - 'firestore.indexes.json'
+      - 'storage.rules'
+      - 'firebase.json'
+      - '.github/workflows/firebase-deploy.yml'
+
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: 'What to deploy'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - rules-only
+          - functions-only
+
+env:
+  FIREBASE_PROJECT_ID: audio-transcript-app-67465
+
+jobs:
+  deploy:
+    name: Deploy to Firebase
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Authenticate with Firebase
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          echo "$FIREBASE_SERVICE_ACCOUNT" > /tmp/firebase-sa.json
+          export GOOGLE_APPLICATION_CREDENTIALS="/tmp/firebase-sa.json"
+          firebase use ${{ env.FIREBASE_PROJECT_ID }}
+
+      # Build Cloud Functions (only if deploying functions)
+      - name: Install Functions dependencies
+        if: github.event.inputs.deploy_target != 'rules-only'
+        working-directory: functions
+        run: npm ci
+
+      - name: Build Cloud Functions
+        if: github.event.inputs.deploy_target != 'rules-only'
+        working-directory: functions
+        run: npm run build
+
+      - name: Lint Cloud Functions
+        if: github.event.inputs.deploy_target != 'rules-only'
+        working-directory: functions
+        run: npm run lint || true  # Don't fail on lint warnings
+
+      # Deploy based on target
+      - name: Deploy All (rules + functions)
+        if: github.event.inputs.deploy_target == 'all' || github.event.inputs.deploy_target == ''
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/firebase-sa.json
+        run: |
+          firebase deploy --only firestore:rules,firestore:indexes,storage,functions --force
+
+      - name: Deploy Rules Only
+        if: github.event.inputs.deploy_target == 'rules-only'
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/firebase-sa.json
+        run: |
+          firebase deploy --only firestore:rules,firestore:indexes,storage --force
+
+      - name: Deploy Functions Only
+        if: github.event.inputs.deploy_target == 'functions-only'
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/firebase-sa.json
+        run: |
+          firebase deploy --only functions --force
+
+      # Cleanup
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f /tmp/firebase-sa.json
+
+      - name: Deployment Summary
+        run: |
+          echo "## Firebase Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Project:** ${{ env.FIREBASE_PROJECT_ID }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Target:** ${{ github.event.inputs.deploy_target || 'all' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployed Components" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ github.event.inputs.deploy_target }}" != "functions-only" ]]; then
+            echo "- Firestore Security Rules" >> $GITHUB_STEP_SUMMARY
+            echo "- Firestore Indexes" >> $GITHUB_STEP_SUMMARY
+            echo "- Storage Security Rules" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [[ "${{ github.event.inputs.deploy_target }}" != "rules-only" ]]; then
+            echo "- Cloud Functions" >> $GITHUB_STEP_SUMMARY
+          fi
