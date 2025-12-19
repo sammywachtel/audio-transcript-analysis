@@ -168,6 +168,7 @@ The service account needs these roles in [Google Cloud IAM](https://console.clou
 | **Cloud Datastore User** | Read/write Firestore data |
 | **Storage Admin** | Manage Firebase Storage |
 | **Firebase Admin** | Access Firebase Extensions API (required for deployments) |
+| **Secret Manager Secret Accessor** | Read secrets (like GEMINI_API_KEY) during deployment |
 
 Via CLI:
 
@@ -198,6 +199,10 @@ gcloud projects add-iam-policy-binding $PROJECT \
 gcloud projects add-iam-policy-binding $PROJECT \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/firebase.admin"
+
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="serviceAccount:$SA_EMAIL" \
+  --role="roles/secretmanager.secretAccessor"
 ```
 
 ### 3. Add GitHub Secrets

@@ -753,6 +753,8 @@ These steps must be done once per environment and cannot be fully automated:
      - **Service Account User** - Allow functions to run as service account
      - **Cloud Datastore User** - Read/write Firestore data
      - **Storage Admin** - Manage Firebase Storage
+     - **Firebase Admin** - Access Firebase Extensions API
+     - **Secret Manager Secret Accessor** - Read secrets during deployment
 
    Or via CLI:
    ```bash
@@ -764,6 +766,8 @@ These steps must be done once per environment and cannot be fully automated:
    gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/iam.serviceAccountUser"
    gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/datastore.user"
    gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/storage.admin"
+   gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/firebase.admin"
+   gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/secretmanager.secretAccessor"
    ```
 
 7. **Add GitHub Secrets**
