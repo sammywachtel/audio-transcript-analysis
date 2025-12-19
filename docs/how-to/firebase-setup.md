@@ -114,6 +114,8 @@ VITE_FIREBASE_APP_ID=1:123456789012:web:abc123
 
 ## Step 8: Set Gemini API Secret
 
+> **Important**: This step MUST be completed before CI/CD deployments will work. The secret must exist before GitHub Actions can deploy functions that use it.
+
 The Gemini API key is stored securely in Firebase Secrets (not in client code):
 
 ```bash
@@ -128,6 +130,11 @@ npx firebase functions:secrets:set GEMINI_API_KEY
 ```
 
 Get a Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey).
+
+**Verify the secret was created:**
+```bash
+npx firebase functions:secrets:access GEMINI_API_KEY
+```
 
 ## Step 9: Deploy Security Rules
 
@@ -168,7 +175,7 @@ The service account needs these roles in [Google Cloud IAM](https://console.clou
 | **Cloud Datastore User** | Read/write Firestore data |
 | **Storage Admin** | Manage Firebase Storage |
 | **Firebase Admin** | Access Firebase Extensions API (required for deployments) |
-| **Secret Manager Secret Accessor** | Read secrets (like GEMINI_API_KEY) during deployment |
+| **Secret Manager Secret Accessor** | Access secrets (GEMINI_API_KEY) during function deployment |
 
 Via CLI:
 
@@ -241,6 +248,24 @@ npx firebase deploy --only firestore:rules
 **Cause**: Cloud Functions or Cloud Build API not enabled.
 
 **Solution**: Enable both APIs via console or CLI (Step 2).
+
+### "secretmanager.secrets.get" permission denied for GEMINI_API_KEY
+
+**Cause**: Either the secret doesn't exist OR the service account is missing the Secret Accessor role.
+
+**Solution**:
+
+1. **First, ensure the secret exists** (run locally):
+   ```bash
+   npx firebase login
+   npx firebase use your-project-id
+   npx firebase functions:secrets:set GEMINI_API_KEY
+   ```
+
+2. **Then, verify the service account has the role**:
+   Add `Secret Manager Secret Accessor` role to the service account in [Google Cloud IAM](https://console.cloud.google.com/iam-admin/iam).
+
+> **Note**: The error message "(or it may not exist)" usually means the secret was never created. Step 8 must be completed locally before CI/CD will work.
 
 ## Verification
 
