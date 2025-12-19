@@ -4,77 +4,110 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Audio Transcript Analysis App - A React application that transforms audio recordings into interactive, navigable transcripts with AI-powered analysis. Uses Google's Gemini API for transcription, speaker diarization, term extraction, topic segmentation, and person detection.
+Audio Transcript Analysis App - A React application that transforms audio recordings into interactive, navigable transcripts with AI-powered analysis. Uses Google's Gemini API (server-side) for transcription, speaker diarization, term extraction, topic segmentation, and person detection.
 
-**Current Status:** Local prototype using IndexedDB for persistence and client-side Gemini API calls (no backend/auth).
+**Current Status:** Production-ready with Firebase backend (Firestore, Storage, Cloud Functions, Auth).
 
 ## Commands
 
 ```bash
-npm install        # Install dependencies
-npm run dev        # Start dev server on http://localhost:3000
-npm run build      # Production build
-npm run preview    # Preview production build
+npm install              # Install frontend dependencies
+npm run dev              # Start dev server on http://localhost:3000
+npm run build            # Production build
+npm run test             # Run tests in watch mode
+npm run test:run         # Run tests once (CI)
+npx firebase deploy      # Deploy to Firebase
 ```
 
 ## Architecture
 
 ### Core Data Flow
-1. User uploads audio file via Library page
-2. `processAudioWithGemini()` in `utils.ts` sends audio to Gemini 2.5 Flash with structured output schema
-3. AI returns: title, speakers, segments (with timestamps), terms, topics, and people
-4. Response is transformed into `Conversation` type and stored in IndexedDB via `db.ts`
-5. Viewer page renders transcript with synchronized audio playback
+1. User signs in with Google via Firebase Auth
+2. User uploads audio file via Library page
+3. Audio uploads to Firebase Storage, creates Firestore doc with `status: 'processing'`
+4. Cloud Function triggers on upload, calls Gemini API server-side
+5. Function writes results to Firestore with `status: 'complete'`
+6. Real-time Firestore listener updates UI automatically
+7. Viewer page renders transcript with synchronized audio playback
 
 ### Key Files
 - **`types.ts`** - All TypeScript interfaces (`Conversation`, `Segment`, `Speaker`, `Term`, `Topic`, `Person`, etc.)
-- **`utils.ts`** - Gemini API integration, audio processing, helper functions (`formatTime`, `cn`)
-- **`db.ts`** - IndexedDB persistence layer using `idb` library (stores conversations with audio blobs)
-- **`constants.ts`** - Mock data for demo, speaker color palette
+- **`firebase-config.ts`** - Firebase initialization (Auth, Firestore, Storage, Functions)
+- **`services/firestoreService.ts`** - Firestore CRUD with real-time listeners
+- **`services/storageService.ts`** - Audio upload/download
+- **`functions/src/transcribe.ts`** - Cloud Function for Gemini processing
 
 ### Pages
-- **`pages/Library.tsx`** - Conversation list with upload modal (drag-drop or file picker)
+- **`pages/Library.tsx`** - Conversation list with upload modal and sync status
 - **`pages/Viewer.tsx`** - Main transcript viewer with audio player, two-way sync, drift correction
 
-### Components (in `components/`)
-- **`Button.tsx`** - Reusable button with variants
-- **`viewer/AudioPlayer.tsx`** - Bottom playback controls with scrubber
-- **`viewer/Sidebar.tsx`** - Terms and People tabs with selection sync
-- **`viewer/TranscriptSegment.tsx`** - Individual segment with term/person highlighting
-- **`viewer/TopicMarker.tsx`** - Topic boundary indicators
+### Contexts
+- **`contexts/AuthContext.tsx`** - Firebase Auth state, Google sign-in/out
+- **`contexts/ConversationContext.tsx`** - Real-time Firestore subscription, CRUD operations
 
-### State Management
-- App-level state in `App.tsx` manages conversations and navigation
-- Viewer maintains local state for playback, selection, and editing
-- Two-way sync: clicking transcript term selects sidebar card and vice versa
-- Auto-drift correction: if audio duration differs >5% from transcript timestamps, segments are linearly scaled
+### Components (in `components/`)
+- **`auth/`** - SignInButton, UserMenu, ProtectedRoute
+- **`viewer/`** - AudioPlayer, Sidebar, TranscriptSegment, TopicMarker, ViewerHeader
+
+### Hooks (in `hooks/`)
+- **`useAudioPlayer.ts`** - Audio playback, seeking, drift correction
+- **`usePersonMentions.ts`** - Regex-based person detection
+- **`useTranscriptSelection.ts`** - Two-way sync between transcript and sidebar
 
 ## Environment Variables
 
-Set `GEMINI_API_KEY` in `.env` for Gemini API access:
+Firebase configuration in `.env`:
 ```
-GEMINI_API_KEY=your_key_here
+VITE_FIREBASE_API_KEY=...
+VITE_FIREBASE_AUTH_DOMAIN=...
+VITE_FIREBASE_PROJECT_ID=...
+VITE_FIREBASE_STORAGE_BUCKET=...
+VITE_FIREBASE_MESSAGING_SENDER_ID=...
+VITE_FIREBASE_APP_ID=...
 ```
 
-Vite exposes this as `process.env.API_KEY` and `process.env.GEMINI_API_KEY`.
+Gemini API key is stored as Firebase Secret (not in `.env`):
+```bash
+npx firebase functions:secrets:set GEMINI_API_KEY
+```
 
-## Styling
+## Documentation
 
-Uses Tailwind CSS (loaded via CDN in `index.html`). No build-time CSS processing. The `cn()` utility in `utils.ts` handles conditional class composition.
+Documentation is organized using the [Diátaxis framework](https://diataxis.fr/) in [`/docs/`](docs/):
+
+- **[tutorials/](docs/tutorials/)** - Learning-oriented guides (getting started)
+- **[how-to/](docs/how-to/)** - Task-oriented guides (Firebase setup, deployment, testing)
+- **[reference/](docs/reference/)** - Technical reference (architecture, data model)
+- **[explanation/](docs/explanation/)** - Background and design decisions
+
+When updating documentation:
+1. Place content in the appropriate Diátaxis category
+2. Update `docs/README.md` if adding new files
+3. Keep docs in sync with code changes
 
 ## Key Technical Details
 
-- **Audio Storage:** Blob URLs are ephemeral; `db.ts` fetches the blob from URL before storing, then recreates URL on load
-- **Timestamp Handling:** All timestamps are in milliseconds (`startMs`, `endMs`)
-- **Term Occurrences:** Stored separately from terms with character positions for inline highlighting
-- **Person Mentions:** Computed at runtime via regex matching in Viewer's `useMemo`
-- **Path Alias:** `@/*` maps to project root via `tsconfig.json` and `vite.config.ts`
+- **Storage:** Audio files in Firebase Storage, metadata in Firestore
+- **Real-time Updates:** Firestore `onSnapshot` listeners for instant UI updates
+- **Offline Support:** Firebase automatic offline persistence
+- **Timestamp Handling:** All timestamps in milliseconds (`startMs`, `endMs`)
+- **Drift Correction:** If audio duration differs >5% from transcript, segments are linearly scaled
+- **Security:** Firestore rules enforce user isolation (`userId` field)
 
-## PRD Reference
+## Testing
 
-Full product requirements in `docs/conversation-transcript-context-prd.md`. Key features:
-- Transcript with speaker labels and timestamps
-- Inline term highlighting with definitions
-- Topic/tangent segmentation
-- People detection with editable notes
-- Click-to-play audio sync
+```bash
+npm test                 # Watch mode
+npm run test:run         # Run once
+npm run test:coverage    # Coverage report
+```
+
+Test files in `src/__tests__/` with mocks for Firebase services.
+
+## Deployment
+
+- **Frontend:** Cloud Run (auto-deploys on push to main)
+- **Backend:** Firebase (Cloud Functions, Firestore rules, Storage rules)
+- **CI/CD:** GitHub Actions
+
+See [docs/how-to/deploy.md](docs/how-to/deploy.md) for details.

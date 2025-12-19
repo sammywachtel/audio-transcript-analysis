@@ -705,24 +705,44 @@ These steps must be done once per environment and cannot be fully automated:
    - Enable Firebase Storage: https://console.firebase.google.com/project/audio-transcript-app-67465/storage
    - Enable Cloud Functions (requires Blaze plan for external API calls)
 
-2. **Authentication**
+2. **Enable Required Google Cloud APIs**
+
+   These APIs must be enabled before deployment will work:
+   - [Cloud Functions API](https://console.cloud.google.com/apis/library/cloudfunctions.googleapis.com?project=audio-transcript-app-67465)
+   - [Cloud Build API](https://console.cloud.google.com/apis/library/cloudbuild.googleapis.com?project=audio-transcript-app-67465)
+   - [Artifact Registry API](https://console.cloud.google.com/apis/library/artifactregistry.googleapis.com?project=audio-transcript-app-67465)
+   - [Secret Manager API](https://console.cloud.google.com/apis/library/secretmanager.googleapis.com?project=audio-transcript-app-67465)
+   - [Firebase Extensions API](https://console.cloud.google.com/apis/library/firebaseextensions.googleapis.com?project=audio-transcript-app-67465)
+
+   Or via CLI:
+   ```bash
+   gcloud services enable \
+     cloudfunctions.googleapis.com \
+     cloudbuild.googleapis.com \
+     artifactregistry.googleapis.com \
+     secretmanager.googleapis.com \
+     firebaseextensions.googleapis.com \
+     --project=audio-transcript-app-67465
+   ```
+
+3. **Authentication**
    ```bash
    npx firebase login
    npx firebase use audio-transcript-app-67465
    ```
 
-3. **Set Gemini API Secret**
+4. **Set Gemini API Secret**
    ```bash
    npx firebase functions:secrets:set GEMINI_API_KEY
    ```
 
-4. **Create Service Account for CI/CD**
+5. **Create Service Account for CI/CD**
    - Go to Firebase Console → Project Settings → Service Accounts
    - Click "Generate new private key"
    - Download the JSON file
    - Add as GitHub Secret: `FIREBASE_SERVICE_ACCOUNT`  <!-- pragma: allowlist secret -->
 
-5. **Configure Service Account IAM Roles**
+6. **Configure Service Account IAM Roles**
 
    The service account needs these roles in Google Cloud IAM:
    - Go to: https://console.cloud.google.com/iam-admin/iam?project=audio-transcript-app-67465
@@ -746,7 +766,7 @@ These steps must be done once per environment and cannot be fully automated:
    gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA_EMAIL" --role="roles/storage.admin"
    ```
 
-6. **Add GitHub Secrets**
+7. **Add GitHub Secrets**
    - `FIREBASE_SERVICE_ACCOUNT`: Service account JSON key (for deployment)
    - `GEMINI_API_KEY`: Gemini API key (already set via Firebase secrets)
 
