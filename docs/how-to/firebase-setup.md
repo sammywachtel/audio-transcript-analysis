@@ -235,7 +235,41 @@ gcloud projects add-iam-policy-binding your-project-id \
   --role="roles/secretmanager.secretAccessor"
 ```
 
-### 4. Add GitHub Secrets
+### 4. Configure Service Agent IAM Bindings
+
+> **Important**: Cloud Functions v2 with Storage triggers requires Google-managed service agents to have specific roles for the event pipeline (Storage → Pub/Sub → Eventarc → Cloud Run).
+
+Find your project number in [Project Settings](https://console.cloud.google.com/iam-admin/settings) or:
+```bash
+PROJECT_NUMBER=$(gcloud projects describe your-project-id --format="value(projectNumber)")
+```
+
+Grant the required roles:
+```bash
+PROJECT_NUMBER="your-project-number"
+PROJECT_ID="your-project-id"
+
+# Storage service agent → can publish to Pub/Sub
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gs-project-accounts.iam.gserviceaccount.com" \
+  --role="roles/pubsub.publisher"
+
+# Pub/Sub service agent → can create auth tokens
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountTokenCreator"
+
+# Compute service agent → can invoke Cloud Run and receive events
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/run.invoker"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/eventarc.eventReceiver"
+```
+
+### 5. Add GitHub Secrets
 
 In your repository: **Settings** → **Secrets and variables** → **Actions**
 
