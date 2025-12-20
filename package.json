@@ -30,16 +30,20 @@
     "react-dom": "^19.2.3"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.18",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.1",
     "@testing-library/user-event": "^14.6.1",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
     "@vitest/ui": "^4.0.16",
+    "autoprefixer": "^10.4.23",
     "concurrently": "^9.2.1",
     "firebase-tools": "^15.1.0",
     "happy-dom": "^20.0.11",
     "jsdom": "^27.3.0",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.18",
     "typescript": "~5.8.2",
     "vite": "^6.2.0",
     "vitest": "^4.0.16"

@@ -3,41 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Contextual Transcript App</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-      /* Custom Scrollbar for a cleaner look */
-      ::-webkit-scrollbar {
-        width: 6px;
-        height: 6px;
-      }
-      ::-webkit-scrollbar-track {
-        background: transparent;
-      }
-      ::-webkit-scrollbar-thumb {
-        background: #cbd5e1;
-        border-radius: 3px;
-      }
-      ::-webkit-scrollbar-thumb:hover {
-        background: #94a3b8;
-      }
-      .highlight-term {
-        background-color: #fef3c7; /* amber-100 */
-        border-bottom: 2px solid #f59e0b; /* amber-500 */
-        cursor: pointer;
-        transition: background-color 0.2s;
-        padding: 0 2px;
-        border-radius: 2px;
-      }
-      .highlight-term:hover {
-        background-color: #fde68a; /* amber-200 */
-      }
-      .highlight-term.active {
-        background-color: #fcd34d; /* amber-300 */
-        border-bottom-width: 3px;
-        font-weight: 500;
-      }
-    </style>
   <script type="importmap">
 {
   "imports": {

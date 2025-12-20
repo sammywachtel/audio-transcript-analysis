@@ -19,14 +19,25 @@ RUN npm ci
 COPY . .
 
 # Build arguments (injected at build time)
-ARG VITE_GEMINI_API_KEY
+# Firebase configuration
+ARG VITE_FIREBASE_API_KEY
+ARG VITE_FIREBASE_AUTH_DOMAIN
+ARG VITE_FIREBASE_PROJECT_ID
+ARG VITE_FIREBASE_STORAGE_BUCKET
+ARG VITE_FIREBASE_MESSAGING_SENDER_ID
+ARG VITE_FIREBASE_APP_ID
+# Other services
 ARG VITE_ALIGNMENT_SERVICE_URL
 
-# Create .env file for Vite's loadEnv() to read
-# vite.config.ts expects GEMINI_API_KEY (without VITE_ prefix)
-RUN echo "GEMINI_API_KEY=${VITE_GEMINI_API_KEY}" > .env && \
-    echo "ALIGNMENT_SERVICE_URL=${VITE_ALIGNMENT_SERVICE_URL}" >> .env && \
-    echo "=== DEBUG: .env contents ===" && cat .env && echo "=== END DEBUG ==="
+# Create .env file for Vite to read during build
+# Vite automatically exposes VITE_* prefixed vars to the client
+RUN echo "VITE_FIREBASE_API_KEY=${VITE_FIREBASE_API_KEY}" > .env && \
+    echo "VITE_FIREBASE_AUTH_DOMAIN=${VITE_FIREBASE_AUTH_DOMAIN}" >> .env && \
+    echo "VITE_FIREBASE_PROJECT_ID=${VITE_FIREBASE_PROJECT_ID}" >> .env && \
+    echo "VITE_FIREBASE_STORAGE_BUCKET=${VITE_FIREBASE_STORAGE_BUCKET}" >> .env && \
+    echo "VITE_FIREBASE_MESSAGING_SENDER_ID=${VITE_FIREBASE_MESSAGING_SENDER_ID}" >> .env && \
+    echo "VITE_FIREBASE_APP_ID=${VITE_FIREBASE_APP_ID}" >> .env && \
+    echo "ALIGNMENT_SERVICE_URL=${VITE_ALIGNMENT_SERVICE_URL}" >> .env
 
 # Build the application
 RUN npm run build
