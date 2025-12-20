@@ -15,6 +15,7 @@ import { defineSecret } from 'firebase-functions/params';
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db, bucket } from './index';
+import { ProgressManager, ProcessingStep } from './progressManager';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
@@ -150,12 +151,18 @@ export const transcribeAudio = onObjectFinalized(
       sizeMB: (event.data.size / (1024 * 1024)).toFixed(2)
     });
 
+    // Initialize progress tracking (before try block so it's accessible in catch)
+    const progressManager = new ProgressManager(conversationId);
+
     try {
       // Update status to processing
       await db.collection('conversations').doc(conversationId).update({
         status: 'processing',
         updatedAt: FieldValue.serverTimestamp()
       });
+
+      // Start transcription step
+      await progressManager.setStep(ProcessingStep.TRANSCRIBING);
 
       // Download audio file to memory
       console.debug('[Transcribe] Starting audio download from Storage...');
@@ -199,6 +206,9 @@ export const transcribeAudio = onObjectFinalized(
         title: result.title
       });
 
+      // Update progress: analyzing data
+      await progressManager.setStep(ProcessingStep.ANALYZING);
+
       // DEBUG: Log sample segment timestamps from Gemini
       if (result.segments && result.segments.length > 0) {
         const firstSeg = result.segments[0];
@@ -230,6 +240,9 @@ export const transcribeAudio = onObjectFinalized(
       const elapsedMs = Date.now() - downloadStartTime;
       const alignmentTimeoutMs = Math.max(60000, (540 * 1000) - elapsedMs - 30000); // Leave 30s buffer
 
+      // Update progress: aligning timestamps
+      await progressManager.setStep(ProcessingStep.ALIGNING);
+
       console.log('[Transcribe] Calling alignment service...', {
         conversationId,
         elapsedMs,
@@ -257,6 +270,9 @@ export const transcribeAudio = onObjectFinalized(
       const finalSegments = alignmentResult.segments;
       const lastSegment = finalSegments[finalSegments.length - 1];
       const finalDurationMs = lastSegment ? lastSegment.endMs : processedData.durationMs;
+
+      // Update progress: finalizing and saving
+      await progressManager.setStep(ProcessingStep.FINALIZING);
 
       // Save results to Firestore
       console.debug('[Transcribe] Saving results to Firestore...');
@@ -292,18 +308,26 @@ export const transcribeAudio = onObjectFinalized(
         }
       });
 
+      // Mark processing as complete
+      await progressManager.setComplete();
+
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
       console.error('[Transcribe] ❌ Transcription failed:', {
         conversationId,
         errorType: error instanceof Error ? error.constructor.name : typeof error,
-        errorMessage: error instanceof Error ? error.message : String(error),
+        errorMessage,
         errorStack: error instanceof Error ? error.stack : undefined
       });
+
+      // Mark processing as failed
+      await progressManager.setFailed(errorMessage);
 
       // Update status to failed
       await db.collection('conversations').doc(conversationId).update({
         status: 'failed',
-        processingError: error instanceof Error ? error.message : 'Unknown error',
+        processingError: errorMessage,
         updatedAt: FieldValue.serverTimestamp()
       });
 
@@ -682,9 +706,11 @@ async function callAlignmentService(
       segmentCount: result.segments.length
     });
 
-    // Quality gate: warn on low confidence but still apply
+    // Quality gate: warn on low confidence but still use alignment
+    // (Gemini timestamps are often worse than low-confidence alignment)
+    // TODO: Stage 2 should implement per-segment confidence thresholds
     if (result.average_confidence < 0.55) {
-      console.warn('[Alignment] ⚠️ Low confidence alignment:', {
+      console.warn('[Alignment] ⚠️ Low confidence alignment (still using it):', {
         averageConfidence: result.average_confidence
       });
     }

@@ -1,10 +1,12 @@
 import {
   ref,
   uploadBytes,
+  uploadBytesResumable,
   getDownloadURL,
   deleteObject,
   getMetadata,
-  UploadResult
+  UploadResult,
+  UploadTask
 } from 'firebase/storage';
 import { storage } from '../firebase-config';
 
@@ -37,15 +39,15 @@ export class StorageService {
   }
 
   /**
-   * Upload an audio file to Firebase Storage
-   * Returns the storage path (not the download URL - that's generated on demand)
+   * Upload an audio file to Firebase Storage with real-time progress tracking
+   * Returns the storage path and a cancel function
    */
   async uploadAudio(
     userId: string,
     conversationId: string,
     file: File,
     onProgress?: (progress: number) => void
-  ): Promise<string> {
+  ): Promise<{ storagePath: string; cancel: () => void }> {
     const storagePath = this.getAudioPath(userId, conversationId, file.name);
     const storageRef = ref(storage, storagePath);
 
@@ -55,9 +57,8 @@ export class StorageService {
       type: file.type
     });
 
-    // For simple uploads, we use uploadBytes (no progress tracking)
-    // For progress tracking with large files, we'd use uploadBytesResumable
-    const result: UploadResult = await uploadBytes(storageRef, file, {
+    // Use uploadBytesResumable for real progress tracking
+    const uploadTask: UploadTask = uploadBytesResumable(storageRef, file, {
       contentType: file.type || 'audio/mpeg',
       customMetadata: {
         originalFileName: file.name,
@@ -65,15 +66,33 @@ export class StorageService {
       }
     });
 
+    // Wire up progress tracking
+    const unsubscribe = uploadTask.on(
+      'state_changed',
+      (snapshot) => {
+        const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+        console.log('[Storage] Upload progress:', {
+          path: storagePath,
+          bytesTransferred: snapshot.bytesTransferred,
+          totalBytes: snapshot.totalBytes,
+          progress: `${progress.toFixed(1)}%`
+        });
+        onProgress?.(Math.round(progress));
+      },
+      (error) => {
+        console.error('[Storage] Upload error:', error);
+        throw error;
+      }
+    );
+
+    // Wait for upload to complete
+    await uploadTask;
+
     console.log('[Storage] Upload complete:', {
-      path: result.ref.fullPath,
-      bytesTransferred: result.metadata.size
+      path: storagePath
     });
 
-    // Call progress callback at 100% if provided
-    onProgress?.(100);
-
-    return storagePath;
+    return { storagePath, cancel: unsubscribe };
   }
 
   /**

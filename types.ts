@@ -67,6 +67,10 @@ export interface Conversation {
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
   alignmentError?: string; // Error message if alignment failed (for fallback status)
 
+  // Progressive processing status (all optional for backward compatibility)
+  processingProgress?: ProcessingProgress;
+  processingTimeline?: ProcessingTimeline[];
+
   // Sync metadata (future use for Firestore sync)
   syncStatus?: 'local_only' | 'synced' | 'pending_upload' | 'conflict';
   lastSyncedAt?: string;
@@ -77,4 +81,33 @@ export interface PlaybackState {
   currentTimeMs: number;
   durationMs: number;
   playbackRate: number;
+}
+
+// Processing step enum for granular status tracking
+export enum ProcessingStep {
+  PENDING = 'pending',
+  UPLOADING = 'uploading',
+  TRANSCRIBING = 'transcribing',
+  ANALYZING = 'analyzing',
+  ALIGNING = 'aligning',
+  FINALIZING = 'finalizing',
+  COMPLETE = 'complete',
+  FAILED = 'failed'
+}
+
+// Real-time processing progress for user feedback
+export interface ProcessingProgress {
+  currentStep: ProcessingStep;
+  percentComplete: number; // 0-100
+  stepStartedAt?: string; // ISO timestamp
+  estimatedRemainingMs?: number;
+  errorMessage?: string;
+}
+
+// Timeline tracking for performance analysis
+export interface ProcessingTimeline {
+  stepName: ProcessingStep;
+  startedAt: string; // ISO timestamp
+  completedAt?: string; // ISO timestamp
+  durationMs?: number;
 }

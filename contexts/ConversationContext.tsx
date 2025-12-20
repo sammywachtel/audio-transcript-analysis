@@ -148,11 +148,13 @@ export const ConversationProvider: React.FC<{ children: ReactNode }> = ({ childr
       // Upload audio to Firebase Storage if provided
       if (audioFile) {
         console.log('[ConversationContext] Uploading audio to Firebase Storage...');
-        audioStoragePath = await storageService.uploadAudio(
+        const result = await storageService.uploadAudio(
           user.uid,
           conversation.conversationId,
           audioFile
         );
+        audioStoragePath = result.storagePath;
+        // Note: We don't need to store the cancel function here since we wait for completion
       }
 
       // Save to Firestore

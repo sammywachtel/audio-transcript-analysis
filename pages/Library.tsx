@@ -5,6 +5,7 @@ import { useConversations } from '../contexts/ConversationContext';
 import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
+import { ProcessingProgress } from '../components/viewer/ProcessingProgress';
 
 interface LibraryProps {
   onOpen: (id: string) => void;
@@ -135,7 +136,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
                                   <FileAudio size={20} />
                                 )}
                             </div>
-                            <div className="min-w-0">
+                            <div className="min-w-0 flex-1">
                                 <h3 className={cn(
                                   "font-medium truncate transition-colors",
                                   isComplete ? "text-slate-900 group-hover:text-blue-700" : "text-slate-700"
@@ -143,9 +144,9 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
                                     {conv.title}
                                 </h3>
                                 {isProcessing ? (
-                                  <p className="text-xs text-blue-600 font-medium">
-                                    Processing audio...
-                                  </p>
+                                  <div className="mt-1">
+                                    <ProcessingProgress progress={conv.processingProgress} compact />
+                                  </div>
                                 ) : isFailed ? (
                                   <p className="text-xs text-red-600">
                                     Processing failed
