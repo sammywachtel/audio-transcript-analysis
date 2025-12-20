@@ -55,7 +55,11 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
 
               <TranscriptSegment
                 segment={seg}
-                speaker={conversation.speakers[seg.speakerId]}
+                speaker={conversation.speakers[seg.speakerId] ?? {
+                  speakerId: seg.speakerId,
+                  displayName: seg.speakerId,
+                  colorIndex: 0
+                }}
                 occurrences={segmentOccurrences}
                 personOccurrences={segmentPersonOccurrences}
                 isActive={isActive}
