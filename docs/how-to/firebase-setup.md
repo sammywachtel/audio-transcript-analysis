@@ -151,6 +151,29 @@ Common domains to add:
 3. Choose location (same as Firestore)
 4. Click **Done**
 
+### Configure CORS for Storage
+
+The app needs to fetch audio files from Firebase Storage for timestamp alignment. This requires CORS configuration.
+
+**Apply CORS configuration:**
+```bash
+# From project root (cors.json is already included)
+gsutil cors set cors.json gs://YOUR_PROJECT_ID.firebasestorage.app
+
+# Example:
+gsutil cors set cors.json gs://audio-transcript-app-67465.firebasestorage.app
+```
+
+**Verify CORS is configured:**
+```bash
+gsutil cors get gs://YOUR_PROJECT_ID.firebasestorage.app
+```
+
+The `cors.json` file allows requests from:
+- `http://localhost:3000` (Vite dev server)
+- `http://localhost:5173` (alternate Vite port)
+- `https://*.run.app` (Cloud Run deployments)
+
 ## Step 6: Register Web App
 
 1. Project Settings (gear icon) → **Your apps**

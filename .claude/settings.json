@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/samwachtel/PycharmProjects/audio-transcript-analysis-app/.agent_process/scripts/hook_after_edit.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -87,12 +87,14 @@ export const useAudioPlayer = (
   isSyncingRef.current = isSyncing;
 
   /**
-   * Reset drift correction when alignment status changes to 'aligned'
-   * This ensures the UI reflects that WhisperX aligned timestamps don't need drift correction
+   * Reset drift correction when alignment status indicates server-side processing is done
+   * - 'aligned': WhisperX succeeded, timestamps are accurate
+   * - 'fallback': WhisperX failed, using Gemini timestamps (less accurate but still server-processed)
+   * In both cases, client-side drift correction should not be applied
    */
   useEffect(() => {
-    if (conversation.alignmentStatus === 'aligned') {
-      console.log('[AudioPlayer] Alignment status changed to aligned - resetting drift correction');
+    if (conversation.alignmentStatus === 'aligned' || conversation.alignmentStatus === 'fallback') {
+      console.log('[AudioPlayer] Server-side alignment complete:', conversation.alignmentStatus);
       setDriftCorrectionApplied(false);
       setDriftRatio(1.0);
       setDriftMs(0);
@@ -186,6 +188,25 @@ export const useAudioPlayer = (
         const transcriptDurMs = lastSeg.endMs;
         const diff = Math.abs(audioDurMs - transcriptDurMs);
         const ratio = audioDurMs / transcriptDurMs;
+        const percentDrift = (ratio - 1) * 100;
+
+        // DEBUG: Log segment distribution for analysis
+        console.debug(`[Drift Analysis] Segment distribution:`, {
+          totalSegments: currentSegments.length,
+          firstSegment: {
+            index: 0,
+            startMs: currentSegments[0].startMs,
+            endMs: currentSegments[0].endMs,
+            durationMs: currentSegments[0].endMs - currentSegments[0].startMs
+          },
+          lastSegment: {
+            index: currentSegments.length - 1,
+            startMs: lastSeg.startMs,
+            endMs: lastSeg.endMs,
+            durationMs: lastSeg.endMs - lastSeg.startMs
+          },
+          averageSegmentDurationMs: Math.round(transcriptDurMs / currentSegments.length)
+        });
 
         // ALWAYS log drift analysis for debugging
         console.log(`[Drift Analysis] Audio vs Transcript comparison:`, {
@@ -193,20 +214,25 @@ export const useAudioPlayer = (
           audioDurationFormatted: `${Math.floor(audioDurMs / 60000)}:${((audioDurMs % 60000) / 1000).toFixed(1)}`,
           transcriptDurationMs: transcriptDurMs,
           transcriptDurationFormatted: `${Math.floor(transcriptDurMs / 60000)}:${((transcriptDurMs % 60000) / 1000).toFixed(1)}`,
-          driftMs: diff,
-          driftRatio: ratio.toFixed(4),
-          percentageDrift: ((ratio - 1) * 100).toFixed(2) + '%',
-          willCorrect: diff > 1000
+          absoluteDriftMs: diff,
+          absoluteDriftSec: (diff / 1000).toFixed(2),
+          driftRatio: ratio.toFixed(6),
+          percentageDrift: percentDrift.toFixed(4) + '%',
+          driftDirection: ratio > 1 ? 'audio longer than transcript' : 'transcript longer than audio',
+          willCorrect: diff > 1000,
+          correctionThresholdMs: 1000
         });
 
         // Set drift metrics for UI display
         setDriftRatio(ratio);
         setDriftMs(diff);
 
-        // IMPORTANT: Skip drift correction if WhisperX alignment was already applied
-        // The aligned timestamps are accurate and shouldn't be re-scaled
-        if (currentConversation.alignmentStatus === 'aligned') {
-          console.log(`[Drift Analysis] ⚡ Skipping - already aligned via WhisperX`);
+        // IMPORTANT: Skip drift correction if server-side alignment already ran
+        // - 'aligned': WhisperX succeeded, timestamps are accurate
+        // - 'fallback': WhisperX failed, but server already applied best-effort processing
+        // In both cases, client-side scaling would only make things worse
+        if (currentConversation.alignmentStatus === 'aligned' || currentConversation.alignmentStatus === 'fallback') {
+          console.log(`[Drift Analysis] ⚡ Skipping - server alignment status: ${currentConversation.alignmentStatus}`);
           setDriftCorrectionApplied(false);
         } else if (diff > 1000) {
           // Phase 1: More aggressive threshold - apply drift compensation when >1 second difference
@@ -222,15 +248,48 @@ export const useAudioPlayer = (
             endMs: Math.round(seg.endMs * ratio)
           }));
 
+          // DEBUG: Log detailed before/after for analysis
+          console.debug(`[Auto-Sync] Drift correction parameters:`, {
+            scalingRatio: ratio,
+            scalingPercentage: ((ratio - 1) * 100).toFixed(4) + '%',
+            absoluteDriftMs: diff,
+            segmentsToScale: currentSegments.length
+          });
+
           // Log first and last segment before/after for verification
           console.log(`[Auto-Sync] Segment adjustment preview:`, {
             firstSegment: {
-              before: { start: currentSegments[0].startMs, end: currentSegments[0].endMs },
-              after: { start: scaledSegments[0].startMs, end: scaledSegments[0].endMs }
+              before: {
+                startMs: currentSegments[0].startMs,
+                endMs: currentSegments[0].endMs,
+                durationMs: currentSegments[0].endMs - currentSegments[0].startMs
+              },
+              after: {
+                startMs: scaledSegments[0].startMs,
+                endMs: scaledSegments[0].endMs,
+                durationMs: scaledSegments[0].endMs - scaledSegments[0].startMs
+              },
+              startDelta: scaledSegments[0].startMs - currentSegments[0].startMs,
+              endDelta: scaledSegments[0].endMs - currentSegments[0].endMs
             },
             lastSegment: {
-              before: { start: lastSeg.startMs, end: lastSeg.endMs },
-              after: { start: scaledSegments[scaledSegments.length - 1].startMs, end: scaledSegments[scaledSegments.length - 1].endMs }
+              before: {
+                startMs: lastSeg.startMs,
+                endMs: lastSeg.endMs,
+                durationMs: lastSeg.endMs - lastSeg.startMs
+              },
+              after: {
+                startMs: scaledSegments[scaledSegments.length - 1].startMs,
+                endMs: scaledSegments[scaledSegments.length - 1].endMs,
+                durationMs: scaledSegments[scaledSegments.length - 1].endMs - scaledSegments[scaledSegments.length - 1].startMs
+              },
+              startDelta: scaledSegments[scaledSegments.length - 1].startMs - lastSeg.startMs,
+              endDelta: scaledSegments[scaledSegments.length - 1].endMs - lastSeg.endMs
+            },
+            totalDurationChange: {
+              before: lastSeg.endMs,
+              after: scaledSegments[scaledSegments.length - 1].endMs,
+              deltaMs: scaledSegments[scaledSegments.length - 1].endMs - lastSeg.endMs
             }
           });
 

@@ -129,19 +129,64 @@ audio-transcript-analysis-app/
 2. Frontend uploads to Firebase Storage
    storageService.uploadAudio(file)
         ↓
-3. Frontend creates Firestore doc (status: 'processing')
+3. Frontend creates Firestore doc (status: 'processing', alignmentStatus: 'pending')
    firestoreService.save(conversation)
         ↓
 4. Storage trigger fires Cloud Function
    onObjectFinalized → transcribeAudio()
         ↓
-5. Function downloads audio, calls Gemini API
+5. Function downloads audio, calls Gemini API for transcription
         ↓
-6. Function writes results to Firestore (status: 'complete')
+6. Function calls WhisperX alignment service for precise timestamps
+   ├── Success → alignmentStatus: 'aligned'
+   └── Failure → alignmentStatus: 'fallback' (keeps Gemini timestamps)
         ↓
-7. Real-time listener updates UI
+7. Function writes results to Firestore (status: 'complete')
+        ↓
+8. Real-time listener updates UI
    onSnapshot → setConversations()
 ```
+
+### Alignment Service Integration
+
+The Cloud Function calls an external WhisperX alignment service for precise timestamps:
+
+```
+Cloud Function (transcribeAudio)
+        │
+        │ Gemini API (initial transcription)
+        ▼
+┌──────────────────────────────┐
+│  Segments with approximate   │
+│  timestamps from Gemini      │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│  WhisperX Alignment Service  │
+│  (Cloud Run / Replicate)     │
+│                              │
+│  POST /align                 │
+│  { audio_base64, segments }  │
+└──────────────┬───────────────┘
+               │
+       ┌───────┴───────┐
+       │               │
+       ▼               ▼
+  Success           Failure
+  alignmentStatus:  alignmentStatus:
+  'aligned'         'fallback'
+  (accurate         (uses Gemini
+  timestamps)       timestamps,
+                    alignmentError
+                    set)
+```
+
+**Fallback Behavior:**
+- If WhisperX times out or fails, the Cloud Function uses Gemini's original timestamps
+- The `alignmentError` field stores the reason for fallback
+- Client displays "Fallback Sync" badge with tooltip explaining the issue
+- Timestamps are still usable but may be ~5-10 seconds off
 
 ### Playback Flow
 
@@ -326,6 +371,19 @@ When an audio file is uploaded to Storage, this event pipeline triggers transcri
                         ┌──────────────────┐
                         │  Gemini API      │
                         │  (transcription) │
+                        └────────┬─────────┘
+                                 │
+                                 ▼
+                        ┌──────────────────┐
+                        │  Alignment       │
+                        │  Service         │
+                        │  (WhisperX)      │
+                        └────────┬─────────┘
+                                 │
+                                 ▼
+                        ┌──────────────────┐
+                        │  Firestore       │
+                        │  (save results)  │
                         └──────────────────┘
 ```
 

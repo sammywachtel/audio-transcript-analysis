@@ -60,8 +60,12 @@ export interface Conversation {
   termOccurrences: TermOccurrence[]; // Flat list for easy lookup
   topics: Topic[];
   people: Person[];
-  // WhisperX alignment status - prevents drift correction from re-scaling aligned timestamps
-  alignmentStatus?: 'none' | 'aligned' | 'drift_corrected';
+  // Server-side alignment status (set by Cloud Function after WhisperX processing)
+  // - 'pending': Alignment not yet attempted (processing)
+  // - 'aligned': WhisperX alignment succeeded
+  // - 'fallback': WhisperX failed, using Gemini timestamps (may be inaccurate)
+  alignmentStatus?: 'pending' | 'aligned' | 'fallback';
+  alignmentError?: string; // Error message if alignment failed (for fallback status)
 
   // Sync metadata (future use for Firestore sync)
   syncStatus?: 'local_only' | 'synced' | 'pending_upload' | 'conflict';

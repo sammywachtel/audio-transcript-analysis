@@ -25,7 +25,6 @@ services:
       - VITE_ALIGNMENT_SERVICE_URL=http://localhost:8080
     volumes:
       - .:/app
-      - /app/node_modules
     depends_on:
       - alignment-service
     networks:
@@ -42,6 +41,7 @@ services:
     environment:
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
       - PORT=8080
+      - LOG_LEVEL=DEBUG
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/health')"]
       interval: 30s
