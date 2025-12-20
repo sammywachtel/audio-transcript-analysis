@@ -51,11 +51,12 @@ export class FirestoreService {
     const docRef = doc(db, this.conversationsCollection, conversation.conversationId);
 
     // Convert to Firestore document format
+    // Note: Firestore rejects undefined values, so we conditionally include audioStoragePath
     const firestoreDoc: ConversationDoc = {
       ...conversation,
       createdAt: Timestamp.fromDate(new Date(conversation.createdAt)),
       updatedAt: Timestamp.fromDate(new Date(conversation.updatedAt || new Date().toISOString())),
-      audioStoragePath: audioStoragePath || undefined
+      ...(audioStoragePath ? { audioStoragePath } : {})
     };
 
     // Remove audioUrl - it's ephemeral and regenerated on load
