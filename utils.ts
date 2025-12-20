@@ -12,37 +12,25 @@ export const cn = (...classes: (string | undefined | null | false)[]) => {
 };
 
 /**
- * Creates a placeholder conversation for testing/development.
- * In production, conversations are created by the Cloud Function after audio upload.
+ * Creates a minimal placeholder conversation for upload.
+ * Only contains real data (filename, timestamps) - no fake metadata.
+ * Cloud Function will populate all actual content after processing.
  */
 export const createMockConversation = (file: File): Conversation => {
   return {
     conversationId: `c_${Date.now()}`,
     userId: 'local', // Placeholder - will be set by ConversationContext
-    title: file.name.replace(/\.[^/.]+$/, ""), // Remove extension
+    title: file.name.replace(/\.[^/.]+$/, ""), // Real filename without extension
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    durationMs: 12500, // Mock duration
+    durationMs: 0, // Unknown until processed - 0 signals "not yet known"
     status: 'processing', // Will be updated to 'complete' by Cloud Function
-    speakers: {
-      'spk_a': { speakerId: 'spk_a', displayName: 'Host', colorIndex: 0 },
-      'spk_b': { speakerId: 'spk_b', displayName: 'Guest', colorIndex: 1 },
-    },
+    speakers: {}, // Empty - no fake speakers
     terms: {},
     termOccurrences: [],
-    topics: [
-      { topicId: 'top_new', title: 'Introduction', startIndex: 0, endIndex: 0, type: 'main' }
-    ],
+    topics: [], // Empty - no fake topics
     people: [],
-    segments: [
-      {
-        segmentId: 'seg_new_1',
-        index: 0,
-        speakerId: 'spk_a',
-        startMs: 0,
-        endMs: 5000,
-        text: `Processing audio file "${file.name}"...`
-      }
-    ]
+    segments: [], // Empty - no fake segments
+    alignmentStatus: 'pending' // Waiting for server-side alignment
   };
 };

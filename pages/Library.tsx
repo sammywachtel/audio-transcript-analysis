@@ -2,7 +2,7 @@ import React, { useState, useRef, useCallback } from 'react';
 import { Conversation } from '../types';
 import { formatTime, cn, createMockConversation } from '../utils';
 import { useConversations } from '../contexts/ConversationContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw } from 'lucide-react';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
 
@@ -104,23 +104,57 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
                     <p className="text-sm mt-1">Upload an audio file to get started</p>
                   </div>
                 ) : (
-                  conversations.map(conv => (
+                  conversations.map(conv => {
+                    const isProcessing = conv.status === 'processing';
+                    const isFailed = conv.status === 'failed';
+                    const isComplete = conv.status === 'complete';
+
+                    return (
                     <div
                         key={conv.conversationId}
-                        onClick={() => onOpen(conv.conversationId)}
-                        className="grid grid-cols-12 gap-4 p-4 items-center hover:bg-blue-50/30 transition-colors cursor-pointer group"
+                        onClick={() => isComplete ? onOpen(conv.conversationId) : undefined}
+                        className={cn(
+                          "grid grid-cols-12 gap-4 p-4 items-center transition-colors",
+                          isComplete
+                            ? "hover:bg-blue-50/30 cursor-pointer group"
+                            : "opacity-75"
+                        )}
                     >
                         <div className="col-span-6 md:col-span-5 flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center shrink-0">
-                                <FileAudio size={20} />
+                            <div className={cn(
+                              "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
+                              isProcessing ? "bg-blue-100 text-blue-600" :
+                              isFailed ? "bg-red-100 text-red-600" :
+                              "bg-emerald-100 text-emerald-600"
+                            )}>
+                                {isProcessing ? (
+                                  <Loader2 size={20} className="animate-spin" />
+                                ) : isFailed ? (
+                                  <AlertCircle size={20} />
+                                ) : (
+                                  <FileAudio size={20} />
+                                )}
                             </div>
                             <div className="min-w-0">
-                                <h3 className="font-medium text-slate-900 truncate group-hover:text-blue-700 transition-colors">
+                                <h3 className={cn(
+                                  "font-medium truncate transition-colors",
+                                  isComplete ? "text-slate-900 group-hover:text-blue-700" : "text-slate-700"
+                                )}>
                                     {conv.title}
                                 </h3>
-                                <p className="text-xs text-slate-500 truncate">
+                                {isProcessing ? (
+                                  <p className="text-xs text-blue-600 font-medium">
+                                    Processing audio...
+                                  </p>
+                                ) : isFailed ? (
+                                  <p className="text-xs text-red-600">
+                                    Processing failed
+                                  </p>
+                                ) : (
+                                  <p className="text-xs text-slate-500 truncate">
                                     {Object.values(conv.speakers).length} speakers • {conv.topics.length} topics
-                                </p>
+                                  </p>
+                                )}
                             </div>
                         </div>
                         <div className="col-span-3 md:col-span-2 flex items-center gap-2 text-sm text-slate-600">
@@ -128,29 +162,47 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
                             {new Date(conv.createdAt).toLocaleDateString()}
                         </div>
                         <div className="col-span-3 md:col-span-2 flex items-center gap-2 text-sm text-slate-600 justify-end md:justify-start">
-                             <Clock size={14} className="text-slate-400" />
-                             {formatTime(conv.durationMs)}
+                             {isComplete && conv.durationMs > 0 ? (
+                               <>
+                                 <Clock size={14} className="text-slate-400" />
+                                 {formatTime(conv.durationMs)}
+                               </>
+                             ) : isProcessing ? (
+                               <span className="text-blue-500 text-xs font-medium">--:--</span>
+                             ) : (
+                               <span className="text-slate-400 text-xs">--</span>
+                             )}
                         </div>
                         <div className="hidden md:flex col-span-2 items-center">
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
-                                {conv.status}
+                            <span className={cn(
+                              "px-2.5 py-0.5 rounded-full text-xs font-medium",
+                              isComplete ? "bg-emerald-100 text-emerald-700" :
+                              isProcessing ? "bg-blue-100 text-blue-700" :
+                              "bg-red-100 text-red-700"
+                            )}>
+                                {isProcessing ? 'Processing...' : conv.status}
                             </span>
                         </div>
                         <div className="hidden md:flex col-span-1 justify-end items-center gap-2">
-                             <button
-                                onClick={(e) => handleDelete(e, conv.conversationId)}
-                                className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors opacity-0 group-hover:opacity-100"
-                                title="Delete conversation"
-                             >
-                                <Trash2 size={16} />
-                             </button>
-                             <div className="text-slate-400 group-hover:text-blue-500">
-                                <ChevronRight size={20} />
-                             </div>
+                             {isComplete && (
+                               <>
+                                 <button
+                                    onClick={(e) => handleDelete(e, conv.conversationId)}
+                                    className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors opacity-0 group-hover:opacity-100"
+                                    title="Delete conversation"
+                                 >
+                                    <Trash2 size={16} />
+                                 </button>
+                                 <div className="text-slate-400 group-hover:text-blue-500">
+                                    <ChevronRight size={20} />
+                                 </div>
+                               </>
+                             )}
                         </div>
                     </div>
-                ))
-              )}
+                  );
+                  })
+                )}
             </div>
         </div>
 

@@ -38,16 +38,45 @@ npm run dev
 
 Requires `.env` configured with your Firebase project.
 
-### Option C: Docker Compose
+### Option C: Docker Compose (Frontend + Alignment Service)
 
 Run frontend and alignment service together:
 
 ```bash
-docker compose up
+npm run dev:docker
 ```
 
 - **Frontend**: http://localhost:3000
 - **Alignment Service**: http://localhost:8080
+
+> **Note**: Cloud Functions still run in Firebase cloud. File uploads trigger cloud functions, not local ones.
+
+### Option D: Full Local Stack (Recommended for Function Development)
+
+Run everything locally including Cloud Functions:
+
+```bash
+npm run dev:full
+```
+
+This starts:
+- **Alignment Service** (Docker): http://localhost:8080
+- **Firebase Emulators**: Auth (9099), Firestore (8081), Storage (9199), Functions (5001)
+- **Frontend** (Vite): http://localhost:5173
+- **Emulator UI**: http://localhost:4000
+
+**Prerequisites:**
+1. Set `GEMINI_API_KEY` in your environment (for Cloud Functions):
+   ```bash
+   export GEMINI_API_KEY=your-api-key
+   ```
+2. Docker running (for alignment service)
+
+**What this enables:**
+- Cloud Functions run locally and call local alignment service
+- Debug logs visible in terminal
+- Fast iteration on function code
+- No cloud costs for development
 
 ## Environment Variables
 
@@ -187,6 +216,29 @@ npm run preview
 - **Console**: Look for `[Auth]` and `[Storage]` prefixed logs
 - **Network**: Monitor Firebase API calls
 - **Application → IndexedDB**: View local cache (Firebase offline persistence)
+
+**Drift correction logs** (in browser console):
+- `[Drift Analysis]` - Audio vs transcript duration comparison
+- `[Auto-Sync]` - Timestamp scaling when drift correction is applied
+
+### Docker Compose Logs
+
+When running `npm run dev:docker`, logs appear in the terminal. Debug logging is enabled by default for the alignment service (`LOG_LEVEL=DEBUG`).
+
+```bash
+# Follow all service logs
+docker compose logs -f
+
+# Follow alignment service only
+docker compose logs -f alignment-service
+```
+
+**Log prefixes to look for:**
+- `[Align]` - Request handling, timing, confidence
+- `[WhisperX]` - Replicate API calls, word timestamps
+- `[HARDY]` - Alignment algorithm details
+- `[Anchors]` - Anchor point matching
+- `[Timer]` - Operation timing
 
 ### Firebase Emulator UI
 

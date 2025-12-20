@@ -10,8 +10,10 @@ Endpoints:
   GET /health - Health check
 """
 
+import base64
 import logging
 import os
+import sys
 from typing import List
 
 from aligner import AlignmentError, align_transcript
@@ -19,9 +21,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging - check for DEBUG environment variable
+# Set DEBUG=1 or LOG_LEVEL=DEBUG to enable debug logging
+log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
+if os.environ.get("DEBUG", "").lower() in ("1", "true", "yes"):
+    log_level_str = "DEBUG"
+
+log_level = getattr(logging, log_level_str, logging.INFO)
+logging.basicConfig(
+    level=log_level,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout,
+)
 logger = logging.getLogger(__name__)
+logger.info(f"Logging initialized at {log_level_str} level")
 
 app = FastAPI(
     title="Transcript Alignment Service",
@@ -91,6 +104,13 @@ async def health_check():
     Verifies the service is running and Replicate API key is configured.
     """
     replicate_token = os.environ.get("REPLICATE_API_TOKEN")
+    logger.debug(
+        "Health check requested",
+        extra={
+            "replicate_configured": bool(replicate_token),
+            "log_level": log_level_str,
+        },
+    )
     return HealthResponse(status="ok", replicate_configured=bool(replicate_token))
 
 
@@ -112,18 +132,55 @@ async def align_timestamps(request: AlignRequest):
     A confidence score of 0.8+ indicates a good match.
     Below 0.5 suggests the segment text may not be in the audio.
     """
-    logger.info(f"Received alignment request with {len(request.segments)} segments")
+    import time
+
+    request_start_time = time.time()
+
+    # Decode audio to get size info for logging
+    try:
+        audio_bytes = base64.b64decode(request.audio_base64)
+        audio_size_mb = len(audio_bytes) / (1024 * 1024)
+    except Exception:
+        audio_size_mb = 0
+
+    logger.info(
+        f"Received alignment request: segments={len(request.segments)}, "
+        f"audio_size={audio_size_mb:.2f}MB"
+    )
+
+    # DEBUG: Log detailed request info
+    if request.segments:
+        first_seg = request.segments[0]
+        last_seg = request.segments[-1]
+        total_text_chars = sum(len(s.text) for s in request.segments)
+        total_duration_ms = (
+            last_seg.endMs - first_seg.startMs if last_seg.endMs > 0 else 0
+        )
+
+        logger.debug(
+            f"[Align] Request details: "
+            f"first_segment={{startMs={first_seg.startMs}, endMs={first_seg.endMs}, "
+            f"text_preview='{first_seg.text[:50]}...'}}, "
+            f"last_segment={{startMs={last_seg.startMs}, endMs={last_seg.endMs}, "
+            f"text_preview='{last_seg.text[:50]}...'}}, "
+            f"total_text_chars={total_text_chars}, "
+            f"total_duration_ms={total_duration_ms}, "
+            f"audio_base64_length={len(request.audio_base64)}"
+        )
 
     # Validate we have segments
     if not request.segments:
+        logger.warning("[Align] Request rejected: no segments provided")
         raise HTTPException(status_code=400, detail="No segments provided")
 
     # Validate audio data
     if not request.audio_base64:
+        logger.warning("[Align] Request rejected: no audio data provided")
         raise HTTPException(status_code=400, detail="No audio data provided")
 
     # Check Replicate API key
     if not os.environ.get("REPLICATE_API_TOKEN"):
+        logger.error("[Align] Replicate API token not configured")
         raise HTTPException(
             status_code=500, detail="Replicate API token not configured"
         )
@@ -140,14 +197,51 @@ async def align_timestamps(request: AlignRequest):
             for s in request.segments
         ]
 
+        logger.debug(
+            f"[Align] Calling align_transcript with {len(segments_dict)} segments"
+        )
+        align_start_time = time.time()
+
         # Run alignment
         aligned_segments = await align_transcript(request.audio_base64, segments_dict)
+
+        align_duration = time.time() - align_start_time
+        logger.debug(f"[Align] align_transcript completed in {align_duration:.2f}s")
 
         # Calculate average confidence
         confidences = [s["confidence"] for s in aligned_segments]
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
 
-        logger.info(f"Alignment complete. Average confidence: {avg_confidence:.2f}")
+        # Calculate confidence distribution
+        high_conf = len([c for c in confidences if c >= 0.8])
+        med_conf = len([c for c in confidences if 0.5 <= c < 0.8])
+        low_conf = len([c for c in confidences if c < 0.5])
+
+        total_duration = time.time() - request_start_time
+
+        conf_dist = f"high={high_conf}, med={med_conf}, low={low_conf}"
+        logger.info(
+            f"[Align] ✅ Alignment complete: "
+            f"avg_confidence={avg_confidence:.3f}, "
+            f"confidence_distribution={{{conf_dist}}}, "
+            f"total_time={total_duration:.2f}s"
+        )
+
+        # DEBUG: Log sample aligned segments
+        if aligned_segments:
+            first_aligned = aligned_segments[0]
+            last_aligned = aligned_segments[-1]
+            f_start = first_aligned["startMs"]
+            f_end = first_aligned["endMs"]
+            f_conf = first_aligned["confidence"]
+            l_start = last_aligned["startMs"]
+            l_end = last_aligned["endMs"]
+            l_conf = last_aligned["confidence"]
+            logger.debug(
+                f"[Align] Sample aligned segments: "
+                f"first={{startMs={f_start}, endMs={f_end}, conf={f_conf:.3f}}}, "
+                f"last={{startMs={l_start}, endMs={l_end}, conf={l_conf:.3f}}}"
+            )
 
         return AlignResponse(
             segments=[
@@ -164,11 +258,13 @@ async def align_timestamps(request: AlignRequest):
         )
 
     except AlignmentError as e:
-        logger.error(f"Alignment failed: {e}")
+        total_duration = time.time() - request_start_time
+        logger.error(f"[Align] ❌ Alignment failed after {total_duration:.2f}s: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
     except Exception as e:
-        logger.exception("Unexpected error during alignment")
+        total_duration = time.time() - request_start_time
+        logger.exception(f"[Align] ❌ Unexpected error after {total_duration:.2f}s")
         raise HTTPException(status_code=500, detail=f"Alignment failed: {str(e)}")
 
 

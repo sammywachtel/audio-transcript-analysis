@@ -201,6 +201,7 @@ jobs:
             --min-instances=0
             --max-instances=10
             --port=8080
+            --set-env-vars=LOG_LEVEL=DEBUG
 
       # -----------------------------------------------------------------------
       # Output deployment URL

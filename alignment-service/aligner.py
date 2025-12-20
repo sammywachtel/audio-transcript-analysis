@@ -16,6 +16,7 @@ import base64
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
@@ -23,8 +24,26 @@ from typing import Any, Dict, List, Optional
 import replicate
 from fuzzywuzzy import fuzz
 
-# Configure logging
+# Configure logging - inherit from main.py's configuration
 logger = logging.getLogger(__name__)
+
+
+class Timer:
+    """Simple context manager for timing code blocks."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.start = None
+        self.duration = None
+
+    def __enter__(self):
+        self.start = time.time()
+        return self
+
+    def __exit__(self, *args):
+        self.duration = time.time() - self.start
+        logger.debug(f"[Timer] {self.name}: {self.duration:.3f}s")
+
 
 # WhisperX model on Replicate - provides word-level timestamps via forced alignment
 WHISPERX_MODEL = "victor-upmeet/whisperx:84d2ad2d6194fe98a17d2b60bef1c7f910c46b2f6fd38996ca457afd9c8abfcb"  # noqa: E501 pragma: allowlist secret
@@ -233,11 +252,24 @@ def find_anchors(
     """
     anchors = []
     last_anchor_word_idx = 0
+    segments_skipped_short = 0
+    segments_skipped_long = 0
+    segments_no_match = 0
+    segments_low_confidence = 0
+
+    logger.debug(
+        f"[Anchors] Starting anchor detection for {len(segments)} segments, "
+        f"{len(words)} words"
+    )
 
     for seg_idx, segment in enumerate(segments):
         # Skip very short segments - not reliable anchors
         word_count = len(segment.text.split())
-        if word_count < ANCHOR_MIN_WORDS or word_count > ANCHOR_MAX_WORDS:
+        if word_count < ANCHOR_MIN_WORDS:
+            segments_skipped_short += 1
+            continue
+        if word_count > ANCHOR_MAX_WORDS:
+            segments_skipped_long += 1
             continue
 
         # Compute time-bounded search window using FIXED window size
@@ -283,28 +315,58 @@ def find_anchors(
             last_anchor_word_idx = match.end_idx
 
             logger.debug(
-                f"Anchor found: segment {seg_idx} -> words {match.start_idx}-"
-                f"{match.end_idx} (conf={match.confidence:.2f})"
+                f"[Anchors] Anchor found: segment {seg_idx} -> words {match.start_idx}-"
+                f"{match.end_idx} (conf={match.confidence:.3f}, "
+                f"time={match.start_ms}ms-{match.end_ms}ms)"
             )
+        elif match:
+            segments_low_confidence += 1
+            logger.debug(
+                f"[Anchors] Segment {seg_idx} matched but low confidence: "
+                f"{match.confidence:.3f} < {ANCHOR_MIN_CONFIDENCE}"
+            )
+        else:
+            segments_no_match += 1
 
     logger.info(
-        f"Found {len(anchors)} anchors from {len(segments)} segments "
+        f"[Anchors] Found {len(anchors)} anchors from {len(segments)} segments "
         f"(anchor rate: {len(anchors)/len(segments)*100:.1f}%)"
+    )
+
+    # DEBUG: Log detailed skip statistics
+    logger.debug(
+        f"[Anchors] Skip stats: "
+        f"skipped_short(<{ANCHOR_MIN_WORDS}words)={segments_skipped_short}, "
+        f"skipped_long(>{ANCHOR_MAX_WORDS}words)={segments_skipped_long}, "
+        f"no_match={segments_no_match}, "
+        f"low_confidence={segments_low_confidence}"
     )
 
     # Log anchor distribution
     if anchors:
         anchor_indices = [a.segment_idx for a in anchors]
         anchor_times = [a.start_ms / 1000 for a in anchors]
+        anchor_confidences = [a.confidence for a in anchors]
         ellipsis = "..." if len(anchors) > 10 else ""
-        logger.info(f"Anchor segment indices: {anchor_indices[:10]}{ellipsis}")
+
+        logger.debug(f"[Anchors] Segment indices: {anchor_indices[:10]}{ellipsis}")
         times_fmt = [f"{t:.1f}" for t in anchor_times[:10]]
-        logger.info(f"Anchor times (s): {times_fmt}{ellipsis}")
+        logger.debug(f"[Anchors] Times (s): {times_fmt}{ellipsis}")
+        conf_fmt = [f"{c:.2f}" for c in anchor_confidences[:10]]
+        logger.debug(f"[Anchors] Confidences: {conf_fmt}{ellipsis}")
+
+        # Calculate anchor coverage
+        anchor_coverage = (anchor_indices[-1] - anchor_indices[0]) / len(segments) * 100
+        avg_anchor_confidence = sum(anchor_confidences) / len(anchor_confidences)
+        logger.debug(
+            f"[Anchors] Coverage: {anchor_coverage:.1f}% of segments, "
+            f"avg_confidence={avg_anchor_confidence:.3f}"
+        )
 
         # Warn if anchors are all clustered at the beginning
         if anchors and anchor_indices[-1] < len(segments) * 0.3:
             logger.warning(
-                f"Anchors clustered in first 30% of transcript! "
+                f"[Anchors] ⚠️ Anchors clustered in first 30% of transcript! "
                 f"Last anchor at segment {anchor_indices[-1]}/{len(segments)}"
             )
 
@@ -398,15 +460,20 @@ def segment_into_regions(
             )
         )
 
-    logger.info(f"Created {len(regions)} regions from {len(anchors)} anchors")
+    logger.info(f"[Regions] Created {len(regions)} regions from {len(anchors)} anchors")
 
     # Log region details for debugging
     for i, region in enumerate(regions):
-        logger.info(
-            f"Region {i}: segments {region.start_segment_idx}-{region.end_segment_idx} "
-            f"({len(region.segments)} segs), "
-            f"words {region.word_start_idx}-{region.word_end_idx}, "
-            f"time {region.time_start_ms/1000:.1f}s-{region.time_end_ms/1000:.1f}s"
+        region_duration = region.time_end_ms - region.time_start_ms
+        word_count = region.word_end_idx - region.word_start_idx
+        seg_range = f"{region.start_segment_idx}-{region.end_segment_idx}"
+        word_range = f"{region.word_start_idx}-{region.word_end_idx}"
+        time_range = f"{region.time_start_ms/1000:.1f}s-{region.time_end_ms/1000:.1f}s"
+        logger.debug(
+            f"[Regions] Region {i}: segments {seg_range} "
+            f"({len(region.segments)} segs), words {word_range} "
+            f"({word_count} words), time {time_range} "
+            f"(duration={region_duration/1000:.1f}s)"
         )
 
     return regions
@@ -581,12 +648,24 @@ def align_region(
 
     # Log region alignment results
     if segment_count > 0:
-        logger.info(
-            f"Region {region.start_segment_idx}-{region.end_segment_idx}: "
-            f"matched={matched_count}/{segment_count} "
-            f"({matched_count/segment_count*100:.0f}%), "
+        match_rate = matched_count / segment_count * 100
+        r_range = f"{region.start_segment_idx}-{region.end_segment_idx}"
+        logger.debug(
+            f"[Region Align] Region {r_range}: "
+            f"matched={matched_count}/{segment_count} ({match_rate:.0f}%), "
             f"interpolated={interpolated_count}"
         )
+
+        # DEBUG: Log confidence distribution for this region
+        if aligned:
+            region_confidences = [s.confidence for s in aligned]
+            avg_conf = sum(region_confidences) / len(region_confidences)
+            min_conf = min(region_confidences)
+            max_conf = max(region_confidences)
+            logger.debug(
+                f"[Region Align] Region {r_range} confidence: "
+                f"avg={avg_conf:.3f}, min={min_conf:.3f}, max={max_conf:.3f}"
+            )
 
     return aligned
 
@@ -771,13 +850,24 @@ def align_segments_hardy(
     4. Validate and fix issues
     """
     if not segments or not words:
+        logger.debug("[HARDY] Empty input, returning empty result")
         return []
 
     audio_duration_ms = int(words[-1].end * 1000) if words else 0
 
     logger.info(
-        f"Starting HARDY alignment: {len(segments)} segments, "
-        f"{len(words)} words, {audio_duration_ms}ms audio"
+        f"[HARDY] Starting alignment: segments={len(segments)}, "
+        f"words={len(words)}, audio_duration={audio_duration_ms}ms "
+        f"({audio_duration_ms/1000:.1f}s)"
+    )
+
+    # DEBUG: Log configuration thresholds
+    logger.debug(
+        f"[HARDY] Configuration: "
+        f"ANCHOR_MIN_CONFIDENCE={ANCHOR_MIN_CONFIDENCE}, "
+        f"ANCHOR_MIN_WORDS={ANCHOR_MIN_WORDS}, "
+        f"MIN_SEGMENT_CONFIDENCE={MIN_SEGMENT_CONFIDENCE}, "
+        f"TIME_WINDOW_SECONDS={TIME_WINDOW_SECONDS}"
     )
 
     # Level 1: Find anchor points
@@ -830,10 +920,37 @@ def align_segments_hardy(
         methods[seg.method] = methods.get(seg.method, 0) + 1
 
     avg_confidence = compute_region_confidence(aligned_final)
+
+    # DEBUG: Detailed statistics
+    confidences = [s.confidence for s in aligned_final]
+    high_conf = len([c for c in confidences if c >= 0.75])
+    med_conf = len([c for c in confidences if 0.5 <= c < 0.75])
+    low_conf = len([c for c in confidences if c < 0.5])
+
     logger.info(
-        f"HARDY alignment complete: avg_confidence={avg_confidence:.2f}, "
+        f"[HARDY] ✅ Alignment complete: "
+        f"avg_confidence={avg_confidence:.3f}, "
         f"methods={methods}"
     )
+
+    logger.debug(
+        f"[HARDY] Confidence distribution: "
+        f"high(>=0.75)={high_conf}, "
+        f"med(0.5-0.75)={med_conf}, "
+        f"low(<0.5)={low_conf}"
+    )
+
+    # DEBUG: Log first and last aligned segments
+    if aligned_final:
+        first = aligned_final[0]
+        last = aligned_final[-1]
+        logger.debug(
+            f"[HARDY] Aligned range: "
+            f"first={{startMs={first.start_ms}, endMs={first.end_ms}, "
+            f"method={first.method}, conf={first.confidence:.3f}}}, "
+            f"last={{startMs={last.start_ms}, endMs={last.end_ms}, "
+            f"method={last.method}, conf={last.confidence:.3f}}}"
+        )
 
     return aligned_final
 
@@ -856,34 +973,56 @@ async def get_whisperx_timestamps(audio_base64: str) -> List[Word]:
 
     # Decode base64 to get audio bytes
     audio_bytes = base64.b64decode(audio_base64)
+    audio_size_mb = len(audio_bytes) / (1024 * 1024)
 
-    logger.info(f"Calling WhisperX with {len(audio_bytes)} bytes of audio")
+    logger.info(
+        f"[WhisperX] Calling Replicate API: "
+        f"audio_size={audio_size_mb:.2f}MB, "
+        f"base64_length={len(audio_base64)}"
+    )
 
     # Use data URI - more reliable than file handles in Docker containers
     # Replicate accepts data URIs in the format: data:audio/mpeg;base64,<data>
     audio_data_uri = f"data:audio/mpeg;base64,{audio_base64}"
 
+    logger.debug(
+        f"[WhisperX] Request parameters: "
+        f"model={WHISPERX_MODEL[:50]}..., "
+        f"align_output=True, batch_size=16, language=en"
+    )
+
     try:
         # Call WhisperX via Replicate
         client = replicate.Client(api_token=api_token)
 
-        output = client.run(
-            WHISPERX_MODEL,
-            input={
-                "audio_file": audio_data_uri,
-                "align_output": True,
-                "batch_size": 16,
-                "language": "en",
-            },
-        )
+        with Timer("WhisperX API call"):
+            output = client.run(
+                WHISPERX_MODEL,
+                input={
+                    "audio_file": audio_data_uri,
+                    "align_output": True,
+                    "batch_size": 16,
+                    "language": "en",
+                },
+            )
+
+        # DEBUG: Log raw output structure
+        if isinstance(output, dict):
+            logger.debug(
+                f"[WhisperX] Raw output keys: {list(output.keys())}, "
+                f"segment_count={len(output.get('segments', []))}"
+            )
 
         # Parse the output to extract words with timestamps
         words = []
         word_idx = 0
+        segments_with_words = 0
+        segments_without_words = 0
 
         if isinstance(output, dict) and "segments" in output:
             for segment in output["segments"]:
                 if "words" in segment:
+                    segments_with_words += 1
                     for w in segment["words"]:
                         words.append(
                             Word(
@@ -894,30 +1033,57 @@ async def get_whisperx_timestamps(audio_base64: str) -> List[Word]:
                             )
                         )
                         word_idx += 1
+                else:
+                    segments_without_words += 1
+
+        logger.debug(
+            f"[WhisperX] Parsed output: "
+            f"segments_with_words={segments_with_words}, "
+            f"segments_without_words={segments_without_words}, "
+            f"total_words={len(words)}"
+        )
 
         if not words:
+            logger.error("[WhisperX] No words returned - check audio format")
             raise AlignmentError("WhisperX returned no words - check audio format")
 
         # Diagnostic logging - understand what WhisperX returned
         first_word = words[0] if words else None
         last_word = words[-1] if words else None
+        total_duration = last_word.end - first_word.start
+
         logger.info(
-            f"WhisperX returned {len(words)} words spanning "
-            f"{first_word.start:.1f}s to {last_word.end:.1f}s "
-            f"({last_word.end - first_word.start:.1f}s total)"
+            f"[WhisperX] ✅ Transcription complete: "
+            f"words={len(words)}, "
+            f"duration={total_duration:.1f}s "
+            f"({first_word.start:.1f}s to {last_word.end:.1f}s)"
         )
 
-        # Log sample words for debugging
-        if len(words) > 10:
-            sample_words = [w.word for w in words[:5]]
-            sample_end = [w.word for w in words[-5:]]
-            logger.info(f"First 5 words: {sample_words}")
-            logger.info(f"Last 5 words: {sample_end}")
+        # DEBUG: Log sample words with timestamps
+        if len(words) >= 10:
+            sample_start = [(w.word, f"{w.start:.2f}s") for w in words[:5]]
+            sample_end = [(w.word, f"{w.start:.2f}s") for w in words[-5:]]
+            logger.debug(f"[WhisperX] First 5 words with times: {sample_start}")
+            logger.debug(f"[WhisperX] Last 5 words with times: {sample_end}")
+
+        # DEBUG: Log word duration statistics
+        word_durations = [w.end - w.start for w in words]
+        avg_word_duration = sum(word_durations) / len(word_durations)
+        min_word_duration = min(word_durations)
+        max_word_duration = max(word_durations)
+        logger.debug(
+            f"[WhisperX] Word duration stats: "
+            f"avg={avg_word_duration:.3f}s, "
+            f"min={min_word_duration:.3f}s, "
+            f"max={max_word_duration:.3f}s"
+        )
 
         return words
 
+    except AlignmentError:
+        raise
     except Exception as e:
-        logger.error(f"WhisperX API call failed: {e}")
+        logger.error(f"[WhisperX] ❌ API call failed: {type(e).__name__}: {e}")
         raise AlignmentError(f"WhisperX API call failed: {e}")
 
 
@@ -939,6 +1105,12 @@ async def align_transcript(
     Returns:
         List of segment dicts with corrected timestamps and confidence scores
     """
+    logger.debug(
+        f"[align_transcript] Starting alignment: "
+        f"segments={len(segments)}, "
+        f"audio_base64_length={len(audio_base64)}"
+    )
+
     # Parse input segments
     input_segments = [
         Segment(
@@ -951,14 +1123,46 @@ async def align_transcript(
         for i, s in enumerate(segments)
     ]
 
+    # DEBUG: Log input segment statistics
+    if input_segments:
+        total_text_chars = sum(len(s.text) for s in input_segments)
+        total_words = sum(len(s.text.split()) for s in input_segments)
+        gemini_duration_ms = input_segments[-1].end_ms
+        logger.debug(
+            f"[align_transcript] Input stats: "
+            f"total_chars={total_text_chars}, "
+            f"total_words={total_words}, "
+            f"gemini_duration_ms={gemini_duration_ms} "
+            f"({gemini_duration_ms/1000:.1f}s)"
+        )
+
     # Get word-level timestamps from WhisperX
-    words = await get_whisperx_timestamps(audio_base64)
+    with Timer("get_whisperx_timestamps"):
+        words = await get_whisperx_timestamps(audio_base64)
+
+    logger.debug(
+        f"[align_transcript] WhisperX returned {len(words)} words, "
+        f"now running HARDY alignment"
+    )
 
     # Run HARDY alignment
-    aligned = align_segments_hardy(input_segments, words)
+    with Timer("align_segments_hardy"):
+        aligned = align_segments_hardy(input_segments, words)
+
+    # DEBUG: Log alignment results comparison
+    if aligned and input_segments:
+        gemini_duration = input_segments[-1].end_ms
+        aligned_duration = aligned[-1].end_ms
+        duration_diff = aligned_duration - gemini_duration
+        logger.debug(
+            f"[align_transcript] Duration comparison: "
+            f"gemini={gemini_duration}ms ({gemini_duration/1000:.1f}s), "
+            f"aligned={aligned_duration}ms ({aligned_duration/1000:.1f}s), "
+            f"diff={duration_diff}ms ({duration_diff/1000:.1f}s)"
+        )
 
     # Convert back to dicts
-    return [
+    result = [
         {
             "speakerId": s.speaker_id,
             "text": s.text,
@@ -968,3 +1172,8 @@ async def align_transcript(
         }
         for s in aligned
     ]
+
+    logger.debug(
+        f"[align_transcript] Alignment complete, returning {len(result)} segments"
+    )
+    return result

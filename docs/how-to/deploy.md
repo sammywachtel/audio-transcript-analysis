@@ -213,6 +213,57 @@ Set up alerts in Google Cloud Console:
 - Storage > 80% of quota
 - Unusual traffic spikes
 
+## Debug Logging
+
+Both containers include comprehensive debug logging for troubleshooting.
+
+### Alignment Service (Cloud Run)
+
+Debug logging is **enabled by default** via `LOG_LEVEL=DEBUG` environment variable set in the deployment workflow.
+
+**To view debug logs:**
+1. Go to **Cloud Run** → **alignment-service** → **Logs**
+2. Click the severity filter dropdown
+3. Select **"Debug"** to include debug-level logs
+
+**Log prefixes to look for:**
+- `[Align]` - Request handling, timing, confidence distribution
+- `[WhisperX]` - Replicate API calls, word timestamps, duration stats
+- `[HARDY]` - Alignment algorithm, anchor detection, region alignment
+- `[Anchors]` - Anchor point matching, skip statistics
+- `[Regions]` - Region segmentation details
+- `[Timer]` - Operation timing measurements
+
+**To disable debug logging** (reduce log volume in production):
+```bash
+gcloud run services update alignment-service \
+  --region=us-west1 \
+  --set-env-vars="LOG_LEVEL=INFO"
+```
+
+Or remove `--set-env-vars=LOG_LEVEL=DEBUG` from `.github/workflows/deploy.yml`.
+
+### Cloud Functions (Firebase)
+
+Debug logs are always written. To view them:
+
+1. Go to **Cloud Console** → **Logging** → **Logs Explorer**
+2. Filter by resource: `Cloud Function` → `transcribeAudio`
+3. Set severity to include **Debug**
+
+**Log prefixes to look for:**
+- `[Transcribe]` - File processing, timing, status updates
+- `[Gemini]` - API calls, response parsing
+- `[Transform]` - Data model transformation
+
+### Frontend (Browser Console)
+
+The `useAudioPlayer` hook logs drift correction details to the browser console:
+- `[Drift Analysis]` - Audio vs transcript duration comparison
+- `[Auto-Sync]` - Timestamp scaling when drift correction is applied
+
+Open browser DevTools (F12) → Console to view these logs.
+
 ## Troubleshooting
 
 ### Deployment fails with permission error

@@ -1,13 +1,14 @@
 import { initializeApp, FirebaseApp } from 'firebase/app';
-import { getAuth, Auth, GoogleAuthProvider } from 'firebase/auth';
+import { getAuth, Auth, GoogleAuthProvider, connectAuthEmulator } from 'firebase/auth';
 import {
   getFirestore,
   Firestore,
   initializeFirestore,
   persistentLocalCache,
-  persistentMultipleTabManager
+  persistentMultipleTabManager,
+  connectFirestoreEmulator
 } from 'firebase/firestore';
-import { getStorage, FirebaseStorage } from 'firebase/storage';
+import { getStorage, FirebaseStorage, connectStorageEmulator } from 'firebase/storage';
 import { getFunctions, Functions, connectFunctionsEmulator } from 'firebase/functions';
 
 /**
@@ -86,9 +87,12 @@ export const storage: FirebaseStorage = getStorage(app);
 export const functions: Functions = getFunctions(app);
 
 // Connect to emulators in development
+// Set VITE_USE_FIREBASE_EMULATORS=true in .env or run with npm run dev:full
 if (import.meta.env.DEV && import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true') {
   console.log('[Firebase] Connecting to local emulators...');
+  connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
+  connectFirestoreEmulator(db, 'localhost', 8081);
+  connectStorageEmulator(storage, 'localhost', 9199);
   connectFunctionsEmulator(functions, 'localhost', 5001);
-  // Note: Firestore and Storage emulator connections are handled differently
-  // and typically configured at the service level if needed
+  console.log('[Firebase] ✅ Connected to emulators (Auth:9099, Firestore:8081, Storage:9199, Functions:5001)');
 }

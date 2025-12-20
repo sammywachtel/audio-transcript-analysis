@@ -24,8 +24,11 @@ npx firebase deploy      # Deploy to Firebase
 ### Core Data Flow
 1. User signs in with Google via Firebase Auth
 2. User uploads audio file via Library page
-3. Audio uploads to Firebase Storage, creates Firestore doc with `status: 'processing'`
-4. Cloud Function triggers on upload, calls Gemini API server-side
+3. Audio uploads to Firebase Storage, creates Firestore doc with `status: 'processing'`, `alignmentStatus: 'pending'`
+4. Cloud Function triggers on upload:
+   - Calls Gemini API for transcription (speaker diarization, terms, topics, etc.)
+   - Calls WhisperX alignment service for precise timestamps
+   - On alignment failure, falls back to Gemini timestamps with `alignmentStatus: 'fallback'`
 5. Function writes results to Firestore with `status: 'complete'`
 6. Real-time Firestore listener updates UI automatically
 7. Viewer page renders transcript with synchronized audio playback
@@ -66,9 +69,10 @@ VITE_FIREBASE_MESSAGING_SENDER_ID=...
 VITE_FIREBASE_APP_ID=...
 ```
 
-Gemini API key is stored as Firebase Secret (not in `.env`):
+Secrets stored via Firebase (not in `.env`):
 ```bash
-npx firebase functions:secrets:set GEMINI_API_KEY
+npx firebase functions:secrets:set GEMINI_API_KEY          # Gemini API key
+npx firebase functions:secrets:set ALIGNMENT_SERVICE_URL   # WhisperX alignment service URL
 ```
 
 ## Documentation
@@ -79,6 +83,8 @@ Documentation is organized using the [Diátaxis framework](https://diataxis.fr/)
 - **[how-to/](docs/how-to/)** - Task-oriented guides (Firebase setup, deployment, testing)
 - **[reference/](docs/reference/)** - Technical reference (architecture, data model)
 - **[explanation/](docs/explanation/)** - Background and design decisions
+
+IMPORTANT: Update documents any time changes occur involving project/library organization, architecture, process, functionality, algorithem, cicd, pipeline, authentication, data, data model, deployment, etc changes, it must be documented within the docs/ folder. There is no need to update documentation for low-level code changes, refactoring, bug fixing, or low-level implementation detail.
 
 When updating documentation:
 1. Place content in the appropriate Diátaxis category
@@ -91,7 +97,11 @@ When updating documentation:
 - **Real-time Updates:** Firestore `onSnapshot` listeners for instant UI updates
 - **Offline Support:** Firebase automatic offline persistence
 - **Timestamp Handling:** All timestamps in milliseconds (`startMs`, `endMs`)
-- **Drift Correction:** If audio duration differs >5% from transcript, segments are linearly scaled
+- **Alignment Status:** Server-side field indicating timestamp quality:
+  - `'pending'` - Processing not yet complete
+  - `'aligned'` - WhisperX alignment succeeded (precise timestamps)
+  - `'fallback'` - WhisperX failed, using Gemini timestamps (may be ~5-10s off)
+- **Drift Correction:** Client-side fallback only when `alignmentStatus` is not set (legacy data). Skipped for server-aligned content.
 - **Security:** Firestore rules enforce user isolation (`userId` field)
 
 ## Testing

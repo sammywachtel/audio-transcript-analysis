@@ -16,8 +16,9 @@ import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db, bucket } from './index';
 
-// Define secret for Gemini API key (set via: firebase functions:secrets:set GEMINI_API_KEY)
+// Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
+const alignmentServiceUrl = defineSecret('ALIGNMENT_SERVICE_URL');
 
 // Types matching the client-side schema
 interface AIResponse {
@@ -76,13 +77,30 @@ interface Person {
   userNotes?: string;
 }
 
+// Alignment service types
+interface AlignmentRequest {
+  audio_base64: string;
+  segments: { speakerId: string; text: string; startMs: number; endMs: number }[];
+}
+
+interface AlignmentResponse {
+  segments: { speakerId: string; text: string; startMs: number; endMs: number; confidence: number }[];
+  average_confidence: number;
+}
+
+interface AlignmentResult {
+  segments: Segment[];
+  alignmentStatus: 'aligned' | 'fallback';
+  alignmentError?: string;
+}
+
 /**
  * Triggered when an audio file is uploaded to storage.
  * Path pattern: audio/{userId}/{conversationId}.{extension}
  */
 export const transcribeAudio = onObjectFinalized(
   {
-    secrets: [geminiApiKey],
+    secrets: [geminiApiKey, alignmentServiceUrl],
     memory: '1GiB', // Audio processing needs more memory
     timeoutSeconds: 540, // 9 minutes (max for 1st gen functions)
     region: 'us-central1'
@@ -91,29 +109,45 @@ export const transcribeAudio = onObjectFinalized(
     const filePath = event.data.name;
     const contentType = event.data.contentType;
 
+    // DEBUG: Log raw event data for troubleshooting
+    console.debug('[Transcribe] Storage event received:', {
+      bucket: event.data.bucket,
+      name: event.data.name,
+      contentType: event.data.contentType,
+      size: event.data.size,
+      timeCreated: event.data.timeCreated,
+      updated: event.data.updated,
+      md5Hash: event.data.md5Hash,
+      generation: event.data.generation,
+      metageneration: event.data.metageneration
+    });
+
     // Only process audio files in the audio/ directory
     if (!filePath.startsWith('audio/') || !contentType?.startsWith('audio/')) {
-      console.log('Skipping non-audio file:', filePath);
+      console.debug('[Transcribe] Skipping non-audio file:', { filePath, contentType });
       return;
     }
 
     // Parse path: audio/{userId}/{conversationId}.{ext}
     const pathParts = filePath.split('/');
     if (pathParts.length !== 3) {
-      console.error('Invalid audio path structure:', filePath);
+      console.error('[Transcribe] Invalid audio path structure:', filePath);
       return;
     }
 
     const userId = pathParts[1];
     const fileName = pathParts[2];
     const conversationId = fileName.split('.')[0];
+    const fileExtension = fileName.split('.').pop();
 
-    console.log('Processing audio file:', {
+    console.log('[Transcribe] Processing audio file:', {
       filePath,
       userId,
       conversationId,
       contentType,
-      size: event.data.size
+      fileExtension,
+      sizeBytes: event.data.size,
+      sizeMB: (event.data.size / (1024 * 1024)).toFixed(2)
     });
 
     try {
@@ -124,42 +158,146 @@ export const transcribeAudio = onObjectFinalized(
       });
 
       // Download audio file to memory
+      console.debug('[Transcribe] Starting audio download from Storage...');
+      const downloadStartTime = Date.now();
       const file = bucket.file(filePath);
       const [audioBuffer] = await file.download();
+      const downloadDurationMs = Date.now() - downloadStartTime;
 
-      console.log('Downloaded audio file:', {
+      console.log('[Transcribe] Audio downloaded:', {
         conversationId,
-        bufferSize: audioBuffer.length
+        bufferSizeBytes: audioBuffer.length,
+        bufferSizeMB: (audioBuffer.length / (1024 * 1024)).toFixed(2),
+        downloadDurationMs,
+        downloadSpeedMBps: ((audioBuffer.length / (1024 * 1024)) / (downloadDurationMs / 1000)).toFixed(2)
       });
 
       // Process with Gemini
+      console.debug('[Transcribe] Calling Gemini API...', {
+        model: 'gemini-2.5-flash',
+        contentType,
+        audioSizeBytes: audioBuffer.length
+      });
+      const geminiStartTime = Date.now();
+
       const result = await processWithGemini(
         audioBuffer,
         contentType,
         geminiApiKey.value()
       );
 
+      const geminiDurationMs = Date.now() - geminiStartTime;
+      console.log('[Transcribe] Gemini API response received:', {
+        conversationId,
+        durationMs: geminiDurationMs,
+        durationSec: (geminiDurationMs / 1000).toFixed(1),
+        segmentCount: result.segments?.length ?? 0,
+        speakerCount: result.speakers?.length ?? 0,
+        termCount: result.terms?.length ?? 0,
+        topicCount: result.topics?.length ?? 0,
+        personCount: result.people?.length ?? 0,
+        title: result.title
+      });
+
+      // DEBUG: Log sample segment timestamps from Gemini
+      if (result.segments && result.segments.length > 0) {
+        const firstSeg = result.segments[0];
+        const lastSeg = result.segments[result.segments.length - 1];
+        console.debug('[Transcribe] Gemini timestamp sample:', {
+          firstSegment: { startMs: firstSeg.startMs, endMs: firstSeg.endMs, textPreview: firstSeg.text.substring(0, 50) },
+          lastSegment: { startMs: lastSeg.startMs, endMs: lastSeg.endMs, textPreview: lastSeg.text.substring(0, 50) },
+          totalDurationMs: lastSeg.endMs,
+          totalDurationFormatted: `${Math.floor(lastSeg.endMs / 60000)}:${((lastSeg.endMs % 60000) / 1000).toFixed(1)}`
+        });
+      }
+
       // Transform AI response to our data model
+      console.debug('[Transcribe] Transforming AI response to internal data model...');
+      const transformStartTime = Date.now();
       const processedData = transformAIResponse(result, conversationId, userId);
+      const transformDurationMs = Date.now() - transformStartTime;
+
+      console.debug('[Transcribe] Transform complete:', {
+        transformDurationMs,
+        finalSegmentCount: processedData.segments.length,
+        termOccurrenceCount: processedData.termOccurrences.length,
+        durationMs: processedData.durationMs,
+        durationFormatted: `${Math.floor(processedData.durationMs / 60000)}:${((processedData.durationMs % 60000) / 1000).toFixed(1)}`
+      });
+
+      // Call alignment service to get accurate timestamps from WhisperX
+      // Calculate time remaining for alignment (540s total timeout)
+      const elapsedMs = Date.now() - downloadStartTime;
+      const alignmentTimeoutMs = Math.max(60000, (540 * 1000) - elapsedMs - 30000); // Leave 30s buffer
+
+      console.log('[Transcribe] Calling alignment service...', {
+        conversationId,
+        elapsedMs,
+        alignmentTimeoutMs,
+        segmentCount: processedData.segments.length
+      });
+
+      const alignmentStartTime = Date.now();
+      const alignmentResult = await callAlignmentService(
+        audioBuffer,
+        processedData.segments,
+        alignmentTimeoutMs,
+        alignmentServiceUrl.value()
+      );
+      const alignmentDurationMs = Date.now() - alignmentStartTime;
+
+      console.log('[Transcribe] Alignment result:', {
+        conversationId,
+        alignmentStatus: alignmentResult.alignmentStatus,
+        alignmentError: alignmentResult.alignmentError,
+        alignmentDurationMs
+      });
+
+      // Use aligned segments if successful, otherwise keep Gemini segments
+      const finalSegments = alignmentResult.segments;
+      const lastSegment = finalSegments[finalSegments.length - 1];
+      const finalDurationMs = lastSegment ? lastSegment.endMs : processedData.durationMs;
 
       // Save results to Firestore
+      console.debug('[Transcribe] Saving results to Firestore...');
+      const firestoreStartTime = Date.now();
       await db.collection('conversations').doc(conversationId).update({
         ...processedData,
+        segments: finalSegments,
+        durationMs: finalDurationMs,
         status: 'complete',
+        alignmentStatus: alignmentResult.alignmentStatus,
+        alignmentError: alignmentResult.alignmentError || null,
         audioStoragePath: filePath,
         updatedAt: FieldValue.serverTimestamp()
       });
+      const firestoreDurationMs = Date.now() - firestoreStartTime;
 
-      console.log('Transcription complete:', {
+      const totalDurationMs = Date.now() - downloadStartTime;
+      console.log('[Transcribe] ✅ Transcription complete:', {
         conversationId,
-        segmentCount: processedData.segments.length,
-        speakerCount: Object.keys(processedData.speakers).length
+        segmentCount: finalSegments.length,
+        speakerCount: Object.keys(processedData.speakers).length,
+        termCount: Object.keys(processedData.terms).length,
+        topicCount: processedData.topics.length,
+        personCount: processedData.people.length,
+        alignmentStatus: alignmentResult.alignmentStatus,
+        timingMs: {
+          download: downloadDurationMs,
+          gemini: geminiDurationMs,
+          transform: transformDurationMs,
+          alignment: alignmentDurationMs,
+          firestore: firestoreDurationMs,
+          total: totalDurationMs
+        }
       });
 
     } catch (error) {
-      console.error('Transcription failed:', {
+      console.error('[Transcribe] ❌ Transcription failed:', {
         conversationId,
-        error: error instanceof Error ? error.message : String(error)
+        errorType: error instanceof Error ? error.constructor.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        errorStack: error instanceof Error ? error.stack : undefined
       });
 
       // Update status to failed
@@ -168,6 +306,8 @@ export const transcribeAudio = onObjectFinalized(
         processingError: error instanceof Error ? error.message : 'Unknown error',
         updatedAt: FieldValue.serverTimestamp()
       });
+
+      console.debug('[Transcribe] Firestore updated with failed status');
     }
   }
 );
@@ -272,6 +412,12 @@ async function processWithGemini(
     Populate the JSON schema provided in the configuration.
   `;
 
+  console.debug('[Gemini] Sending request to model...', {
+    mimeType: contentType,
+    audioBase64Length: audioBuffer.toString('base64').length,
+    promptLength: prompt.length
+  });
+
   const result = await model.generateContent([
     {
       inlineData: {
@@ -283,9 +429,30 @@ async function processWithGemini(
   ]);
 
   const responseText = result.response.text();
+  console.debug('[Gemini] Raw response received:', {
+    responseLength: responseText.length,
+    startsWithBackticks: responseText.startsWith('```'),
+    first100Chars: responseText.substring(0, 100)
+  });
+
   const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
 
-  return JSON.parse(cleanJson) as AIResponse;
+  console.debug('[Gemini] Cleaned JSON:', {
+    cleanedLength: cleanJson.length,
+    first100Chars: cleanJson.substring(0, 100)
+  });
+
+  try {
+    const parsed = JSON.parse(cleanJson) as AIResponse;
+    console.debug('[Gemini] JSON parsed successfully');
+    return parsed;
+  } catch (parseError) {
+    console.error('[Gemini] JSON parse failed:', {
+      error: parseError instanceof Error ? parseError.message : String(parseError),
+      cleanJsonPreview: cleanJson.substring(0, 500)
+    });
+    throw parseError;
+  }
 }
 
 /**
@@ -306,6 +473,12 @@ function transformAIResponse(
   people: Person[];
   durationMs: number;
 } {
+  console.debug('[Transform] Starting transformation:', {
+    conversationId,
+    inputSegmentCount: data.segments?.length ?? 0,
+    inputSpeakerCount: data.speakers?.length ?? 0
+  });
+
   // Map speakers
   const speakers: Record<string, Speaker> = {};
   data.speakers.forEach((s, idx) => {
@@ -315,6 +488,7 @@ function transformAIResponse(
       colorIndex: idx
     };
   });
+  console.debug('[Transform] Speakers mapped:', Object.keys(speakers));
 
   // Prepare segments with temp IDs for topic resolution
   let rawSegments = data.segments.map((s, idx) => ({
@@ -415,6 +589,19 @@ function transformAIResponse(
   // Clean up temp IDs
   const cleanSegments: Segment[] = segments.map(({ tempId, ...rest }) => rest);
 
+  console.debug('[Transform] Transformation complete:', {
+    title: data.title,
+    speakerCount: Object.keys(speakers).length,
+    segmentCount: cleanSegments.length,
+    termCount: Object.keys(terms).length,
+    termOccurrenceCount: termOccurrences.length,
+    topicCount: topics.length,
+    personCount: people.length,
+    durationMs,
+    firstSegmentMs: cleanSegments[0]?.startMs,
+    lastSegmentEndMs: cleanSegments[cleanSegments.length - 1]?.endMs
+  });
+
   return {
     title: data.title,
     speakers,
@@ -425,4 +612,114 @@ function transformAIResponse(
     people,
     durationMs
   };
+}
+
+/**
+ * Call the alignment service to get accurate timestamps from WhisperX
+ * Falls back to original Gemini segments if alignment fails
+ */
+async function callAlignmentService(
+  audioBuffer: Buffer,
+  segments: Segment[],
+  timeoutMs: number,
+  serviceUrl: string
+): Promise<AlignmentResult> {
+  // If no service URL configured, skip alignment
+  if (!serviceUrl || serviceUrl.trim() === '') {
+    console.warn('[Alignment] No ALIGNMENT_SERVICE_URL configured, skipping alignment');
+    return {
+      segments,
+      alignmentStatus: 'fallback',
+      alignmentError: 'Alignment service not configured'
+    };
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    console.debug('[Alignment] Preparing request...', {
+      serviceUrl,
+      segmentCount: segments.length,
+      audioSizeBytes: audioBuffer.length,
+      timeoutMs
+    });
+
+    const requestBody: AlignmentRequest = {
+      audio_base64: audioBuffer.toString('base64'),
+      segments: segments.map(s => ({
+        speakerId: s.speakerId,
+        text: s.text,
+        startMs: s.startMs,
+        endMs: s.endMs
+      }))
+    };
+
+    console.debug('[Alignment] Sending request to service...');
+    const response = await fetch(`${serviceUrl}/align`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[Alignment] Service returned error:', {
+        status: response.status,
+        statusText: response.statusText,
+        errorText: errorText.substring(0, 500)
+      });
+      throw new Error(`Alignment service error: ${response.status} ${response.statusText}`);
+    }
+
+    const result: AlignmentResponse = await response.json();
+
+    console.log('[Alignment] ✅ Alignment successful:', {
+      averageConfidence: result.average_confidence,
+      segmentCount: result.segments.length
+    });
+
+    // Quality gate: warn on low confidence but still apply
+    if (result.average_confidence < 0.55) {
+      console.warn('[Alignment] ⚠️ Low confidence alignment:', {
+        averageConfidence: result.average_confidence
+      });
+    }
+
+    // Map aligned segments back to our Segment format
+    const alignedSegments: Segment[] = segments.map((seg, idx) => ({
+      ...seg,
+      startMs: result.segments[idx]?.startMs ?? seg.startMs,
+      endMs: result.segments[idx]?.endMs ?? seg.endMs
+    }));
+
+    return {
+      segments: alignedSegments,
+      alignmentStatus: 'aligned'
+    };
+
+  } catch (error) {
+    clearTimeout(timeoutId);
+
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isTimeout = error instanceof Error && error.name === 'AbortError';
+
+    console.error('[Alignment] ❌ Alignment failed:', {
+      errorType: isTimeout ? 'TIMEOUT' : 'ERROR',
+      errorMessage,
+      usingFallback: true
+    });
+
+    // Return original segments with fallback status
+    return {
+      segments,
+      alignmentStatus: 'fallback',
+      alignmentError: isTimeout
+        ? `Alignment timed out after ${timeoutMs}ms`
+        : errorMessage
+    };
+  }
 }

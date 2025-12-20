@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "vite",
     "dev:local": "vite",
-    "dev:docker": "docker compose up --build",
-    "dev:backend": "docker compose up alignment-service --build",
+    "dev:docker": "docker compose build --no-cache && docker compose up",
+    "dev:backend": "docker compose build --no-cache alignment-service && docker compose up alignment-service",
+    "dev:full": "concurrently -n align,firebase,frontend -c blue,yellow,green \"npm run dev:backend\" \"npm run dev:emulators\" \"VITE_USE_FIREBASE_EMULATORS=true vite\"",
+    "dev:emulators": "GOOGLE_APPLICATION_CREDENTIALS= GEMINI_API_KEY=${GEMINI_API_KEY} ALIGNMENT_SERVICE_URL=http://localhost:8080 npx firebase emulators:start",
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest",
