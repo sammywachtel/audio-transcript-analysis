@@ -46,6 +46,20 @@ Configure in **Settings → Secrets and variables → Actions**:
 | `GCP_PROJECT_ID` | Your GCP project ID |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity provider |
 | `GCP_SERVICE_ACCOUNT` | Service account email |
+| `VITE_FIREBASE_API_KEY` | Firebase API key (from `firebase apps:sdkconfig`) |
+| `VITE_FIREBASE_AUTH_DOMAIN` | Firebase auth domain (e.g., `project-id.firebaseapp.com`) |
+| `VITE_FIREBASE_PROJECT_ID` | Firebase project ID |
+| `VITE_FIREBASE_STORAGE_BUCKET` | Storage bucket (e.g., `project-id.firebasestorage.app`) |
+| `VITE_FIREBASE_MESSAGING_SENDER_ID` | Messaging sender ID (project number) |
+| `VITE_FIREBASE_APP_ID` | Firebase app ID |
+| `ALIGNMENT_SERVICE_URL` | (Optional) URL of alignment service |
+
+> **Note**: The `VITE_` prefix is required - Vite only exposes environment variables with this prefix to client-side code.
+
+To get Firebase config values:
+```bash
+firebase apps:sdkconfig WEB --project=your-project-id
+```
 
 ### For Firebase Deployment
 
@@ -219,4 +233,14 @@ Check IAM roles for service account. See [Firebase Setup](firebase-setup.md#cicd
 
 ### Domain not authorized for sign-in
 
-Add domain to Firebase Console → Authentication → Settings → Authorized domains.
+Firebase Auth only allows sign-in from pre-approved domains. After deploying to Cloud Run, add the new domain:
+
+1. Go to [Firebase Console](https://console.firebase.google.com/) → Your Project
+2. **Authentication** → **Settings** → **Authorized domains**
+3. Click **Add domain**
+4. Add your Cloud Run domain (e.g., `audio-transcript-app-xxxxx-uw.a.run.app`)
+
+> **Tip**: Get your Cloud Run URL with:
+> ```bash
+> gcloud run services describe audio-transcript-app --region=us-west1 --format="value(status.url)"
+> ```

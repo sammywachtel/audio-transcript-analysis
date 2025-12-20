@@ -34,8 +34,17 @@ The script is **idempotent** - safe to rerun if it fails partway through. It wil
 
 **After running the script:**
 1. Enable Google Auth manually (link provided in output)
-2. Get Firebase web config and update `.env`
-3. Add service account key to GitHub Secrets
+2. Get Firebase web config: `firebase apps:sdkconfig WEB --project=PROJECT_ID`
+3. Update `.env` with Firebase config values
+4. Add service account key to GitHub Secrets: `FIREBASE_SERVICE_ACCOUNT` <!-- pragma: allowlist secret -->
+5. Add Firebase config to GitHub Secrets (for Cloud Run builds):
+   - `VITE_FIREBASE_API_KEY`
+   - `VITE_FIREBASE_AUTH_DOMAIN`
+   - `VITE_FIREBASE_PROJECT_ID`
+   - `VITE_FIREBASE_STORAGE_BUCKET`
+   - `VITE_FIREBASE_MESSAGING_SENDER_ID`
+   - `VITE_FIREBASE_APP_ID`
+6. After first Cloud Run deployment, add the Cloud Run domain to Firebase Auth authorized domains
 
 ---
 
@@ -111,9 +120,22 @@ gcloud services enable \
 
 ### Add Authorized Domains (for production)
 
+> **Critical**: Firebase Auth rejects sign-in requests from unauthorized domains. You MUST add your Cloud Run domain after deployment.
+
 1. **Authentication** → **Settings** → **Authorized domains**
 2. Click **Add domain**
-3. Add your production domain
+3. Add your Cloud Run domain (e.g., `audio-transcript-app-xxxxx-uw.a.run.app`)
+
+Get your Cloud Run URL:
+```bash
+gcloud run services describe audio-transcript-app --region=us-west1 --format="value(status.url)"
+```
+
+Common domains to add:
+- `localhost` (enabled by default)
+- `your-project.firebaseapp.com` (enabled by default)
+- `your-cloud-run-service-xxxxx-uw.a.run.app` (must add manually)
+- Custom domain if you have one
 
 ## Step 4: Create Firestore Database
 
