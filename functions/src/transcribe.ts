@@ -16,20 +16,25 @@ import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db, bucket } from './index';
 import { ProgressManager, ProcessingStep } from './progressManager';
-import { alignTimestamps } from './alignment';
+import { transcribeWithWhisperX, WhisperXSegment } from './alignment';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
+const huggingfaceAccessToken = defineSecret('HUGGINGFACE_ACCESS_TOKEN');  // For speaker diarization
 
-// Types matching the client-side schema
-interface AIResponse {
+// Gemini analysis-only response (analyzes WhisperX transcript)
+interface GeminiAnalysis {
   title: string;
-  speakers: { id: string; name: string }[];
-  segments: { speakerId: string; startMs: number; endMs: number; text: string }[];
-  terms: { id: string; term: string; definition: string; aliases: string[] }[];
   topics: { title: string; startSegmentIndex: number; endSegmentIndex: number; type: 'main' | 'tangent' }[];
+  terms: { id: string; term: string; definition: string; aliases: string[] }[];
   people: { name: string; affiliation: string }[];
+  speakerNotes?: {
+    speakerId: string;
+    inferredName?: string;  // Real name if speaker introduces themselves
+    role?: string;          // e.g., "host", "guest", "interviewer"
+    notes?: string;         // Additional context
+  }[];
 }
 
 interface Speaker {
@@ -85,7 +90,7 @@ interface Person {
  */
 export const transcribeAudio = onObjectFinalized(
   {
-    secrets: [geminiApiKey, replicateApiToken],
+    secrets: [geminiApiKey, replicateApiToken, huggingfaceAccessToken],
     memory: '1GiB', // Audio processing needs more memory
     timeoutSeconds: 540, // 9 minutes (max for 1st gen functions)
     region: 'us-central1'
@@ -163,127 +168,125 @@ export const transcribeAudio = onObjectFinalized(
         downloadSpeedMBps: ((audioBuffer.length / (1024 * 1024)) / (downloadDurationMs / 1000)).toFixed(2)
       });
 
-      // Process with Gemini
-      console.debug('[Transcribe] Calling Gemini API...', {
-        model: 'gemini-2.5-flash',
-        contentType,
-        audioSizeBytes: audioBuffer.length
+      // === NEW ARCHITECTURE: WhisperX-first transcription ===
+      // Step 1: Get transcript + timestamps from WhisperX
+      console.log('[Transcribe] Step 1: Calling WhisperX for transcription...');
+      const whisperxStartTime = Date.now();
+
+      // Pass HF token for speaker diarization (optional but recommended)
+      const hfToken = huggingfaceAccessToken.value();
+      if (!hfToken) {
+        console.warn('[Transcribe] HUGGINGFACE_ACCESS_TOKEN not set - speaker diarization will be disabled');
+      }
+
+      const whisperxResult = await transcribeWithWhisperX(
+        audioBuffer,
+        replicateApiToken.value(),
+        hfToken || undefined  // Pass undefined if empty to trigger warning
+      );
+
+      const whisperxDurationMs = Date.now() - whisperxStartTime;
+
+      if (whisperxResult.status === 'error') {
+        throw new Error(`WhisperX failed: ${whisperxResult.error}`);
+      }
+
+      console.log('[Transcribe] WhisperX transcription complete:', {
+        conversationId,
+        durationMs: whisperxDurationMs,
+        durationSec: (whisperxDurationMs / 1000).toFixed(1),
+        segmentCount: whisperxResult.segments.length,
+        firstSegment: whisperxResult.segments[0],
+        lastSegment: whisperxResult.segments[whisperxResult.segments.length - 1]
       });
+
+      // Step 2: Build segments from WhisperX output
+      console.debug('[Transcribe] Step 2: Building segments from WhisperX...');
+      const buildStartTime = Date.now();
+
+      const whisperxSegments = buildSegmentsFromWhisperX(whisperxResult.segments);
+
+      const buildDurationMs = Date.now() - buildStartTime;
+      console.debug('[Transcribe] Segments built:', {
+        buildDurationMs,
+        segmentCount: whisperxSegments.segments.length,
+        speakerCount: whisperxSegments.speakers.length
+      });
+
+      // Update progress: analyzing with Gemini
+      await progressManager.setStep(ProcessingStep.ANALYZING);
+
+      // Step 3: Call Gemini to analyze the transcript (not the audio!)
+      console.log('[Transcribe] Step 3: Calling Gemini for analysis...');
       const geminiStartTime = Date.now();
 
-      const result = await processWithGemini(
-        audioBuffer,
-        contentType,
+      const analysis = await analyzeTranscriptWithGemini(
+        whisperxSegments.segments,
+        whisperxSegments.speakers,
         geminiApiKey.value()
       );
 
       const geminiDurationMs = Date.now() - geminiStartTime;
-      console.log('[Transcribe] Gemini API response received:', {
+      console.log('[Transcribe] Gemini analysis complete:', {
         conversationId,
         durationMs: geminiDurationMs,
         durationSec: (geminiDurationMs / 1000).toFixed(1),
-        segmentCount: result.segments?.length ?? 0,
-        speakerCount: result.speakers?.length ?? 0,
-        termCount: result.terms?.length ?? 0,
-        topicCount: result.topics?.length ?? 0,
-        personCount: result.people?.length ?? 0,
-        title: result.title
+        title: analysis.title,
+        termCount: analysis.terms?.length ?? 0,
+        topicCount: analysis.topics?.length ?? 0,
+        personCount: analysis.people?.length ?? 0
       });
 
-      // Update progress: analyzing data
-      await progressManager.setStep(ProcessingStep.ANALYZING);
+      // Update progress: finalizing
+      await progressManager.setStep(ProcessingStep.FINALIZING);
 
-      // DEBUG: Log sample segment timestamps from Gemini
-      if (result.segments && result.segments.length > 0) {
-        const firstSeg = result.segments[0];
-        const lastSeg = result.segments[result.segments.length - 1];
-        console.debug('[Transcribe] Gemini timestamp sample:', {
-          firstSegment: { startMs: firstSeg.startMs, endMs: firstSeg.endMs, textPreview: firstSeg.text.substring(0, 50) },
-          lastSegment: { startMs: lastSeg.startMs, endMs: lastSeg.endMs, textPreview: lastSeg.text.substring(0, 50) },
-          totalDurationMs: lastSeg.endMs,
-          totalDurationFormatted: `${Math.floor(lastSeg.endMs / 60000)}:${((lastSeg.endMs % 60000) / 1000).toFixed(1)}`
-        });
-      }
-
-      // Transform AI response to our data model
-      console.debug('[Transcribe] Transforming AI response to internal data model...');
+      // Step 4: Transform to our data model (merge WhisperX + Gemini)
+      console.debug('[Transcribe] Step 4: Merging WhisperX and Gemini data...');
       const transformStartTime = Date.now();
-      const processedData = transformAIResponse(result, conversationId, userId);
-      const transformDurationMs = Date.now() - transformStartTime;
 
+      const processedData = mergeWhisperXAndGeminiData(
+        whisperxSegments,
+        analysis,
+        conversationId,
+        userId
+      );
+
+      const transformDurationMs = Date.now() - transformStartTime;
       console.debug('[Transcribe] Transform complete:', {
         transformDurationMs,
         finalSegmentCount: processedData.segments.length,
         termOccurrenceCount: processedData.termOccurrences.length,
-        durationMs: processedData.durationMs,
-        durationFormatted: `${Math.floor(processedData.durationMs / 60000)}:${((processedData.durationMs % 60000) / 1000).toFixed(1)}`
+        durationMs: processedData.durationMs
       });
-
-      // Call alignment to get accurate timestamps from WhisperX
-      // Update progress: aligning timestamps
-      await progressManager.setStep(ProcessingStep.ALIGNING);
-
-      console.log('[Transcribe] Calling alignment...', {
-        conversationId,
-        segmentCount: processedData.segments.length
-      });
-
-      const alignmentStartTime = Date.now();
-      const alignmentResult = await alignTimestamps(
-        audioBuffer,
-        processedData.segments,
-        replicateApiToken.value()
-      );
-      const alignmentDurationMs = Date.now() - alignmentStartTime;
-
-      console.log('[Transcribe] Alignment result:', {
-        conversationId,
-        alignmentStatus: alignmentResult.alignmentStatus,
-        alignmentError: alignmentResult.alignmentError,
-        alignmentDurationMs
-      });
-
-      // Map aligned segments back to our Segment format
-      const finalSegments: Segment[] = processedData.segments.map((seg, idx) => ({
-        ...seg,
-        startMs: alignmentResult.segments[idx]?.startMs ?? seg.startMs,
-        endMs: alignmentResult.segments[idx]?.endMs ?? seg.endMs
-      }));
-      const lastSegment = finalSegments[finalSegments.length - 1];
-      const finalDurationMs = lastSegment ? lastSegment.endMs : processedData.durationMs;
-
-      // Update progress: finalizing and saving
-      await progressManager.setStep(ProcessingStep.FINALIZING);
 
       // Save results to Firestore
       console.debug('[Transcribe] Saving results to Firestore...');
       const firestoreStartTime = Date.now();
       await db.collection('conversations').doc(conversationId).update({
         ...processedData,
-        segments: finalSegments,
-        durationMs: finalDurationMs,
         status: 'complete',
-        alignmentStatus: alignmentResult.alignmentStatus,
-        alignmentError: alignmentResult.alignmentError || null,
+        alignmentStatus: 'aligned',  // Always aligned since WhisperX is the source
+        alignmentError: null,
         audioStoragePath: filePath,
         updatedAt: FieldValue.serverTimestamp()
       });
       const firestoreDurationMs = Date.now() - firestoreStartTime;
 
       const totalDurationMs = Date.now() - downloadStartTime;
-      console.log('[Transcribe] ✅ Transcription complete:', {
+      console.log('[Transcribe] ✅ Transcription complete (NEW ARCHITECTURE):', {
         conversationId,
-        segmentCount: finalSegments.length,
+        segmentCount: processedData.segments.length,
         speakerCount: Object.keys(processedData.speakers).length,
         termCount: Object.keys(processedData.terms).length,
         topicCount: processedData.topics.length,
         personCount: processedData.people.length,
-        alignmentStatus: alignmentResult.alignmentStatus,
+        alignmentStatus: 'aligned',
         timingMs: {
           download: downloadDurationMs,
+          whisperx: whisperxDurationMs,
+          buildSegments: buildDurationMs,
           gemini: geminiDurationMs,
           transform: transformDurationMs,
-          alignment: alignmentDurationMs,
           firestore: firestoreDurationMs,
           total: totalDurationMs
         }
@@ -318,16 +321,60 @@ export const transcribeAudio = onObjectFinalized(
 );
 
 /**
- * Process audio with Gemini API
+ * NEW: Build segments from WhisperX output
  */
-async function processWithGemini(
-  audioBuffer: Buffer,
-  contentType: string,
+function buildSegmentsFromWhisperX(whisperxSegments: WhisperXSegment[]): {
+  segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>;
+  speakers: Array<{ id: string; name: string }>;
+} {
+  // Extract unique speakers from WhisperX (e.g., "SPEAKER_00", "SPEAKER_01")
+  const speakerSet = new Set<string>();
+  whisperxSegments.forEach(seg => {
+    if (seg.speaker) {
+      speakerSet.add(seg.speaker);
+    }
+  });
+
+  // Create speaker list with friendly names
+  const speakers = Array.from(speakerSet).sort().map((id, idx) => ({
+    id,
+    name: `Speaker ${idx + 1}`  // "SPEAKER_00" -> "Speaker 1"
+  }));
+
+  // If no speaker diarization, use default speaker
+  if (speakers.length === 0) {
+    speakers.push({ id: 'SPEAKER_00', name: 'Speaker 1' });
+  }
+
+  // Build segments with timestamps in milliseconds
+  const segments = whisperxSegments.map((seg, idx) => ({
+    text: seg.text,
+    startMs: Math.floor(seg.start * 1000),
+    endMs: Math.floor(seg.end * 1000),
+    speakerId: seg.speaker || 'SPEAKER_00',  // Default if no diarization
+    index: idx
+  }));
+
+  console.debug('[BuildSegments] Built segments:', {
+    segmentCount: segments.length,
+    speakerCount: speakers.length,
+    speakers: speakers.map(s => s.id).join(', ')
+  });
+
+  return { segments, speakers };
+}
+
+/**
+ * NEW: Analyze transcript with Gemini (text-only, no audio)
+ */
+async function analyzeTranscriptWithGemini(
+  segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
+  speakers: Array<{ id: string; name: string }>,
   apiKey: string
-): Promise<AIResponse> {
+): Promise<GeminiAnalysis> {
   const genAI = new GoogleGenerativeAI(apiKey);
 
-  // Use gemini-2.5-flash for multimodal audio processing
+  // Use gemini-2.5-flash for analysis
   const model = genAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     generationConfig: {
@@ -336,28 +383,17 @@ async function processWithGemini(
         type: SchemaType.OBJECT,
         properties: {
           title: { type: SchemaType.STRING },
-          speakers: {
+          topics: {
             type: SchemaType.ARRAY,
             items: {
               type: SchemaType.OBJECT,
               properties: {
-                id: { type: SchemaType.STRING },
-                name: { type: SchemaType.STRING }
+                title: { type: SchemaType.STRING },
+                startSegmentIndex: { type: SchemaType.INTEGER },
+                endSegmentIndex: { type: SchemaType.INTEGER },
+                type: { type: SchemaType.STRING }
               },
-              required: ['id', 'name']
-            }
-          },
-          segments: {
-            type: SchemaType.ARRAY,
-            items: {
-              type: SchemaType.OBJECT,
-              properties: {
-                speakerId: { type: SchemaType.STRING },
-                startMs: { type: SchemaType.INTEGER },
-                endMs: { type: SchemaType.INTEGER },
-                text: { type: SchemaType.STRING }
-              },
-              required: ['speakerId', 'startMs', 'endMs', 'text']
+              required: ['title', 'startSegmentIndex', 'endSegmentIndex', 'type']
             }
           },
           terms: {
@@ -373,19 +409,6 @@ async function processWithGemini(
               required: ['id', 'term', 'definition', 'aliases']
             }
           },
-          topics: {
-            type: SchemaType.ARRAY,
-            items: {
-              type: SchemaType.OBJECT,
-              properties: {
-                title: { type: SchemaType.STRING },
-                startSegmentIndex: { type: SchemaType.INTEGER },
-                endSegmentIndex: { type: SchemaType.INTEGER },
-                type: { type: SchemaType.STRING }
-              },
-              required: ['title', 'startSegmentIndex', 'endSegmentIndex', 'type']
-            }
-          },
           people: {
             type: SchemaType.ARRAY,
             items: {
@@ -396,63 +419,90 @@ async function processWithGemini(
               },
               required: ['name']
             }
+          },
+          speakerNotes: {
+            type: SchemaType.ARRAY,
+            description: 'Speaker identification and notes inferred from content',
+            items: {
+              type: SchemaType.OBJECT,
+              properties: {
+                speakerId: { type: SchemaType.STRING },
+                inferredName: { type: SchemaType.STRING, description: 'Real name if speaker introduces themselves (e.g., "Hi, I\'m John")' },
+                role: { type: SchemaType.STRING, description: 'Inferred role (e.g., "host", "guest", "interviewer")' },
+                notes: { type: SchemaType.STRING, description: 'Additional context about this speaker' }
+              },
+              required: ['speakerId']
+            }
           }
         },
-        required: ['title', 'speakers', 'segments', 'terms', 'topics', 'people']
+        required: ['title', 'topics', 'terms', 'people']
       }
     }
   });
 
+  // Format transcript with segment indices and speaker labels
+  const formattedTranscript = segments.map((seg, idx) => {
+    const speakerName = speakers.find(s => s.id === seg.speakerId)?.name || seg.speakerId;
+    return `[${idx}] ${speakerName}: ${seg.text}`;
+  }).join('\n\n');
+
+  const speakerList = speakers.map(s => `${s.id} (${s.name})`).join(', ');
+
   const prompt = `
-    You are an expert transcriber and analyst. Process the attached audio file.
+Analyze this audio transcript and extract:
 
-    Tasks:
-    1. Transcribe the conversation verbatim.
-    2. Identify different speakers (e.g., Speaker 1, Speaker 2) and attribute each segment to them.
-    3. Segment the text based on natural pauses or speaker changes. Provide accurate start and end timestamps in milliseconds.
-    4. Identify technical terms, acronyms, or complex concepts mentioned. Provide a clear, short definition for each based on the context.
-    5. Identify the main topics and any tangents.
-    6. Identify people mentioned in the conversation (distinct from the speakers themselves, if possible). Extract their full name and inferred affiliation/organization/role.
+1. TITLE: Generate a concise, descriptive title for this conversation (5-10 words).
 
-    Populate the JSON schema provided in the configuration.
-  `;
+2. TOPICS: Identify topic segments with their approximate positions.
+   For each topic, specify which segment indices it covers (0-based).
+   Mark topics as "main" or "tangent" based on whether they're central to the conversation.
 
-  console.debug('[Gemini] Sending request to model...', {
-    mimeType: contentType,
-    audioBase64Length: audioBuffer.toString('base64').length,
-    promptLength: prompt.length
+3. TERMS: Extract key technical terms, acronyms, names, and domain-specific vocabulary.
+   Provide clear, concise definitions based on context.
+   Include common aliases or variations.
+
+4. PEOPLE: Identify mentions of people (names, titles, references).
+   These should be DISTINCT from the speakers themselves.
+   Extract their name and any inferred role/affiliation/organization.
+
+5. SPEAKER IDENTIFICATION: For each speaker, try to identify:
+   - inferredName: Their actual name if they introduce themselves (e.g., "Hi, I'm John",
+     "This is Sarah", "My name is...", or if another speaker addresses them by name)
+   - role: Their role in the conversation (e.g., "host", "guest", "interviewer", "expert")
+   - notes: Any additional context (e.g., "works at Google", "PhD in AI")
+
+   IMPORTANT: Only set inferredName if you have HIGH CONFIDENCE from explicit introduction
+   or direct address. Don't guess names from context clues alone.
+
+The transcript has speaker labels: ${speakerList}
+
+Transcript (with speaker labels and segment indices):
+${formattedTranscript}
+
+Return your analysis as JSON matching the provided schema.
+`;
+
+  console.debug('[Gemini Analysis] Sending request...', {
+    promptLength: prompt.length,
+    segmentCount: segments.length,
+    speakerCount: speakers.length
   });
 
-  const result = await model.generateContent([
-    {
-      inlineData: {
-        mimeType: contentType,
-        data: audioBuffer.toString('base64')
-      }
-    },
-    { text: prompt }
-  ]);
-
+  const result = await model.generateContent([{ text: prompt }]);
   const responseText = result.response.text();
-  console.debug('[Gemini] Raw response received:', {
-    responseLength: responseText.length,
-    startsWithBackticks: responseText.startsWith('```'),
-    first100Chars: responseText.substring(0, 100)
+
+  console.debug('[Gemini Analysis] Raw response received:', {
+    responseLength: responseText.length
   });
 
   const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
 
-  console.debug('[Gemini] Cleaned JSON:', {
-    cleanedLength: cleanJson.length,
-    first100Chars: cleanJson.substring(0, 100)
-  });
-
   try {
-    const parsed = JSON.parse(cleanJson) as AIResponse;
-    console.debug('[Gemini] JSON parsed successfully');
+    const parsed = JSON.parse(cleanJson) as GeminiAnalysis;
+    console.debug('[Gemini Analysis] JSON parsed successfully');
     return parsed;
   } catch (parseError) {
-    console.error('[Gemini] JSON parse failed:', {
+    console.error('[Gemini Analysis] JSON parse failed:', {
       error: parseError instanceof Error ? parseError.message : String(parseError),
       cleanJsonPreview: cleanJson.substring(0, 500)
     });
@@ -461,11 +511,14 @@ async function processWithGemini(
 }
 
 /**
- * Transform AI response to our internal data model
- * Matches the logic from client-side utils.ts
+ * NEW: Merge WhisperX segments with Gemini analysis
  */
-function transformAIResponse(
-  data: AIResponse,
+function mergeWhisperXAndGeminiData(
+  whisperxData: {
+    segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>;
+    speakers: Array<{ id: string; name: string }>;
+  },
+  analysis: GeminiAnalysis,
   conversationId: string,
   userId: string
 ): {
@@ -478,62 +531,58 @@ function transformAIResponse(
   people: Person[];
   durationMs: number;
 } {
-  console.debug('[Transform] Starting transformation:', {
-    conversationId,
-    inputSegmentCount: data.segments?.length ?? 0,
-    inputSpeakerCount: data.speakers?.length ?? 0
-  });
+  console.debug('[Merge] Merging WhisperX and Gemini data...');
 
-  // Map speakers
+  // Map speakers (use Gemini's inferred names/roles if available)
   const speakers: Record<string, Speaker> = {};
-  data.speakers.forEach((s, idx) => {
+  whisperxData.speakers.forEach((s, idx) => {
+    let displayName = s.name;  // Default: "Speaker 1", "Speaker 2", etc.
+
+    // If Gemini identified the speaker, use that information
+    if (analysis.speakerNotes) {
+      const speakerNote = analysis.speakerNotes.find(n => n.speakerId === s.id);
+      if (speakerNote) {
+        if (speakerNote.inferredName) {
+          // Use the real name if detected (e.g., "John" instead of "Speaker 1")
+          displayName = speakerNote.inferredName;
+          // Optionally append role if we have it
+          if (speakerNote.role) {
+            displayName = `${speakerNote.inferredName} (${speakerNote.role})`;
+          }
+        } else if (speakerNote.role) {
+          // No name but we know the role (e.g., "Speaker 1 (host)")
+          displayName = `${s.name} (${speakerNote.role})`;
+        } else if (speakerNote.notes) {
+          // Just notes (e.g., "Speaker 1 (works at Google)")
+          displayName = `${s.name} (${speakerNote.notes})`;
+        }
+      }
+    }
+
     speakers[s.id] = {
       speakerId: s.id,
-      displayName: s.name,
+      displayName,
       colorIndex: idx
     };
   });
-  console.debug('[Transform] Speakers mapped:', Object.keys(speakers));
 
-  // Prepare segments with temp IDs for topic resolution
-  let rawSegments = data.segments.map((s, idx) => ({
-    tempId: `temp_${idx}`,
-    speakerId: s.speakerId,
-    startMs: s.startMs,
-    endMs: s.endMs,
-    text: s.text
-  }));
+  // Log speaker identification results
+  const speakerSummary = Object.values(speakers).map(s => s.displayName).join(', ');
+  console.debug(`[Merge] Speaker identification: ${speakerSummary}`);
 
-  // Resolve topics to temp segment IDs
-  const rawTopics = data.topics.map((t, idx) => {
-    const startSeg = rawSegments[t.startSegmentIndex] || rawSegments[0];
-    const endSeg = rawSegments[t.endSegmentIndex] || rawSegments[rawSegments.length - 1];
-    return {
-      topicId: `top_${idx}`,
-      title: t.title,
-      type: t.type,
-      startSegmentTempId: startSeg?.tempId,
-      endSegmentTempId: endSeg?.tempId
-    };
-  });
-
-  // Sort segments chronologically
-  rawSegments.sort((a, b) => a.startMs - b.startMs);
-
-  // Finalize segments with stable IDs
-  const segments: (Segment & { tempId: string })[] = rawSegments.map((s, idx) => ({
+  // Map segments (already have correct timestamps from WhisperX)
+  const segments: Segment[] = whisperxData.segments.map((seg, idx) => ({
     segmentId: `seg_${idx}`,
-    tempId: s.tempId,
     index: idx,
-    speakerId: s.speakerId,
-    startMs: s.startMs,
-    endMs: s.endMs,
-    text: s.text
+    speakerId: seg.speakerId,
+    startMs: seg.startMs,
+    endMs: seg.endMs,
+    text: seg.text
   }));
 
   // Map terms
   const terms: Record<string, Term> = {};
-  data.terms.forEach(t => {
+  analysis.terms.forEach(t => {
     terms[t.id] = {
       termId: t.id,
       key: t.term.toLowerCase(),
@@ -567,50 +616,41 @@ function transformAIResponse(
     });
   });
 
-  // Finalize topics
-  const topics: Topic[] = rawTopics.map(t => {
-    const startIndex = segments.findIndex(s => s.tempId === t.startSegmentTempId);
-    const endIndex = segments.findIndex(s => s.tempId === t.endSegmentTempId);
-    return {
-      topicId: t.topicId,
-      title: t.title,
-      startIndex: startIndex === -1 ? 0 : startIndex,
-      endIndex: endIndex === -1 ? 0 : endIndex,
-      type: t.type as 'main' | 'tangent'
-    };
-  });
+  // Map topics
+  const topics: Topic[] = analysis.topics.map((t, idx) => ({
+    topicId: `top_${idx}`,
+    title: t.title,
+    startIndex: t.startSegmentIndex,
+    endIndex: t.endSegmentIndex,
+    type: t.type as 'main' | 'tangent'
+  }));
 
   // Map people
-  const people: Person[] = (data.people || []).map((p, idx) => ({
+  const people: Person[] = (analysis.people || []).map((p, idx) => ({
     personId: `p_${idx}`,
     name: p.name,
     affiliation: p.affiliation
   }));
 
-  // Calculate duration
+  // Calculate duration from WhisperX segments
   const lastSegment = segments[segments.length - 1];
   const durationMs = lastSegment ? lastSegment.endMs : 0;
 
-  // Clean up temp IDs
-  const cleanSegments: Segment[] = segments.map(({ tempId, ...rest }) => rest);
-
-  console.debug('[Transform] Transformation complete:', {
-    title: data.title,
+  console.debug('[Merge] Merge complete:', {
+    title: analysis.title,
     speakerCount: Object.keys(speakers).length,
-    segmentCount: cleanSegments.length,
+    segmentCount: segments.length,
     termCount: Object.keys(terms).length,
     termOccurrenceCount: termOccurrences.length,
     topicCount: topics.length,
     personCount: people.length,
-    durationMs,
-    firstSegmentMs: cleanSegments[0]?.startMs,
-    lastSegmentEndMs: cleanSegments[cleanSegments.length - 1]?.endMs
+    durationMs
   });
 
   return {
-    title: data.title,
+    title: analysis.title,
     speakers,
-    segments: cleanSegments,
+    segments,
     terms,
     termOccurrences,
     topics,

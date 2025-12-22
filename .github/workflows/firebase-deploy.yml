@@ -10,7 +10,13 @@
 #
 # Required Secrets:
 #   - FIREBASE_SERVICE_ACCOUNT: JSON key for Firebase service account
-#   - GEMINI_API_KEY: API key for Gemini (set via firebase functions:secrets:set)
+#
+# Firebase Function Secrets (set via CLI, not GitHub Secrets):
+#   - GEMINI_API_KEY: API key for Gemini transcription analysis
+#   - REPLICATE_API_TOKEN: API token for WhisperX transcription
+#   - HUGGINGFACE_ACCESS_TOKEN: Token for speaker diarization (pyannote.audio)
+#
+# See docs/how-to/firebase-setup.md for setup instructions.
 # =============================================================================
 
 name: Firebase Deploy

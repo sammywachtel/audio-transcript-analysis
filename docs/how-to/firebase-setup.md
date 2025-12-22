@@ -30,7 +30,7 @@ The script is **idempotent** - safe to rerun if it fails partway through. It wil
 6. Initializes Firestore
 7. Configures Storage bucket permissions
 8. Optionally creates service account key for CI/CD
-9. Optionally sets GEMINI_API_KEY secret
+9. Optionally sets API secrets (GEMINI_API_KEY, REPLICATE_API_TOKEN, HUGGINGFACE_ACCESS_TOKEN)
 
 **After running the script:**
 1. Enable Google Auth manually (link provided in output)
@@ -216,21 +216,38 @@ npx firebase login
 # Set the project
 npx firebase use your-project-id
 
-# Set the Gemini API key (for transcription)
+# Set the Gemini API key (for transcription analysis)
 npx firebase functions:secrets:set GEMINI_API_KEY
 
-# Set the Replicate API token (for WhisperX timestamp alignment)
+# Set the Replicate API token (for WhisperX transcription)
 npx firebase functions:secrets:set REPLICATE_API_TOKEN
+
+# Set the Hugging Face token (for speaker diarization - REQUIRED for multi-speaker detection)
+npx firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN
 ```
 
 **Get API keys from:**
 - Gemini API key: [Google AI Studio](https://makersuite.google.com/app/apikey)
 - Replicate API token: [Replicate Account](https://replicate.com/account/api-tokens)
+- Hugging Face token: [Hugging Face Settings](https://huggingface.co/settings/tokens) (create a "Read" token)
+
+### Hugging Face Setup for Speaker Diarization
+
+Speaker diarization (detecting multiple speakers) requires a Hugging Face token because WhisperX uses [pyannote/speaker-diarization](https://huggingface.co/pyannote/speaker-diarization-3.1), which is a gated model.
+
+**Required steps:**
+1. Create a [Hugging Face account](https://huggingface.co/join) if you don't have one
+2. Accept the model terms at: https://huggingface.co/pyannote/speaker-diarization-3.1
+3. Generate an access token at: https://huggingface.co/settings/tokens (select "Read" access)
+4. Set the token as a Firebase secret (command above)
+
+> **Note**: Without the Hugging Face token, transcription will still work but all audio will be attributed to a single speaker (SPEAKER_00).
 
 **Verify the secrets were created:**
 ```bash
 npx firebase functions:secrets:access GEMINI_API_KEY
 npx firebase functions:secrets:access REPLICATE_API_TOKEN
+npx firebase functions:secrets:access HUGGINGFACE_ACCESS_TOKEN
 ```
 
 ## Step 9: Deploy Security Rules

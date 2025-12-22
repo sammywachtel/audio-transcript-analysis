@@ -185,19 +185,24 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
                             </span>
                         </div>
                         <div className="hidden md:flex col-span-1 justify-end items-center gap-2">
+                             {/* Delete button for completed and failed conversations */}
+                             {(isComplete || isFailed) && (
+                               <button
+                                  onClick={(e) => handleDelete(e, conv.conversationId)}
+                                  className={cn(
+                                    "p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors",
+                                    isComplete ? "opacity-0 group-hover:opacity-100" : "opacity-100"
+                                  )}
+                                  title="Delete conversation"
+                               >
+                                  <Trash2 size={16} />
+                               </button>
+                             )}
+                             {/* Chevron only for completed conversations */}
                              {isComplete && (
-                               <>
-                                 <button
-                                    onClick={(e) => handleDelete(e, conv.conversationId)}
-                                    className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors opacity-0 group-hover:opacity-100"
-                                    title="Delete conversation"
-                                 >
-                                    <Trash2 size={16} />
-                                 </button>
-                                 <div className="text-slate-400 group-hover:text-blue-500">
-                                    <ChevronRight size={20} />
-                                 </div>
-                               </>
+                               <div className="text-slate-400 group-hover:text-blue-500">
+                                  <ChevronRight size={20} />
+                               </div>
                              )}
                         </div>
                     </div>
