@@ -1,25 +1,19 @@
 # =============================================================================
-# GitHub Actions Workflow: Deploy Application
+# GitHub Actions Workflow: Deploy Frontend
 # Triggers on push to main branch (after PR merge)
 # Uses Workload Identity Federation for secure, keyless authentication
 #
-# Pipeline Architecture:
-#   - Parallel deployment: Frontend (Cloud Run) + Firebase Functions
-#   - Frontend: Docker build via Cloud Build, deploy to Cloud Run
-#   - Functions: npm build, deploy via Firebase CLI
-#   - Critical path: ~3-4 minutes (limited by slowest deployment)
+# Deploys: Frontend to Cloud Run
+# Note: Firebase (functions, rules) deployed separately via firebase-deploy.yml
 #
 # Required GitHub Secrets:
 #   - GCP_WORKLOAD_IDENTITY_PROVIDER: Workload Identity Federation provider
-#   - GCP_SERVICE_ACCOUNT: Service account email (needs Secret Manager Admin)
+#   - GCP_SERVICE_ACCOUNT: Service account email
 #   - GCP_PROJECT_ID: Firebase/GCP project ID
 #   - VITE_FIREBASE_*: Frontend Firebase config (6 secrets)
-#   - GEMINI_API_KEY: API key for Gemini transcription analysis
-#   - REPLICATE_API_TOKEN: API token for WhisperX transcription
-#   - HUGGINGFACE_ACCESS_TOKEN: Token for speaker diarization (pyannote.audio)
 # =============================================================================
 
-name: Deploy Application
+name: Deploy Frontend
 
 on:
   push:
@@ -135,77 +129,3 @@ jobs:
 
     outputs:
       frontend_url: ${{ steps.deploy.outputs.url }}
-
-  deploy-firebase-functions:
-    name: Deploy Firebase Functions
-    runs-on: ubuntu-latest
-
-    # Required for Workload Identity Federation
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      # -----------------------------------------------------------------------
-      # Checkout code
-      # -----------------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # -----------------------------------------------------------------------
-      # Authenticate to Google Cloud using Workload Identity Federation
-      # Firebase CLI uses GCP credentials for deployment
-      # -----------------------------------------------------------------------
-      - name: Authenticate to Google Cloud
-        id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-
-      # -----------------------------------------------------------------------
-      # Set up Node.js for Firebase Functions
-      # -----------------------------------------------------------------------
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: functions/package-lock.json
-
-      # -----------------------------------------------------------------------
-      # Install dependencies and build functions
-      # -----------------------------------------------------------------------
-      - name: Install functions dependencies
-        run: cd functions && npm ci
-
-      - name: Build functions
-        run: cd functions && npm run build
-
-      # -----------------------------------------------------------------------
-      # Set Firebase Function Secrets from GitHub Secrets
-      # These are stored in Google Cloud Secret Manager and accessed at runtime
-      # Service account needs: Secret Manager Admin role
-      # -----------------------------------------------------------------------
-      - name: Set Firebase Function Secrets
-        run: |  # pragma: allowlist secret
-          echo "Setting Firebase Function secrets..."
-          echo "${{ secrets.GEMINI_API_KEY }}" | npx firebase functions:secrets:set GEMINI_API_KEY --project ${{ secrets.GCP_PROJECT_ID }} --force
-          echo "${{ secrets.REPLICATE_API_TOKEN }}" | npx firebase functions:secrets:set REPLICATE_API_TOKEN --project ${{ secrets.GCP_PROJECT_ID }} --force
-          echo "${{ secrets.HUGGINGFACE_ACCESS_TOKEN }}" | npx firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN --project ${{ secrets.GCP_PROJECT_ID }} --force
-          echo "✅ Firebase secrets configured"
-
-      # -----------------------------------------------------------------------
-      # Deploy Firebase Functions
-      # Uses GOOGLE_APPLICATION_CREDENTIALS from auth step
-      # -----------------------------------------------------------------------
-      - name: Deploy to Firebase Functions
-        run: npx firebase deploy --only functions --project ${{ secrets.GCP_PROJECT_ID }}
-
-      # -----------------------------------------------------------------------
-      # Verify deployment
-      # -----------------------------------------------------------------------
-      - name: Verify functions deployment
-        run: |
-          echo "🚀 Firebase Functions deployment successful!"
-          echo "Functions deployed to project: ${{ secrets.GCP_PROJECT_ID }}"
