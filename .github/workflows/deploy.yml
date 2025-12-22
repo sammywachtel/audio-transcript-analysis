@@ -8,6 +8,15 @@
 #   - Frontend: Docker build via Cloud Build, deploy to Cloud Run
 #   - Functions: npm build, deploy via Firebase CLI
 #   - Critical path: ~3-4 minutes (limited by slowest deployment)
+#
+# Required GitHub Secrets:
+#   - GCP_WORKLOAD_IDENTITY_PROVIDER: Workload Identity Federation provider
+#   - GCP_SERVICE_ACCOUNT: Service account email (needs Secret Manager Admin)
+#   - GCP_PROJECT_ID: Firebase/GCP project ID
+#   - VITE_FIREBASE_*: Frontend Firebase config (6 secrets)
+#   - GEMINI_API_KEY: API key for Gemini transcription analysis
+#   - REPLICATE_API_TOKEN: API token for WhisperX transcription
+#   - HUGGINGFACE_ACCESS_TOKEN: Token for speaker diarization (pyannote.audio)
 # =============================================================================
 
 name: Deploy Application
@@ -174,9 +183,21 @@ jobs:
         run: cd functions && npm run build
 
       # -----------------------------------------------------------------------
+      # Set Firebase Function Secrets from GitHub Secrets
+      # These are stored in Google Cloud Secret Manager and accessed at runtime
+      # Service account needs: Secret Manager Admin role
+      # -----------------------------------------------------------------------
+      - name: Set Firebase Function Secrets
+        run: |  # pragma: allowlist secret
+          echo "Setting Firebase Function secrets..."
+          echo "${{ secrets.GEMINI_API_KEY }}" | npx firebase functions:secrets:set GEMINI_API_KEY --project ${{ secrets.GCP_PROJECT_ID }} --force
+          echo "${{ secrets.REPLICATE_API_TOKEN }}" | npx firebase functions:secrets:set REPLICATE_API_TOKEN --project ${{ secrets.GCP_PROJECT_ID }} --force
+          echo "${{ secrets.HUGGINGFACE_ACCESS_TOKEN }}" | npx firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN --project ${{ secrets.GCP_PROJECT_ID }} --force
+          echo "✅ Firebase secrets configured"
+
+      # -----------------------------------------------------------------------
       # Deploy Firebase Functions
       # Uses GOOGLE_APPLICATION_CREDENTIALS from auth step
-      # REPLICATE_API_TOKEN must be pre-configured as a Firebase secret
       # -----------------------------------------------------------------------
       - name: Deploy to Firebase Functions
         run: npx firebase deploy --only functions --project ${{ secrets.GCP_PROJECT_ID }}
@@ -188,6 +209,3 @@ jobs:
         run: |
           echo "🚀 Firebase Functions deployment successful!"
           echo "Functions deployed to project: ${{ secrets.GCP_PROJECT_ID }}"
-          echo ""
-          echo "Note: REPLICATE_API_TOKEN must be set as a Firebase secret:"
-          echo "  npx firebase functions:secrets:set REPLICATE_API_TOKEN"

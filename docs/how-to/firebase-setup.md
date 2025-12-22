@@ -30,7 +30,7 @@ The script is **idempotent** - safe to rerun if it fails partway through. It wil
 6. Initializes Firestore
 7. Configures Storage bucket permissions
 8. Optionally creates service account key for CI/CD
-9. Optionally sets GEMINI_API_KEY secret
+9. Optionally sets API secrets (GEMINI_API_KEY, REPLICATE_API_TOKEN, HUGGINGFACE_ACCESS_TOKEN)
 
 **After running the script:**
 1. Enable Google Auth manually (link provided in output)
@@ -205,9 +205,23 @@ VITE_FIREBASE_APP_ID=1:123456789012:web:abc123
 
 ## Step 8: Set API Secrets
 
-> **Important**: These secrets MUST be set before CI/CD deployments will work. The secrets must exist before GitHub Actions can deploy functions that use them.
+API keys are stored securely in Firebase Secrets (Google Cloud Secret Manager).
 
-API keys are stored securely in Firebase Secrets (not in client code):
+### For CI/CD Deployments (Recommended)
+
+Secrets are **automatically set during deployment** from GitHub Secrets. Add these to your repository:
+
+| GitHub Secret | Description | Get it from |
+|---------------|-------------|-------------|
+| `GEMINI_API_KEY` | Transcription analysis | [Google AI Studio](https://makersuite.google.com/app/apikey) |
+| `REPLICATE_API_TOKEN` | WhisperX transcription | [Replicate Account](https://replicate.com/account/api-tokens) |
+| `HUGGINGFACE_ACCESS_TOKEN` | Speaker diarization | [Hugging Face Settings](https://huggingface.co/settings/tokens) |
+
+The deploy workflows automatically sync these to Firebase Secrets before deploying functions.
+
+### For Local Development Only
+
+If you need to set secrets locally for testing:
 
 ```bash
 # Login to Firebase
@@ -216,21 +230,29 @@ npx firebase login
 # Set the project
 npx firebase use your-project-id
 
-# Set the Gemini API key (for transcription)
+# Set secrets (you'll be prompted for each value)
 npx firebase functions:secrets:set GEMINI_API_KEY
-
-# Set the Replicate API token (for WhisperX timestamp alignment)
 npx firebase functions:secrets:set REPLICATE_API_TOKEN
+npx firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN
 ```
 
-**Get API keys from:**
-- Gemini API key: [Google AI Studio](https://makersuite.google.com/app/apikey)
-- Replicate API token: [Replicate Account](https://replicate.com/account/api-tokens)
+### Hugging Face Setup for Speaker Diarization
 
-**Verify the secrets were created:**
+Speaker diarization (detecting multiple speakers) requires a Hugging Face token because WhisperX uses [pyannote/speaker-diarization](https://huggingface.co/pyannote/speaker-diarization-3.1), which is a gated model.
+
+**Required steps:**
+1. Create a [Hugging Face account](https://huggingface.co/join) if you don't have one
+2. Accept the model terms at: https://huggingface.co/pyannote/speaker-diarization-3.1
+3. Generate an access token at: https://huggingface.co/settings/tokens (select "Read" access)
+4. Add the token to GitHub Secrets as `HUGGINGFACE_ACCESS_TOKEN`
+
+> **Note**: Without the Hugging Face token, transcription will still work but all audio will be attributed to a single speaker (SPEAKER_00).
+
+**Verify secrets are configured:**
 ```bash
 npx firebase functions:secrets:access GEMINI_API_KEY
 npx firebase functions:secrets:access REPLICATE_API_TOKEN
+npx firebase functions:secrets:access HUGGINGFACE_ACCESS_TOKEN
 ```
 
 ## Step 9: Deploy Security Rules
@@ -370,6 +392,11 @@ In your repository: **Settings** → **Secrets and variables** → **Actions**
 | Secret | Value |
 |--------|-------|
 | `FIREBASE_SERVICE_ACCOUNT` | Contents of the service account JSON file |
+| `GEMINI_API_KEY` | Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey) |
+| `REPLICATE_API_TOKEN` | Replicate API token from [Replicate Account](https://replicate.com/account/api-tokens) |
+| `HUGGINGFACE_ACCESS_TOKEN` | Hugging Face token from [HF Settings](https://huggingface.co/settings/tokens) |
+
+> **Note**: The API secrets are automatically synced to Firebase Secrets during deployment. You don't need to set them manually via `firebase functions:secrets:set`.
 
 ## Troubleshooting
 

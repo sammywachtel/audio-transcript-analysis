@@ -1441,25 +1441,196 @@ async function getWhisperxTimestamps(
 }
 
 // =============================================================================
-// Public API
+// Public API - NEW ARCHITECTURE
 // =============================================================================
 
+/**
+ * WhisperX segment from the raw API output
+ */
+export interface WhisperXSegment {
+  text: string;
+  start: number;  // seconds
+  end: number;    // seconds
+  speaker?: string;  // May have speaker diarization (e.g., "SPEAKER_00")
+}
+
+/**
+ * Result from WhisperX transcription
+ */
+export interface WhisperXResult {
+  segments: WhisperXSegment[];
+  status: 'success' | 'error';
+  error?: string;
+}
+
+/**
+ * NEW: Transcribe audio with WhisperX (returns transcript + timestamps)
+ *
+ * This is the NEW PRIMARY transcription method. WhisperX provides both
+ * the transcript text AND accurate timestamps in one call.
+ *
+ * @param audioBuffer - The audio file as a Buffer
+ * @param replicateToken - Replicate API token
+ * @param huggingfaceToken - Optional Hugging Face token for speaker diarization
+ *                           (pyannote.audio is a gated model that requires HF auth)
+ */
+export async function transcribeWithWhisperX(
+  audioBuffer: Buffer,
+  replicateToken: string,
+  huggingfaceToken?: string
+): Promise<WhisperXResult> {
+  console.log('[WhisperX] Starting transcription (primary method)');
+
+  if (!replicateToken) {
+    return {
+      segments: [],
+      status: 'error',
+      error: 'REPLICATE_API_TOKEN not provided'
+    };
+  }
+
+  try {
+    // Encode audio to base64
+    const audioBase64 = audioBuffer.toString('base64');
+    const audioSizeMb = audioBuffer.length / (1024 * 1024);
+
+    console.log(
+      `[WhisperX] Calling Replicate API: ` +
+      `audio_size=${audioSizeMb.toFixed(2)}MB`
+    );
+
+    // Use data URI for audio
+    const audioDataUri = `data:audio/mpeg;base64,${audioBase64}`;
+
+    // Call WhisperX via Replicate
+    const Replicate = (await import('replicate')).default;
+    const client = new Replicate({ auth: replicateToken });
+
+    // Build input params - diarization requires HF token (pyannote.audio is gated)
+    const inputParams: Record<string, unknown> = {
+      audio_file: audioDataUri,
+      align_output: true,
+      batch_size: 16,
+      language: 'en'
+    };
+
+    // Only enable diarization if we have a HF token
+    if (huggingfaceToken) {
+      inputParams.diarization = true;
+      inputParams.huggingface_access_token = huggingfaceToken;
+      console.log('[WhisperX] Speaker diarization enabled (HF token provided)');
+    } else {
+      console.warn('[WhisperX] Speaker diarization DISABLED - no huggingface_access_token provided');
+    }
+
+    const startTime = Date.now();
+    const output = await client.run(
+      WHISPERX_MODEL as `${string}/${string}:${string}`,
+      { input: inputParams }
+    );
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`[WhisperX] API call completed in ${duration}s`);
+
+    // Parse the output to extract segments
+    const segments: WhisperXSegment[] = [];
+
+    if (typeof output === 'object' && output !== null) {
+      const outputObj = output as Record<string, unknown>;
+
+      // Log raw structure for debugging
+      console.debug(
+        `[WhisperX] Raw output keys: ${Object.keys(outputObj).join(', ')}`
+      );
+
+      if (Array.isArray(outputObj.segments)) {
+        for (const segment of outputObj.segments) {
+          if (typeof segment === 'object' && segment !== null) {
+            const segObj = segment as Record<string, unknown>;
+
+            // Extract segment-level data (text, start, end, speaker)
+            const text = typeof segObj.text === 'string' ? segObj.text : '';
+            const start = typeof segObj.start === 'number' ? segObj.start : 0.0;
+            const end = typeof segObj.end === 'number' ? segObj.end : 0.0;
+            const speaker = typeof segObj.speaker === 'string' ? segObj.speaker : undefined;
+
+            if (text.trim()) {
+              segments.push({ text: text.trim(), start, end, speaker });
+            }
+          }
+        }
+      }
+    }
+
+    if (segments.length === 0) {
+      console.error('[WhisperX] No segments returned - check audio format');
+      return {
+        segments: [],
+        status: 'error',
+        error: 'WhisperX returned no segments - check audio format'
+      };
+    }
+
+    // Log summary
+    const firstSeg = segments[0];
+    const lastSeg = segments[segments.length - 1];
+    const totalDuration = lastSeg.end - firstSeg.start;
+
+    console.log(
+      `[WhisperX] ✅ Transcription complete: ` +
+      `segments=${segments.length}, ` +
+      `duration=${totalDuration.toFixed(1)}s ` +
+      `(${firstSeg.start.toFixed(1)}s to ${lastSeg.end.toFixed(1)}s)`
+    );
+
+    // Log speaker distribution if available
+    const speakerCounts: Record<string, number> = {};
+    segments.forEach(s => {
+      if (s.speaker) {
+        speakerCounts[s.speaker] = (speakerCounts[s.speaker] || 0) + 1;
+      }
+    });
+    if (Object.keys(speakerCounts).length > 0) {
+      console.debug(
+        `[WhisperX] Speaker distribution: ${JSON.stringify(speakerCounts)}`
+      );
+    }
+
+    return {
+      segments,
+      status: 'success'
+    };
+
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`[WhisperX] ❌ API call failed: ${errorMsg}`);
+    return {
+      segments: [],
+      status: 'error',
+      error: `WhisperX API call failed: ${errorMsg}`
+    };
+  }
+}
+
+/**
+ * OLD: Align Gemini transcript to WhisperX timestamps (DEPRECATED)
+ *
+ * This function is kept for backward compatibility but should not be used
+ * in the new WhisperX-first architecture.
+ */
 export async function alignTimestamps(
   audioBuffer: Buffer,
   segments: { speakerId: string; text: string; startMs: number; endMs: number }[],
   replicateToken: string
 ): Promise<AlignmentResult> {
   /**
-   * Main entry point: align a Gemini transcript to accurate timestamps.
-   *
-   * Args:
-   *   audioBuffer: Audio file as Buffer
-   *   segments: List of segment objects with speakerId, text, startMs, endMs
-   *   replicateToken: Replicate API token for WhisperX
-   *
-   * Returns:
-   *   AlignmentResult with corrected timestamps and status
+   * DEPRECATED: This function implements the OLD Gemini-first approach.
+   * Use transcribeWithWhisperX instead for the new architecture.
    */
+  console.warn(
+    `[align_timestamps] DEPRECATED: This function uses the old Gemini-first approach. ` +
+    `Consider using transcribeWithWhisperX for the new architecture.`
+  );
+
   console.debug(
     `[align_timestamps] Starting alignment: ` +
     `segments=${segments.length}, ` +

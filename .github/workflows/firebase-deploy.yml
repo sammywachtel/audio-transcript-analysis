@@ -5,12 +5,16 @@
 # to the production Firebase project.
 #
 # Triggers:
-#   - Push to main branch (auto-deploy)
+#   - Push to main branch (when Firebase-related files change)
 #   - Manual dispatch (for ad-hoc deployments)
 #
-# Required Secrets:
+# Required GitHub Secrets:
 #   - FIREBASE_SERVICE_ACCOUNT: JSON key for Firebase service account
-#   - GEMINI_API_KEY: API key for Gemini (set via firebase functions:secrets:set)
+#   - GEMINI_API_KEY: API key for Gemini transcription analysis
+#   - REPLICATE_API_TOKEN: API token for WhisperX transcription
+#   - HUGGINGFACE_ACCESS_TOKEN: Token for speaker diarization (pyannote.audio)
+#
+# See docs/how-to/firebase-setup.md for setup instructions.
 # =============================================================================
 
 name: Firebase Deploy
@@ -89,6 +93,16 @@ jobs:
         if: github.event.inputs.deploy_target != 'rules-only'
         working-directory: functions
         run: npm run build
+
+      # Set Firebase Function Secrets (only when deploying functions)
+      - name: Set Firebase Function Secrets
+        if: github.event.inputs.deploy_target != 'rules-only'
+        run: |  # pragma: allowlist secret
+          echo "Setting Firebase Function secrets..."
+          echo "${{ secrets.GEMINI_API_KEY }}" | firebase functions:secrets:set GEMINI_API_KEY --force
+          echo "${{ secrets.REPLICATE_API_TOKEN }}" | firebase functions:secrets:set REPLICATE_API_TOKEN --force
+          echo "${{ secrets.HUGGINGFACE_ACCESS_TOKEN }}" | firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN --force
+          echo "✅ Firebase secrets configured"
 
       # Deploy based on target
       - name: Deploy All (rules + functions)

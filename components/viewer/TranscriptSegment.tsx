@@ -87,7 +87,7 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
       {/* Time & Speaker Column */}
       <div className="flex-shrink-0 w-32 flex flex-col gap-1 items-start">
          <button
-           onClick={() => onSeek(segment.startMs)}
+           onClick={() => onSeek(segment.startMs + 1)}  // +1ms to avoid boundary overlap issues
            className="text-xs font-mono text-slate-400 hover:text-blue-600 tabular-nums"
          >
            {formatTime(segment.startMs)}
@@ -145,7 +145,7 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
                    </span>
                );
             }
-            return <span key={i} onClick={() => onSeek(segment.startMs)} className="cursor-text">{part.text}</span>;
+            return <span key={i} onClick={() => onSeek(segment.startMs + 1)} className="cursor-text">{part.text}</span>;  // +1ms to avoid boundary overlap
           })}
         </p>
       </div>
