@@ -85,6 +85,22 @@ interface Person {
 }
 
 /**
+ * Represents a speaker correction identified by Gemini analysis.
+ * Used to fix mid-segment speaker changes that pyannote misses.
+ */
+interface SpeakerCorrection {
+  segmentIndex: number;
+  action: 'split' | 'reassign';
+  reason: string;
+  // For split action:
+  splitAtChar?: number;
+  speakerBefore?: string;
+  speakerAfter?: string;
+  // For reassign action:
+  newSpeaker?: string;
+}
+
+/**
  * Triggered when an audio file is uploaded to storage.
  * Path pattern: audio/{userId}/{conversationId}.{extension}
  */
@@ -237,6 +253,35 @@ export const transcribeAudio = onObjectFinalized(
         personCount: analysis.people?.length ?? 0
       });
 
+      // Step 3.5: Speaker correction pass (NEW)
+      console.log('[Transcribe] Step 3.5: Identifying speaker corrections...');
+      const speakerCorrectionStartTime = Date.now();
+
+      const speakerCorrections = await identifySpeakerCorrections(
+        whisperxSegments.segments,
+        whisperxSegments.speakers,
+        geminiApiKey.value()
+      );
+
+      const speakerCorrectionDurationMs = Date.now() - speakerCorrectionStartTime;
+      console.log('[Transcribe] Speaker correction analysis complete:', {
+        conversationId,
+        durationMs: speakerCorrectionDurationMs,
+        durationSec: (speakerCorrectionDurationMs / 1000).toFixed(1),
+        correctionCount: speakerCorrections.length,
+        splitCount: speakerCorrections.filter(c => c.action === 'split').length,
+        reassignCount: speakerCorrections.filter(c => c.action === 'reassign').length
+      });
+
+      // Apply speaker corrections to segments
+      const correctedSegments = applySpeakerCorrections(
+        whisperxSegments.segments,
+        speakerCorrections
+      );
+
+      // Update the whisperxSegments with corrected segments
+      whisperxSegments.segments = correctedSegments;
+
       // Update progress: finalizing
       await progressManager.setStep(ProcessingStep.FINALIZING);
 
@@ -281,11 +326,13 @@ export const transcribeAudio = onObjectFinalized(
         topicCount: processedData.topics.length,
         personCount: processedData.people.length,
         alignmentStatus: 'aligned',
+        speakerCorrectionsApplied: speakerCorrections.length,
         timingMs: {
           download: downloadDurationMs,
           whisperx: whisperxDurationMs,
           buildSegments: buildDurationMs,
           gemini: geminiDurationMs,
+          speakerCorrection: speakerCorrectionDurationMs,
           transform: transformDurationMs,
           firestore: firestoreDurationMs,
           total: totalDurationMs
@@ -508,6 +555,255 @@ Return your analysis as JSON matching the provided schema.
     });
     throw parseError;
   }
+}
+
+/**
+ * NEW: Identify speaker corrections using Gemini conversational analysis.
+ * Detects mid-segment speaker changes that WhisperX/pyannote miss.
+ */
+async function identifySpeakerCorrections(
+  segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
+  speakers: Array<{ id: string; name: string }>,
+  apiKey: string
+): Promise<SpeakerCorrection[]> {
+  const genAI = new GoogleGenerativeAI(apiKey);
+
+  // Use gemini-2.5-flash for speaker correction analysis
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-2.5-flash',
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: SchemaType.OBJECT,
+        properties: {
+          corrections: {
+            type: SchemaType.ARRAY,
+            items: {
+              type: SchemaType.OBJECT,
+              properties: {
+                segmentIndex: { type: SchemaType.INTEGER },
+                action: { type: SchemaType.STRING },
+                reason: { type: SchemaType.STRING },
+                splitAtChar: { type: SchemaType.INTEGER },
+                speakerBefore: { type: SchemaType.STRING },
+                speakerAfter: { type: SchemaType.STRING },
+                newSpeaker: { type: SchemaType.STRING }
+              },
+              required: ['segmentIndex', 'action', 'reason']
+            }
+          }
+        },
+        required: ['corrections']
+      }
+    }
+  });
+
+  // Format transcript with segment indices and speaker labels
+  const formattedTranscript = segments.map((seg, idx) => {
+    const speakerName = speakers.find(s => s.id === seg.speakerId)?.name || seg.speakerId;
+    return `[${idx}] ${speakerName}: ${seg.text}`;
+  }).join('\n\n');
+
+  const speakerList = speakers.map(s => `${s.id} (${s.name})`).join(', ');
+
+  const prompt = `
+You are an expert at identifying speaker attribution errors in conversation transcripts.
+
+Analyze this transcript and identify segments where the speaker attribution is LIKELY WRONG.
+Focus on:
+
+1. MID-SEGMENT SPEAKER CHANGES: Look for cases where the speaker changes mid-utterance.
+   Common patterns:
+   - Question followed by answer: "What do you think? Yeah, I agree..." (likely two speakers)
+   - Back-and-forth acknowledgments: "Right, exactly. Mm-hmm. So anyway..." (likely different speakers)
+   - Name mentions: "Chris mentioned..." or "Michael, what do you think?" (indicates another speaker)
+   - Direct address: "You know what I mean?" followed by "Yeah" (likely different speakers)
+
+2. MISATTRIBUTED SEGMENTS: Entire segments where speaker is clearly wrong.
+   Common patterns:
+   - Context clues (person A asks question, answer attributed to person A instead of person B)
+   - Filler words from wrong speaker ("yeah", "mm-hmm", "right" during someone else's turn)
+   - Self-references that don't match ("I work at Google" but speaker is introduced as working at Meta)
+
+IMPORTANT GUIDELINES:
+- Only return HIGH-CONFIDENCE corrections (80%+ sure)
+- For split actions, identify the character position where speaker changes
+- For reassign actions, identify which speaker ID should be used instead
+- The speakerId values available are: ${speakerList}
+- Be conservative - false negatives are better than false positives
+- Don't suggest corrections based on speculation - need clear conversational evidence
+
+Actions:
+- "split": Segment contains multiple speakers, should be split at character position
+- "reassign": Entire segment attributed to wrong speaker
+
+Available speakers: ${speakerList}
+
+Transcript (with speaker labels and segment indices):
+${formattedTranscript}
+
+Return your analysis as JSON with an array of corrections.
+If no corrections are needed, return an empty array.
+`;
+
+  console.debug('[Speaker Correction] Sending request...', {
+    promptLength: prompt.length,
+    segmentCount: segments.length,
+    speakerCount: speakers.length
+  });
+
+  const result = await model.generateContent([{ text: prompt }]);
+  const responseText = result.response.text();
+
+  console.debug('[Speaker Correction] Raw response received:', {
+    responseLength: responseText.length
+  });
+
+  const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
+
+  try {
+    const parsed = JSON.parse(cleanJson) as { corrections: SpeakerCorrection[] };
+    console.debug('[Speaker Correction] JSON parsed successfully:', {
+      correctionCount: parsed.corrections.length
+    });
+    return parsed.corrections;
+  } catch (parseError) {
+    console.error('[Speaker Correction] JSON parse failed:', {
+      error: parseError instanceof Error ? parseError.message : String(parseError),
+      cleanJsonPreview: cleanJson.substring(0, 500)
+    });
+    // Don't fail the whole transcription if speaker correction fails
+    // Just log the error and return empty corrections
+    return [];
+  }
+}
+
+/**
+ * Apply speaker corrections to segments.
+ * Handles both 'split' and 'reassign' actions.
+ */
+function applySpeakerCorrections(
+  segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
+  corrections: SpeakerCorrection[]
+): Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }> {
+  if (corrections.length === 0) {
+    console.debug('[Apply Corrections] No corrections to apply');
+    return segments;
+  }
+
+  console.log('[Apply Corrections] Applying corrections...', {
+    correctionCount: corrections.length,
+    splitCount: corrections.filter(c => c.action === 'split').length,
+    reassignCount: corrections.filter(c => c.action === 'reassign').length
+  });
+
+  let modifiedSegments = [...segments];
+
+  // Sort corrections by segment index DESCENDING to avoid index shifting
+  const sortedCorrections = [...corrections].sort((a, b) => b.segmentIndex - a.segmentIndex);
+
+  sortedCorrections.forEach(correction => {
+    const segIndex = correction.segmentIndex;
+
+    if (segIndex < 0 || segIndex >= modifiedSegments.length) {
+      console.warn('[Apply Corrections] Invalid segment index, skipping:', {
+        segmentIndex: segIndex,
+        totalSegments: modifiedSegments.length
+      });
+      return;
+    }
+
+    const segment = modifiedSegments[segIndex];
+
+    if (correction.action === 'reassign') {
+      // Simple reassignment - just change the speaker
+      if (!correction.newSpeaker) {
+        console.warn('[Apply Corrections] Reassign action missing newSpeaker, skipping:', correction);
+        return;
+      }
+
+      console.debug('[Apply Corrections] Reassigning segment:', {
+        segmentIndex: segIndex,
+        oldSpeaker: segment.speakerId,
+        newSpeaker: correction.newSpeaker,
+        reason: correction.reason
+      });
+
+      modifiedSegments[segIndex] = {
+        ...segment,
+        speakerId: correction.newSpeaker
+      };
+
+    } else if (correction.action === 'split') {
+      // Split segment at character position
+      if (!correction.splitAtChar || !correction.speakerBefore || !correction.speakerAfter) {
+        console.warn('[Apply Corrections] Split action missing required fields, skipping:', correction);
+        return;
+      }
+
+      const splitPos = correction.splitAtChar;
+      if (splitPos <= 0 || splitPos >= segment.text.length) {
+        console.warn('[Apply Corrections] Invalid split position, skipping:', {
+          splitAtChar: splitPos,
+          textLength: segment.text.length
+        });
+        return;
+      }
+
+      const textBefore = segment.text.substring(0, splitPos).trim();
+      const textAfter = segment.text.substring(splitPos).trim();
+
+      // Interpolate timestamps based on character ratio (rough but reasonable)
+      const charRatio = textBefore.length / segment.text.length;
+      const durationMs = segment.endMs - segment.startMs;
+      const splitTimeMs = segment.startMs + Math.floor(durationMs * charRatio);
+
+      console.debug('[Apply Corrections] Splitting segment:', {
+        segmentIndex: segIndex,
+        splitAtChar: splitPos,
+        charRatio: charRatio.toFixed(2),
+        speakerBefore: correction.speakerBefore,
+        speakerAfter: correction.speakerAfter,
+        reason: correction.reason,
+        beforeLength: textBefore.length,
+        afterLength: textAfter.length
+      });
+
+      // Create two new segments
+      const segmentBefore = {
+        text: textBefore,
+        startMs: segment.startMs,
+        endMs: splitTimeMs,
+        speakerId: correction.speakerBefore,
+        index: segment.index  // Will be re-indexed later
+      };
+
+      const segmentAfter = {
+        text: textAfter,
+        startMs: splitTimeMs,
+        endMs: segment.endMs,
+        speakerId: correction.speakerAfter,
+        index: segment.index  // Will be re-indexed later
+      };
+
+      // Replace the original segment with the two new ones
+      modifiedSegments.splice(segIndex, 1, segmentBefore, segmentAfter);
+    }
+  });
+
+  // Re-index all segments after corrections
+  modifiedSegments = modifiedSegments.map((seg, idx) => ({
+    ...seg,
+    index: idx
+  }));
+
+  console.log('[Apply Corrections] Corrections applied:', {
+    originalSegmentCount: segments.length,
+    finalSegmentCount: modifiedSegments.length,
+    segmentsAdded: modifiedSegments.length - segments.length
+  });
+
+  return modifiedSegments;
 }
 
 /**
