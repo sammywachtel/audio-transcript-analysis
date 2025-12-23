@@ -415,105 +415,83 @@ elif gsutil ls "$BUCKET_APPSPOT" &>/dev/null; then
     BUCKET="$BUCKET_APPSPOT"
     log_skip "Storage bucket exists: $BUCKET"
 else
-    # Storage not initialized - try multiple creation methods
-    # Firebase Storage requires provisioning through specific channels; plain GCS buckets won't work
+    # Storage not initialized - try to provision via Firebase
+    # NOTE: The .firebasestorage.app domain is owned by Google - you cannot create buckets
+    # with that suffix directly. Firebase must provision them through their system.
+    # The .appspot.com bucket is tied to App Engine and can be created that way.
     log_info "Firebase Storage not found, attempting to create..."
     BUCKET=""
 
-    # Method 1: gcloud storage buckets create (newer gcloud command)
-    # This creates a GCS bucket; Firebase needs to be added separately
+    # Method 1: Create App Engine app (auto-creates appspot.com bucket)
+    # This is the most reliable method - App Engine's default bucket is Firebase-enabled
     if [[ -z "$BUCKET" ]]; then
-        log_info "Trying: gcloud storage buckets create..."
-        if gcloud storage buckets create "$BUCKET_FIREBASE" \
-            --project="$PROJECT_ID" \
-            --location="$STORAGE_REGION" \
-            --uniform-bucket-level-access 2>&1; then
-            # Bucket created, now add Firebase support via REST API
-            ACCESS_TOKEN=$(gcloud auth print-access-token 2>/dev/null)
-            if [[ -n "$ACCESS_TOKEN" ]]; then
-                curl -s -X POST \
-                    "https://firebasestorage.googleapis.com/v1beta/projects/${PROJECT_ID}/buckets/${PROJECT_ID}.firebasestorage.app:addFirebase" \
-                    -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-                    -H "Content-Type: application/json" 2>/dev/null
-            fi
-            if gsutil ls "$BUCKET_FIREBASE" &>/dev/null; then
-                BUCKET="$BUCKET_FIREBASE"
-                log_success "Created storage bucket: $BUCKET"
-            fi
-        fi
-    fi
-
-    # Method 2: gsutil mb (legacy command, appspot.com format)
-    # The appspot.com bucket is auto-Firebase-enabled when App Engine exists
-    if [[ -z "$BUCKET" ]]; then
-        log_info "Trying: gsutil mb (appspot.com format)..."
-        if gsutil mb -p "$PROJECT_ID" -l "$STORAGE_REGION" -b on "$BUCKET_APPSPOT" 2>&1; then
-            if gsutil ls "$BUCKET_APPSPOT" &>/dev/null; then
-                BUCKET="$BUCKET_APPSPOT"
-                log_success "Created storage bucket: $BUCKET"
-            fi
-        fi
-    fi
-
-    # Method 3: Create App Engine app (auto-creates appspot.com bucket)
-    # The App Engine default bucket is automatically Firebase-enabled
-    if [[ -z "$BUCKET" ]]; then
-        log_info "Trying: gcloud app create (creates default bucket)..."
-        # Check if App Engine already exists
-        if ! gcloud app describe --project="$PROJECT_ID" &>/dev/null; then
+        log_info "Trying: gcloud app create (provisions default bucket)..."
+        if gcloud app describe --project="$PROJECT_ID" &>/dev/null; then
+            log_info "App Engine already exists, checking for bucket..."
+        else
+            log_info "Creating App Engine app in $STORAGE_REGION..."
             if gcloud app create --project="$PROJECT_ID" --region="$STORAGE_REGION" 2>&1; then
-                # App Engine created, check for bucket
-                sleep 5  # Give it a moment to provision
-                if gsutil ls "$BUCKET_APPSPOT" &>/dev/null; then
-                    BUCKET="$BUCKET_APPSPOT"
-                    log_success "Created storage bucket via App Engine: $BUCKET"
-                fi
+                log_info "App Engine created, waiting for bucket provisioning..."
+                sleep 10  # App Engine bucket provisioning can take a moment
             fi
+        fi
+        # Check if bucket now exists
+        if gsutil ls "$BUCKET_APPSPOT" &>/dev/null; then
+            BUCKET="$BUCKET_APPSPOT"
+            log_success "Storage bucket ready: $BUCKET"
         fi
     fi
 
-    # Method 4: REST API - finalize default resources
-    # This provisions Firebase's default resources including storage
+    # Method 2: REST API - get default bucket (triggers provisioning if needed)
+    # Firebase projects have a default bucket that may need to be "activated"
     if [[ -z "$BUCKET" ]]; then
-        log_info "Trying: Firebase Management API (defaultResources)..."
+        log_info "Trying: Firebase Storage API (getDefaultBucket)..."
         ACCESS_TOKEN=$(gcloud auth print-access-token 2>/dev/null)
         if [[ -n "$ACCESS_TOKEN" ]]; then
-            # Try to finalize default resources
-            RESPONSE=$(curl -s -w "\n%{http_code}" \
-                -X POST \
-                "https://firebase.googleapis.com/v1beta1/projects/${PROJECT_ID}/defaultResources:finalize" \
+            # Try to get/provision default bucket
+            RESPONSE=$(curl -s \
+                "https://firebasestorage.googleapis.com/v1beta/projects/${PROJECT_ID}/defaultBucket" \
                 -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-                -H "Content-Type: application/json" \
                 2>/dev/null)
-            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 
-            if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "409" ]]; then
-                sleep 3  # Allow propagation
+            # Check if we got a bucket name back
+            if echo "$RESPONSE" | grep -q "name"; then
+                BUCKET_NAME=$(echo "$RESPONSE" | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+                if [[ -n "$BUCKET_NAME" ]]; then
+                    BUCKET="gs://${BUCKET_NAME}"
+                    log_success "Default bucket found: $BUCKET"
+                fi
+            fi
+
+            # If that didn't work, check both bucket formats
+            if [[ -z "$BUCKET" ]]; then
+                sleep 3
                 if gsutil ls "$BUCKET_FIREBASE" &>/dev/null; then
                     BUCKET="$BUCKET_FIREBASE"
-                    log_success "Created storage bucket via API: $BUCKET"
+                    log_success "Storage bucket found: $BUCKET"
                 elif gsutil ls "$BUCKET_APPSPOT" &>/dev/null; then
                     BUCKET="$BUCKET_APPSPOT"
-                    log_success "Created storage bucket via API: $BUCKET"
+                    log_success "Storage bucket found: $BUCKET"
                 fi
             fi
         fi
     fi
 
     # All methods failed - provide manual instructions
+    # This is expected for brand new Firebase projects - Console setup is required
     if [[ -z "$BUCKET" ]]; then
         log_info ""
-        log_info "Automated Firebase Storage setup was not successful."
-        log_info "This is normal for new projects - Firebase Storage requires initial Console setup."
+        log_info "Firebase Storage requires manual setup for new projects."
+        log_info "This is a one-time setup that must be done in the Firebase Console."
         log_info ""
-        log_info "Please enable Firebase Storage manually:"
+        log_info "Please enable Firebase Storage:"
         log_info "  1. Go to: https://console.firebase.google.com/project/$PROJECT_ID/storage"
         log_info "  2. Click 'Get started'"
         log_info "  3. Select 'Start in production mode'"
-        log_info "  4. Choose location: $STORAGE_REGION"
+        log_info "  4. Choose location: $STORAGE_REGION (must match your Firestore region)"
         log_info "  5. Click 'Done'"
         log_info ""
-        log_info "Then re-run this script to configure bucket permissions and CORS."
+        log_info "After setup, re-run this script to configure bucket permissions and CORS."
     fi
 fi
 
