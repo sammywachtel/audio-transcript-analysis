@@ -9,6 +9,7 @@
 #   - Manual dispatch (for ad-hoc deployments)
 #
 # Required GitHub Secrets:
+#   - GCP_PROJECT_ID: Firebase/GCP project ID (same as Cloud Run deploy)
 #   - FIREBASE_SERVICE_ACCOUNT: JSON key for Firebase service account
 #   - GEMINI_API_KEY: API key for Gemini transcription analysis
 #   - REPLICATE_API_TOKEN: API token for WhisperX transcription
@@ -45,7 +46,8 @@ on:
           - functions-only
 
 env:
-  FIREBASE_PROJECT_ID: audio-transcript-app-67465
+  # Uses the same GCP_PROJECT_ID secret as Cloud Run deploy (single-project architecture)
+  FIREBASE_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
 
 jobs:
   deploy:
