@@ -241,9 +241,18 @@ npx firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN
 Speaker diarization (detecting multiple speakers) requires a Hugging Face token because WhisperX uses [pyannote/speaker-diarization](https://huggingface.co/pyannote/speaker-diarization-3.1), which is a gated model.
 
 **Required steps:**
+
 1. Create a [Hugging Face account](https://huggingface.co/join) if you don't have one
-2. Accept the model terms at: https://huggingface.co/pyannote/speaker-diarization-3.1
+
+2. **Accept terms for ALL required pyannote models** (this is critical):
+   - https://huggingface.co/pyannote/speaker-diarization-3.1 — Main diarization model
+   - https://huggingface.co/pyannote/segmentation — Required dependency (used internally)
+   - https://huggingface.co/pyannote/segmentation-3.0 — Alternative segmentation version
+
+   > ⚠️ **Common Error**: If you see `'NoneType' object has no attribute 'eval'` in Cloud Function logs, it means you haven't accepted terms for all required models. The error is cryptic but it's just a model access issue.
+
 3. Generate an access token at: https://huggingface.co/settings/tokens (select "Read" access)
+
 4. Add the token to GitHub Secrets as `HUGGINGFACE_ACCESS_TOKEN`
 
 > **Note**: Without the Hugging Face token, transcription will still work but all audio will be attributed to a single speaker (SPEAKER_00).
@@ -426,6 +435,17 @@ npx firebase deploy --only firestore:rules
 **Cause**: Cloud Functions or Cloud Build API not enabled.
 
 **Solution**: Enable both APIs via console or CLI (Step 2).
+
+### WhisperX fails with "'NoneType' object has no attribute 'eval'"
+
+**Cause**: The Hugging Face token doesn't have access to all required pyannote models. The pyannote speaker diarization model internally depends on the segmentation model, which is also gated.
+
+**Solution**: Accept terms for ALL pyannote models:
+1. https://huggingface.co/pyannote/speaker-diarization-3.1
+2. https://huggingface.co/pyannote/segmentation
+3. https://huggingface.co/pyannote/segmentation-3.0
+
+Then retry the upload. No redeployment needed - the existing HF token will now work.
 
 ### "secretmanager.secrets.get" or "setIamPolicy" permission denied
 
