@@ -216,13 +216,24 @@ const db = initializeFirestore(app, {
 - Real-time Firestore listeners (smooth UX)
 - Custom hooks (great code organization)
 - Firebase for auth + database (fast development)
+- WhisperX-first architecture (precise timestamps)
+- Server-side alignment with client fallback (graceful degradation)
+- Manual speaker reassignment UI (handles AI edge cases)
 
 ### Decisions to Revisit
 - Client-side audio processing (may need WebWorkers for large files)
 - Single-region deployment (may need multi-region for latency)
 - Context-based state (may need Redux for complex features)
 
+### Recently Shipped (Beta v1.0.0)
+- WhisperX alignment for precision timestamps (~50ms accuracy)
+- pyannote speaker diarization integrated with WhisperX
+- Gemini speaker corrections for mid-segment changes
+- Manual speaker reassignment UI
+- Alignment status indicators (aligned/fallback badges)
+
 ### Planned Improvements
-- Add WhisperX alignment for better timestamps
 - Implement collaboration features
 - Add export functionality (PDF, Markdown)
+- Multi-speaker audio editing (merge/split segments)
+- Batch processing for multiple files

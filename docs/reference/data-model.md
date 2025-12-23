@@ -29,6 +29,10 @@ interface ConversationDoc {
   status: 'processing' | 'complete' | 'failed';
   processingError?: string;
 
+  // Alignment Status
+  alignmentStatus?: 'pending' | 'aligned' | 'fallback';
+  alignmentError?: string;      // Reason for fallback if applicable
+
   // Analysis Results
   speakers: Record<string, Speaker>;
   segments: Segment[];
@@ -72,6 +76,8 @@ interface Conversation {
   durationMs: number;
   audioUrl?: string;          // Temporary signed URL
   status: 'processing' | 'complete' | 'failed';
+  alignmentStatus?: 'pending' | 'aligned' | 'fallback';
+  alignmentError?: string;    // Reason for fallback
   speakers: Record<string, Speaker>;
   segments: Segment[];
   terms: Record<string, Term>;
