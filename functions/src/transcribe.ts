@@ -887,6 +887,14 @@ function mergeWhisperXAndGeminiData(
 } {
   console.debug('[Merge] Merging WhisperX and Gemini data...');
 
+  // Build a set of names mentioned in the People list (people talked ABOUT, not speakers)
+  // We use this to prevent Gemini from confusing mentioned people with actual speakers
+  const mentionedPeopleNames = new Set<string>(
+    (analysis.people || [])
+      .map(p => p.name?.toLowerCase().trim())
+      .filter((name): name is string => !!name)
+  );
+
   // Map speakers (use Gemini's inferred names/roles if available)
   const speakers: Record<string, Speaker> = {};
   whisperxData.speakers.forEach((s, idx) => {
@@ -897,11 +905,23 @@ function mergeWhisperXAndGeminiData(
       const speakerNote = analysis.speakerNotes.find(n => n.speakerId === s.id);
       if (speakerNote) {
         if (speakerNote.inferredName) {
-          // Use the real name if detected (e.g., "John" instead of "Speaker 1")
-          displayName = speakerNote.inferredName;
-          // Optionally append role if we have it
-          if (speakerNote.role) {
-            displayName = `${speakerNote.inferredName} (${speakerNote.role})`;
+          const inferredLower = speakerNote.inferredName.toLowerCase().trim();
+
+          // SAFETY CHECK: Don't use the inferred name if it matches someone in the People list
+          // This prevents confusing people talked ABOUT with actual speakers
+          if (mentionedPeopleNames.has(inferredLower)) {
+            console.warn(`[Merge] Rejecting inferred speaker name "${speakerNote.inferredName}" - matches someone in People list (talked about, not a speaker)`);
+            // Fall through to use role or default name instead
+            if (speakerNote.role) {
+              displayName = `${s.name} (${speakerNote.role})`;
+            }
+          } else {
+            // Use the real name if detected (e.g., "John" instead of "Speaker 1")
+            displayName = speakerNote.inferredName;
+            // Optionally append role if we have it
+            if (speakerNote.role) {
+              displayName = `${speakerNote.inferredName} (${speakerNote.role})`;
+            }
           }
         } else if (speakerNote.role) {
           // No name but we know the role (e.g., "Speaker 1 (host)")
