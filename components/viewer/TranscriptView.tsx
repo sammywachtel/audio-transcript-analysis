@@ -12,6 +12,7 @@ interface TranscriptViewProps {
   onSeek: (ms: number) => void;
   onTermClick: (termId: string) => void;
   onRenameSpeaker: (speakerId: string) => void;
+  onReassignSpeaker?: (segmentId: string, newSpeakerId: string) => void;
 }
 
 /**
@@ -29,8 +30,11 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   personOccurrences,
   onSeek,
   onTermClick,
-  onRenameSpeaker
+  onRenameSpeaker,
+  onReassignSpeaker
 }) => {
+  // Get all speakers as an array for the reassignment dropdown
+  const allSpeakers = Object.values(conversation.speakers);
   return (
     <div className="flex-1 overflow-y-auto relative">
       <div className="max-w-3xl mx-auto px-4 py-8 pb-32">
@@ -60,6 +64,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                   displayName: seg.speakerId,
                   colorIndex: 0
                 }}
+                allSpeakers={allSpeakers}
                 occurrences={segmentOccurrences}
                 personOccurrences={segmentPersonOccurrences}
                 isActive={isActive}
@@ -68,6 +73,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                 onSeek={onSeek}
                 onTermClick={onTermClick}
                 onRenameSpeaker={onRenameSpeaker}
+                onReassignSpeaker={onReassignSpeaker}
               />
             </div>
           );

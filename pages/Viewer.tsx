@@ -114,6 +114,32 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
     setEditingSpeakerId(speakerId);
   }, []);
 
+  /**
+   * Handle segment speaker reassignment
+   * Allows user to change which speaker a specific segment is attributed to
+   */
+  const handleReassignSpeaker = useCallback((segmentId: string, newSpeakerId: string) => {
+    const updatedSegments = conversation.segments.map(seg =>
+      seg.segmentId === segmentId
+        ? { ...seg, speakerId: newSpeakerId }
+        : seg
+    );
+
+    const updatedConversation = {
+      ...conversation,
+      segments: updatedSegments
+    };
+
+    setConversation(updatedConversation);
+    updateConversation(updatedConversation);
+
+    console.log('[Viewer] Reassigned segment speaker:', {
+      segmentId,
+      newSpeakerId,
+      newSpeakerName: conversation.speakers[newSpeakerId]?.displayName
+    });
+  }, [conversation, updateConversation]);
+
   const saveSpeakerName = useCallback((newName: string) => {
     if (editingSpeakerId && newName.trim()) {
       const updatedConversation = {
@@ -184,6 +210,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
           onSeek={seek}
           onTermClick={handleTermClickInTranscript}
           onRenameSpeaker={handleRenameSpeaker}
+          onReassignSpeaker={handleReassignSpeaker}
         />
 
         {/* Sidebar (Desktop) */}

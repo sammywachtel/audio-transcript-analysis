@@ -1,12 +1,13 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { Segment, TermOccurrence, Speaker } from '../../types';
 import { cn, formatTime } from '../../utils';
 import { SPEAKER_COLORS } from '../../constants';
-import { Edit2 } from 'lucide-react';
+import { Edit2, ChevronDown } from 'lucide-react';
 
 interface TranscriptSegmentProps {
   segment: Segment;
   speaker: Speaker;
+  allSpeakers: Speaker[];  // All available speakers for reassignment
   occurrences: TermOccurrence[];
   personOccurrences?: { start: number; end: number; personId: string }[];
   isActive: boolean;
@@ -15,11 +16,13 @@ interface TranscriptSegmentProps {
   onSeek: (ms: number) => void;
   onTermClick: (termId: string) => void;
   onRenameSpeaker: (speakerId: string) => void;
+  onReassignSpeaker?: (segmentId: string, newSpeakerId: string) => void;
 }
 
 export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
   segment,
   speaker,
+  allSpeakers,
   occurrences,
   personOccurrences = [],
   isActive,
@@ -27,8 +30,32 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
   activePersonId,
   onSeek,
   onTermClick,
-  onRenameSpeaker
+  onRenameSpeaker,
+  onReassignSpeaker
 }) => {
+  const [showSpeakerDropdown, setShowSpeakerDropdown] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setShowSpeakerDropdown(false);
+      }
+    };
+
+    if (showSpeakerDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showSpeakerDropdown]);
+
+  const handleSpeakerSelect = (newSpeakerId: string) => {
+    if (newSpeakerId !== segment.speakerId && onReassignSpeaker) {
+      onReassignSpeaker(segment.segmentId, newSpeakerId);
+    }
+    setShowSpeakerDropdown(false);
+  };
 
   // Splitting text to inject highlights
   const textParts = useMemo(() => {
@@ -92,15 +119,62 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
          >
            {formatTime(segment.startMs)}
          </button>
-         <div className="flex items-center gap-2">
-            <span
+         <div className="flex items-center gap-2 relative" ref={dropdownRef}>
+            {/* Speaker badge - clickable to reassign */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onReassignSpeaker && allSpeakers.length > 1) {
+                  setShowSpeakerDropdown(!showSpeakerDropdown);
+                }
+              }}
               className={cn(
-                "px-2 py-0.5 rounded text-xs font-medium border max-w-[100px] truncate",
-                SPEAKER_COLORS[speaker.colorIndex % SPEAKER_COLORS.length]
+                "px-2 py-0.5 rounded text-xs font-medium border max-w-[100px] truncate flex items-center gap-1",
+                SPEAKER_COLORS[speaker.colorIndex % SPEAKER_COLORS.length],
+                onReassignSpeaker && allSpeakers.length > 1 && "cursor-pointer hover:opacity-80"
               )}
+              title={onReassignSpeaker && allSpeakers.length > 1 ? "Click to reassign speaker" : undefined}
             >
               {speaker.displayName}
-            </span>
+              {onReassignSpeaker && allSpeakers.length > 1 && (
+                <ChevronDown size={10} className="opacity-50" />
+              )}
+            </button>
+
+            {/* Speaker reassignment dropdown */}
+            {showSpeakerDropdown && (
+              <div className="absolute top-full left-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-50 min-w-[140px] py-1">
+                <div className="px-2 py-1 text-xs text-slate-500 border-b border-slate-100">
+                  Reassign to:
+                </div>
+                {allSpeakers.map((s) => (
+                  <button
+                    key={s.speakerId}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSpeakerSelect(s.speakerId);
+                    }}
+                    className={cn(
+                      "w-full px-2 py-1.5 text-left text-xs hover:bg-slate-50 flex items-center gap-2",
+                      s.speakerId === segment.speakerId && "bg-slate-100"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "w-2 h-2 rounded-full",
+                        SPEAKER_COLORS[s.colorIndex % SPEAKER_COLORS.length].split(' ')[0]  // Just the bg color
+                      )}
+                    />
+                    {s.displayName}
+                    {s.speakerId === segment.speakerId && (
+                      <span className="ml-auto text-slate-400">✓</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Rename button */}
             <button
               onClick={(e) => { e.stopPropagation(); onRenameSpeaker(speaker.speakerId); }}
               className="opacity-0 group-hover:opacity-100 p-1 hover:bg-slate-200 rounded text-slate-500 transition-opacity"
