@@ -276,7 +276,8 @@ export const transcribeAudio = onObjectFinalized(
       // Apply speaker corrections to segments
       const correctedSegments = applySpeakerCorrections(
         whisperxSegments.segments,
-        speakerCorrections
+        speakerCorrections,
+        whisperxSegments.speakers.map(s => s.id)
       );
 
       // Update the whisperxSegments with corrected segments
@@ -716,7 +717,8 @@ ${isImbalanced ? 'Given the imbalance, you should find multiple corrections. Loo
  */
 function applySpeakerCorrections(
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
-  corrections: SpeakerCorrection[]
+  corrections: SpeakerCorrection[],
+  allSpeakers: string[]
 ): Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }> {
   if (corrections.length === 0) {
     console.debug('[Apply Corrections] No corrections to apply');
@@ -726,7 +728,8 @@ function applySpeakerCorrections(
   console.log('[Apply Corrections] Applying corrections...', {
     correctionCount: corrections.length,
     splitCount: corrections.filter(c => c.action === 'split').length,
-    reassignCount: corrections.filter(c => c.action === 'reassign').length
+    reassignCount: corrections.filter(c => c.action === 'reassign').length,
+    availableSpeakers: allSpeakers
   });
 
   let modifiedSegments = [...segments];
@@ -769,14 +772,32 @@ function applySpeakerCorrections(
     } else if (correction.action === 'split') {
       // Split segment at character position
       // speakerBefore is optional - defaults to original segment's speaker
-      // speakerAfter is required - it's the new speaker for the second part
-      if (!correction.splitAtChar || !correction.speakerAfter) {
-        console.warn('[Apply Corrections] Split action missing required fields (need splitAtChar and speakerAfter), skipping:', correction);
+      // speakerAfter can be inferred for 2-speaker conversations
+      if (!correction.splitAtChar) {
+        console.warn('[Apply Corrections] Split action missing splitAtChar, skipping:', correction);
         return;
       }
 
       // Default speakerBefore to original speaker if not provided
       const speakerBefore = correction.speakerBefore || segment.speakerId;
+
+      // Infer speakerAfter if not provided
+      let speakerAfter = correction.speakerAfter;
+      if (!speakerAfter) {
+        // For 2-speaker conversations, the "other" speaker is obvious
+        if (allSpeakers.length === 2) {
+          speakerAfter = allSpeakers.find(s => s !== speakerBefore) || speakerBefore;
+          console.debug('[Apply Corrections] Inferred speakerAfter for 2-speaker conversation:', {
+            speakerBefore,
+            speakerAfter,
+            allSpeakers
+          });
+        } else {
+          // Can't infer with >2 speakers - skip this correction
+          console.warn('[Apply Corrections] Split action missing speakerAfter and cannot infer (>2 speakers), skipping:', correction);
+          return;
+        }
+      }
 
       const splitPos = correction.splitAtChar;
       if (splitPos <= 0 || splitPos >= segment.text.length) {
@@ -800,7 +821,7 @@ function applySpeakerCorrections(
         splitAtChar: splitPos,
         charRatio: charRatio.toFixed(2),
         speakerBefore: speakerBefore,
-        speakerAfter: correction.speakerAfter,
+        speakerAfter: speakerAfter,
         reason: correction.reason,
         beforeLength: textBefore.length,
         afterLength: textAfter.length
@@ -819,7 +840,7 @@ function applySpeakerCorrections(
         text: textAfter,
         startMs: splitTimeMs,
         endMs: segment.endMs,
-        speakerId: correction.speakerAfter,
+        speakerId: speakerAfter,
         index: segment.index  // Will be re-indexed later
       };
 
