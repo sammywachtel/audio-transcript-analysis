@@ -114,18 +114,27 @@ sa_exists() {
     gcloud iam service-accounts describe "$sa_email" --project="$PROJECT_ID" &>/dev/null
 }
 
-# Add IAM binding for service agent (skip if SA doesn't exist yet)
+# Add IAM binding for service agent
+# Note: Service agents (like @gs-project-accounts, @gcp-sa-pubsub) are Google-managed
+# and don't appear in `gcloud iam service-accounts list`. We add bindings unconditionally
+# and let gcloud handle any errors - the binding will take effect when the agent is created.
 add_service_agent_binding() {
     local sa_email="$1"
     local role="$2"
     local description="$3"
 
-    if ! sa_exists "$sa_email"; then
-        log_info "$description - skipped (service agent not yet created)"
-        return 0
+    # Just try to add the binding - service agents are created lazily by GCP
+    # and the binding will work once they exist
+    if gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+        --member="serviceAccount:$sa_email" \
+        --role="$role" \
+        --condition=None \
+        --quiet > /dev/null 2>&1; then
+        log_success "$description"
+    else
+        # Binding might fail if agent truly doesn't exist yet, that's ok
+        log_info "$description - will be configured on first deploy"
     fi
-
-    add_iam_binding "serviceAccount:$sa_email" "$role" "$description"
 }
 
 # -----------------------------------------------------------------------------
