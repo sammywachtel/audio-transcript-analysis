@@ -257,27 +257,32 @@ export const transcribeAudio = onObjectFinalized(
         personCount: analysis.people?.length ?? 0
       });
 
-      // Step 3.5: Speaker correction pass - TEMPORARILY DISABLED
-      // Disabled to isolate whether this was causing timestamp clustering issues
-      // TODO: Re-enable after confirming new model works correctly
-      console.log('[Transcribe] Step 3.5: Speaker corrections DISABLED for debugging');
-      const speakerCorrections: SpeakerCorrection[] = [];
-      const speakerCorrectionDurationMs = 0;
+      // Step 3.5: Speaker reassignment pass (reassign only, no splits/timestamp changes)
+      console.log('[Transcribe] Step 3.5: Identifying speaker reassignments...');
+      const speakerCorrectionStartTime = Date.now();
 
-      // Original code preserved for re-enablement:
-      // const speakerCorrectionStartTime = Date.now();
-      // const speakerCorrections = await identifySpeakerCorrections(
-      //   whisperxSegments.segments,
-      //   whisperxSegments.speakers,
-      //   geminiApiKey.value()
-      // );
-      // speakerCorrectionDurationMs = Date.now() - speakerCorrectionStartTime;
-      // const correctedSegments = applySpeakerCorrections(
-      //   whisperxSegments.segments,
-      //   speakerCorrections,
-      //   whisperxSegments.speakers.map(s => s.id)
-      // );
-      // whisperxSegments.segments = correctedSegments;
+      const speakerCorrections = await identifySpeakerReassignments(
+        whisperxSegments.segments,
+        whisperxSegments.speakers,
+        geminiApiKey.value()
+      );
+
+      const speakerCorrectionDurationMs = Date.now() - speakerCorrectionStartTime;
+      console.log('[Transcribe] Speaker reassignment analysis complete:', {
+        conversationId,
+        durationMs: speakerCorrectionDurationMs,
+        durationSec: (speakerCorrectionDurationMs / 1000).toFixed(1),
+        correctionCount: speakerCorrections.length
+      });
+
+      // Apply speaker reassignments (no timestamp manipulation)
+      if (speakerCorrections.length > 0) {
+        whisperxSegments.segments = applySpeakerReassignments(
+          whisperxSegments.segments,
+          speakerCorrections,
+          whisperxSegments.speakers.map(s => s.id)
+        );
+      }
 
       // Update progress: finalizing
       await progressManager.setStep(ProcessingStep.FINALIZING);
@@ -655,20 +660,19 @@ Return your analysis as JSON matching the provided schema.
 }
 
 /**
- * NEW: Identify speaker corrections using Gemini conversational analysis.
- * Detects mid-segment speaker changes that WhisperX/pyannote miss.
- *
- * TEMPORARILY DISABLED - kept for future re-enablement after debugging
- * @see Step 3.5 in transcribeAudio
+ * Identify speaker corrections using Gemini conversational analysis.
+ * Only identifies REASSIGN corrections (entire segment to different speaker).
+ * Split corrections are disabled as they caused timestamp issues.
  */
-export async function _identifySpeakerCorrections(
+async function identifySpeakerReassignments(
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
   speakers: Array<{ id: string; name: string }>,
   apiKey: string
 ): Promise<SpeakerCorrection[]> {
   const genAI = new GoogleGenerativeAI(apiKey);
 
-  // Use gemini-2.5-flash for speaker correction analysis
+  // Use gemini-2.5-flash for speaker reassignment analysis
+  // Schema simplified to only support reassign (no split)
   const model = genAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     generationConfig: {
@@ -682,14 +686,10 @@ export async function _identifySpeakerCorrections(
               type: SchemaType.OBJECT,
               properties: {
                 segmentIndex: { type: SchemaType.INTEGER },
-                action: { type: SchemaType.STRING },
-                reason: { type: SchemaType.STRING },
-                splitAtChar: { type: SchemaType.INTEGER },
-                speakerBefore: { type: SchemaType.STRING },
-                speakerAfter: { type: SchemaType.STRING },
-                newSpeaker: { type: SchemaType.STRING }
+                newSpeaker: { type: SchemaType.STRING },
+                reason: { type: SchemaType.STRING }
               },
-              required: ['segmentIndex', 'action', 'reason']
+              required: ['segmentIndex', 'newSpeaker', 'reason']
             }
           }
         },
@@ -715,57 +715,39 @@ export async function _identifySpeakerCorrections(
     .map(([id, count]) => `${id}: ${count} segments (${Math.round(count / segments.length * 100)}%)`)
     .join(', ');
 
-  // Check if distribution is severely imbalanced (>80% one speaker)
-  const maxCount = Math.max(...Object.values(speakerCounts));
-  const isImbalanced = maxCount / segments.length > 0.8;
-
   const prompt = `
 You are an expert at identifying speaker attribution errors in conversation transcripts.
 
 CURRENT SPEAKER DISTRIBUTION: ${speakerDistribution}
-${isImbalanced ? `
-⚠️ WARNING: This distribution is SEVERELY IMBALANCED. In a natural two-person conversation,
-speakers typically have more balanced turn-taking. This imbalance suggests the diarization
-system missed many speaker changes. Be MORE AGGRESSIVE in identifying corrections.
-` : ''}
 
-Analyze this transcript and identify segments where the speaker attribution is LIKELY WRONG.
-Focus on:
+Analyze this transcript and identify segments where the ENTIRE SEGMENT is attributed to the WRONG speaker.
 
-1. MID-SEGMENT SPEAKER CHANGES: Look for cases where the speaker changes mid-utterance.
-   Common patterns:
-   - Question followed by answer: "What do you think? Yeah, I agree..." (likely two speakers)
-   - Back-and-forth acknowledgments: "Right, exactly. Mm-hmm. So anyway..." (likely different speakers)
-   - Name mentions: "Chris mentioned..." or "Michael, what do you think?" (indicates another speaker)
-   - Direct address: "You know what I mean?" followed by "Yeah" (likely different speakers)
-   - Interjections: "um yeah", "so how do you", "oh really" mid-sentence often indicate listener feedback
+Focus on these patterns that indicate MISATTRIBUTION:
 
-2. MISATTRIBUTED SEGMENTS: Entire segments where speaker is clearly wrong.
-   Common patterns:
-   - Short acknowledgments ("yeah", "mm-hmm", "right", "exactly") during someone else's extended speech
-   - Questions immediately followed by answers in the same segment
-   - Context clues (person A asks question, answer attributed to person A instead of person B)
-   - Self-references that don't match the speaker's known role/identity
+1. QUESTION/ANSWER PATTERNS:
+   - If Speaker 1 asks questions and Speaker 2 gives answers, but a question is attributed to Speaker 2
+   - Interview patterns: interviewer asks, interviewee responds
+   - Example: "Where do you go shopping?" should be the interviewer, not interviewee
 
-${isImbalanced ? `
-3. REBALANCING: Given the severe imbalance, look for patterns where the minority speaker
-   is likely responding or interjecting but their speech was merged with the dominant speaker's segments.
-   Focus especially on:
-   - Segments > 50 words (more likely to contain multiple speakers)
-   - Segments with multiple sentences (each sentence could be a different speaker)
-   - Acknowledgment words appearing anywhere in the text
-` : ''}
+2. ROLE CONSISTENCY:
+   - One speaker is clearly the questioner/interviewer throughout
+   - One speaker is clearly the responder/interviewee throughout
+   - Short responses ("New Look, Primark", "Normal places") are typically from the responder
 
-GUIDELINES:
-- For split actions, provide: splitAtChar (character position) and speakerAfter (new speaker for second part)
-- For reassign actions, provide: newSpeaker (correct speaker ID)
-- The speakerId values available are: ${speakerList}
-- ${isImbalanced ? 'Given the imbalance, aim to find 5-20 corrections. Be thorough.' : 'Be conservative - false negatives are better than false positives.'}
-- Base corrections on clear conversational evidence
+3. CONVERSATIONAL FLOW:
+   - Back-and-forth exchanges where attribution doesn't make sense
+   - A question followed by another question from the "same" speaker (likely wrong)
+   - An answer that doesn't fit the previous question's context
 
-Actions:
-- "split": Segment contains multiple speakers, should be split at character position
-- "reassign": Entire segment attributed to wrong speaker
+4. SHORT ACKNOWLEDGMENTS:
+   - Brief responses like "Yeah", "Mm-hmm", "Right" during someone's extended speech
+   - These are often from the listener, not the speaker
+
+IMPORTANT GUIDELINES:
+- Only identify segments where the ENTIRE segment should be reassigned to a different speaker
+- Do NOT suggest splitting segments - only whole-segment reassignments
+- Be conservative - only flag clear errors based on conversational logic
+- Provide the newSpeaker ID (must be one of: ${speakerList})
 
 Available speakers: ${speakerList}
 
@@ -773,49 +755,110 @@ Transcript (with speaker labels and segment indices):
 ${formattedTranscript}
 
 Return your analysis as JSON with an array of corrections.
-${isImbalanced ? 'Given the imbalance, you should find multiple corrections. Look carefully.' : 'If no corrections are needed, return an empty array.'}
+Each correction needs: segmentIndex (0-based), newSpeaker (the correct speaker ID), reason (brief explanation).
+If no corrections are needed, return an empty array.
 `;
 
-  console.log('[Speaker Correction] Analyzing transcript...', {
+  console.log('[Speaker Reassignment] Analyzing transcript...', {
     promptLength: prompt.length,
     segmentCount: segments.length,
     speakerCount: speakers.length,
-    speakerDistribution,
-    isImbalanced
+    speakerDistribution
   });
 
   const result = await model.generateContent([{ text: prompt }]);
   const responseText = result.response.text();
 
-  console.debug('[Speaker Correction] Raw response received:', {
+  console.debug('[Speaker Reassignment] Raw response received:', {
     responseLength: responseText.length
   });
 
   const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
 
   try {
-    const parsed = JSON.parse(cleanJson) as { corrections: SpeakerCorrection[] };
-    console.debug('[Speaker Correction] JSON parsed successfully:', {
-      correctionCount: parsed.corrections.length
+    const parsed = JSON.parse(cleanJson) as { corrections: Array<{ segmentIndex: number; newSpeaker: string; reason: string }> };
+
+    // Convert to SpeakerCorrection format with action='reassign'
+    const corrections: SpeakerCorrection[] = parsed.corrections.map(c => ({
+      segmentIndex: c.segmentIndex,
+      action: 'reassign' as const,
+      reason: c.reason,
+      newSpeaker: c.newSpeaker
+    }));
+
+    console.log('[Speaker Reassignment] Analysis complete:', {
+      correctionCount: corrections.length,
+      corrections: corrections.map(c => `[${c.segmentIndex}] -> ${c.newSpeaker}: ${c.reason?.substring(0, 50)}`)
     });
-    return parsed.corrections;
+
+    return corrections;
   } catch (parseError) {
-    console.error('[Speaker Correction] JSON parse failed:', {
+    console.error('[Speaker Reassignment] JSON parse failed:', {
       error: parseError instanceof Error ? parseError.message : String(parseError),
       cleanJsonPreview: cleanJson.substring(0, 500)
     });
     // Don't fail the whole transcription if speaker correction fails
-    // Just log the error and return empty corrections
     return [];
   }
 }
 
 /**
- * Apply speaker corrections to segments.
+ * Apply speaker reassignments to segments.
+ * Only changes speaker IDs - NO timestamp manipulation.
+ * This is the safe version that won't cause timestamp clustering issues.
+ */
+function applySpeakerReassignments(
+  segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
+  corrections: SpeakerCorrection[],
+  allSpeakers: string[]
+): Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }> {
+  if (corrections.length === 0) {
+    return segments;
+  }
+
+  // Only process reassign actions (ignore any split actions that might slip through)
+  const reassignments = corrections.filter(c => c.action === 'reassign' && c.newSpeaker);
+
+  if (reassignments.length === 0) {
+    return segments;
+  }
+
+  const result = [...segments];
+
+  for (const correction of reassignments) {
+    const { segmentIndex, newSpeaker } = correction;
+
+    // Validate segment index
+    if (segmentIndex < 0 || segmentIndex >= result.length) {
+      console.warn(`[Speaker Reassignment] Invalid segment index ${segmentIndex}, skipping`);
+      continue;
+    }
+
+    // Validate new speaker exists
+    if (!allSpeakers.includes(newSpeaker!)) {
+      console.warn(`[Speaker Reassignment] Unknown speaker ${newSpeaker}, skipping`);
+      continue;
+    }
+
+    const oldSpeaker = result[segmentIndex].speakerId;
+
+    // Only apply if actually changing speaker
+    if (oldSpeaker !== newSpeaker) {
+      console.debug(`[Speaker Reassignment] Segment ${segmentIndex}: ${oldSpeaker} -> ${newSpeaker}`);
+      result[segmentIndex] = {
+        ...result[segmentIndex],
+        speakerId: newSpeaker!
+      };
+    }
+  }
+
+  return result;
+}
+
+/**
+ * DEPRECATED: Apply speaker corrections to segments.
  * Handles both 'split' and 'reassign' actions.
- *
- * TEMPORARILY DISABLED - kept for future re-enablement after debugging
- * @see Step 3.5 in transcribeAudio
+ * Use applySpeakerReassignments instead (no timestamp manipulation).
  */
 export function _applySpeakerCorrections(
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,

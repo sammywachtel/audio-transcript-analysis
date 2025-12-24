@@ -1525,10 +1525,29 @@ export async function transcribeWithWhisperX(
     if (typeof output === 'object' && output !== null) {
       const outputObj = output as Record<string, unknown>;
 
-      // Log raw structure for debugging
-      console.debug(
-        `[WhisperX] Raw output keys: ${Object.keys(outputObj).join(', ')}`
-      );
+      // === DIAGNOSTIC LOGGING ===
+      // Log raw output structure to debug model format differences
+      console.log('[WhisperX] === RAW OUTPUT DIAGNOSTIC ===');
+      console.log(`[WhisperX] Output type: ${typeof output}`);
+      console.log(`[WhisperX] Output keys: ${Object.keys(outputObj).join(', ')}`);
+
+      // Log first 3000 chars of raw output for structure inspection
+      const rawOutputStr = JSON.stringify(output, null, 2);
+      console.log(`[WhisperX] Raw output (first 3000 chars):\n${rawOutputStr.substring(0, 3000)}`);
+
+      // Log specific field types
+      console.log(`[WhisperX] Field types: ${Object.entries(outputObj).map(([k, v]) =>
+        `${k}=${Array.isArray(v) ? `array[${v.length}]` : typeof v}`
+      ).join(', ')}`);
+
+      // If segments exist, log first 3 segment structures
+      if (Array.isArray(outputObj.segments) && outputObj.segments.length > 0) {
+        console.log(`[WhisperX] First 3 segments structure:`);
+        outputObj.segments.slice(0, 3).forEach((seg, i) => {
+          console.log(`[WhisperX]   Segment ${i}: ${JSON.stringify(seg)}`);
+        });
+      }
+      console.log('[WhisperX] === END DIAGNOSTIC ===');
 
       if (Array.isArray(outputObj.segments)) {
         for (const segment of outputObj.segments) {
