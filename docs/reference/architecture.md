@@ -94,7 +94,8 @@ audio-transcript-analysis-app/
 │   ├── auth/               # Authentication components
 │   │   ├── SignInButton.tsx
 │   │   ├── UserMenu.tsx
-│   │   └── ProtectedRoute.tsx
+│   │   ├── ProtectedRoute.tsx
+│   │   └── AdminRoute.tsx  # Admin-only content gating
 │   └── viewer/             # Transcript viewer components
 │       ├── AudioPlayer.tsx
 │       ├── Sidebar.tsx
@@ -103,7 +104,7 @@ audio-transcript-analysis-app/
 │       ├── TopicMarker.tsx
 │       └── ViewerHeader.tsx
 ├── contexts/               # React contexts
-│   ├── AuthContext.tsx     # Authentication state
+│   ├── AuthContext.tsx     # Authentication state + isAdmin role
 │   └── ConversationContext.tsx
 ├── hooks/                  # Custom React hooks
 │   ├── useAudioPlayer.ts
@@ -112,15 +113,18 @@ audio-transcript-analysis-app/
 │   └── useTranscriptSelection.ts
 ├── pages/                  # Page components
 │   ├── Library.tsx         # Conversation list + upload
-│   └── Viewer.tsx          # Transcript viewer
+│   ├── Viewer.tsx          # Transcript viewer
+│   └── AdminDashboard.tsx  # Processing metrics (admin-only)
 ├── services/               # Firebase services
 │   ├── firestoreService.ts
 │   └── storageService.ts
 ├── functions/              # Cloud Functions (Node.js)
 │   └── src/
 │       ├── index.ts        # Function exports
-│       ├── transcribe.ts   # Gemini transcription + orchestration
-│       └── alignment.ts    # HARDY timestamp alignment algorithm
+│       ├── transcribe.ts   # WhisperX + Gemini analysis
+│       ├── alignment.ts    # WhisperX integration via Replicate
+│       ├── metrics.ts      # Processing metrics recording
+│       └── logger.ts       # Structured logging utility
 ├── types.ts                # TypeScript types
 ├── utils.ts                # Helper functions
 └── firebase-config.ts      # Firebase initialization
@@ -269,12 +273,72 @@ match /conversations/{conversationId} {
     && resource.data.userId == request.auth.uid;
 }
 
+// Admin-only metrics collection
+match /_metrics/{doc} {
+  allow read: if isAdmin();
+  allow write: if false;  // Only Cloud Functions can write
+}
+
 // Storage
 match /audio/{userId}/{fileName} {
   allow read, write: if request.auth != null
     && request.auth.uid == userId;
 }
 ```
+
+### Admin Role
+
+Admin users have access to the observability dashboard. Admin status is determined by the `isAdmin` field in the user's Firestore document:
+
+```
+users/{userId}
+├── isAdmin: boolean    // Grants access to admin dashboard
+├── email: string
+└── ...
+```
+
+The `AuthContext` fetches this field on login and exposes `isAdmin` to the app. The `AdminRoute` component gates admin-only content.
+
+## Observability
+
+### Metrics Collection
+
+Processing metrics are recorded to `_metrics` collection after each transcription job:
+
+```typescript
+interface ProcessingMetrics {
+  conversationId: string;
+  userId: string;
+  status: 'success' | 'failed';
+  errorMessage?: string;
+  timingMs: {
+    download: number;
+    whisperx: number;
+    buildSegments: number;
+    gemini: number;
+    speakerCorrection: number;
+    transform: number;
+    firestore: number;
+    total: number;
+  };
+  segmentCount: number;
+  speakerCount: number;
+  speakerCorrectionsApplied: number;
+  audioSizeMB: number;
+  durationMs: number;
+  timestamp: Timestamp;
+}
+```
+
+### Admin Dashboard
+
+The `AdminDashboard` page displays aggregate metrics:
+- Total jobs, success rate, failed jobs
+- Average processing times (total, Gemini, WhisperX)
+- Speaker corrections applied
+- Recent processing jobs table with per-user visibility
+
+Only users with `isAdmin: true` can access this page.
 
 ## Offline Support
 
