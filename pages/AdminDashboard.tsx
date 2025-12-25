@@ -11,12 +11,26 @@ interface AdminDashboardProps {
 
 interface MetricData {
   conversationId: string;
-  processingTimeMs?: number;
   success: boolean;
   timestamp: string;
   userId?: string;
   errorMessage?: string;
   alignmentStatus?: 'aligned' | 'fallback' | 'pending';
+  // Detailed timing breakdown (ms)
+  timingMs?: {
+    download: number;
+    whisperx: number;
+    buildSegments: number;
+    gemini: number;
+    speakerCorrection: number;
+    transform: number;
+    firestore: number;
+    total: number;
+  };
+  // Result counts
+  segmentCount?: number;
+  speakerCount?: number;
+  speakerCorrectionsApplied?: number;
 }
 
 /**
@@ -50,13 +64,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
         snapshot.forEach((doc) => {
           const docData = doc.data();
           data.push({
-            conversationId: doc.id,
-            processingTimeMs: docData.processingTimeMs,
-            success: docData.success ?? false,
+            conversationId: docData.conversationId || doc.id,
+            success: docData.status === 'success',
             timestamp: docData.timestamp,
             userId: docData.userId,
             errorMessage: docData.errorMessage,
             alignmentStatus: docData.alignmentStatus,
+            timingMs: docData.timingMs,
+            segmentCount: docData.segmentCount,
+            speakerCount: docData.speakerCount,
+            speakerCorrectionsApplied: docData.speakerCorrectionsApplied,
           });
         });
 
@@ -78,13 +95,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
   const failedJobs = totalJobs - successfulJobs;
   const successRate = totalJobs > 0 ? ((successfulJobs / totalJobs) * 100).toFixed(1) : '0';
 
-  const avgProcessingTime =
-    metrics.length > 0
-      ? metrics.reduce((sum, m) => sum + (m.processingTimeMs || 0), 0) / metrics.length
-      : 0;
+  // Calculate average times from detailed timing data
+  const metricsWithTiming = metrics.filter((m) => m.timingMs);
+  const avgProcessingTime = metricsWithTiming.length > 0
+    ? metricsWithTiming.reduce((sum, m) => sum + (m.timingMs?.total || 0), 0) / metricsWithTiming.length
+    : 0;
+  const avgGeminiTime = metricsWithTiming.length > 0
+    ? metricsWithTiming.reduce((sum, m) => sum + (m.timingMs?.gemini || 0), 0) / metricsWithTiming.length
+    : 0;
+  const avgWhisperXTime = metricsWithTiming.length > 0
+    ? metricsWithTiming.reduce((sum, m) => sum + (m.timingMs?.whisperx || 0), 0) / metricsWithTiming.length
+    : 0;
 
+  // Timestamp source stats (WhisperX vs Fallback)
   const alignedCount = metrics.filter((m) => m.alignmentStatus === 'aligned').length;
   const fallbackCount = metrics.filter((m) => m.alignmentStatus === 'fallback').length;
+
+  // Speaker correction stats
+  const totalCorrections = metrics.reduce((sum, m) => sum + (m.speakerCorrectionsApplied || 0), 0);
 
   return (
     <div className="min-h-screen bg-slate-50 p-6 md:p-12">
@@ -139,6 +167,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
               />
             </div>
 
+            {/* Processing Time Stats */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+              <StatCard
+                icon={<Clock size={20} />}
+                label="Avg Gemini Analysis"
+                value={formatTime(avgGeminiTime)}
+                color="purple"
+              />
+              <StatCard
+                icon={<Clock size={20} />}
+                label="Avg WhisperX Time"
+                value={formatTime(avgWhisperXTime)}
+                color="blue"
+              />
+              <StatCard
+                icon={<Activity size={20} />}
+                label="Speaker Corrections"
+                value={totalCorrections.toString()}
+                color="amber"
+              />
+            </div>
+
             {/* Alignment Stats */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
               <StatCard
@@ -149,7 +199,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
               />
               <StatCard
                 icon={<XCircle size={20} />}
-                label="Fallback (Gemini)"
+                label="Timestamp Fallback"
                 value={fallbackCount.toString()}
                 color="amber"
               />
@@ -203,7 +253,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
                             )}
                           </td>
                           <td className="px-6 py-4 text-sm text-slate-600">
-                            {metric.processingTimeMs ? formatTime(metric.processingTimeMs) : '--'}
+                            {metric.timingMs?.total ? formatTime(metric.timingMs.total) : '--'}
                           </td>
                           <td className="px-6 py-4">
                             {metric.alignmentStatus === 'aligned' ? (
