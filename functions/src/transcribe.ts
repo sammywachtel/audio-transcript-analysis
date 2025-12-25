@@ -17,6 +17,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { db, bucket } from './index';
 import { ProgressManager, ProcessingStep } from './progressManager';
 import { transcribeWithWhisperX, WhisperXSegment } from './alignment';
+import { recordMetrics } from './metrics';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
@@ -341,6 +342,32 @@ export const transcribeAudio = onObjectFinalized(
         }
       });
 
+      // Record metrics for observability dashboard
+      await recordMetrics({
+        conversationId,
+        userId,
+        status: 'success',
+        alignmentStatus: 'aligned',
+        timingMs: {
+          download: downloadDurationMs,
+          whisperx: whisperxDurationMs,
+          buildSegments: buildDurationMs,
+          gemini: geminiDurationMs,
+          speakerCorrection: speakerCorrectionDurationMs,
+          transform: transformDurationMs,
+          firestore: firestoreDurationMs,
+          total: totalDurationMs
+        },
+        segmentCount: processedData.segments.length,
+        speakerCount: Object.keys(processedData.speakers).length,
+        termCount: Object.keys(processedData.terms).length,
+        topicCount: processedData.topics.length,
+        personCount: processedData.people.length,
+        speakerCorrectionsApplied: speakerCorrections.length,
+        audioSizeMB: audioBuffer.length / (1024 * 1024),
+        durationMs: processedData.durationMs
+      });
+
       // Mark processing as complete
       await progressManager.setComplete();
 
@@ -352,6 +379,32 @@ export const transcribeAudio = onObjectFinalized(
         errorType: error instanceof Error ? error.constructor.name : typeof error,
         errorMessage,
         errorStack: error instanceof Error ? error.stack : undefined
+      });
+
+      // Record failure metrics for observability dashboard
+      await recordMetrics({
+        conversationId,
+        userId,
+        status: 'failed',
+        errorMessage,
+        timingMs: {
+          download: 0,
+          whisperx: 0,
+          buildSegments: 0,
+          gemini: 0,
+          speakerCorrection: 0,
+          transform: 0,
+          firestore: 0,
+          total: 0
+        },
+        segmentCount: 0,
+        speakerCount: 0,
+        termCount: 0,
+        topicCount: 0,
+        personCount: 0,
+        speakerCorrectionsApplied: 0,
+        audioSizeMB: 0,
+        durationMs: 0
       });
 
       // Mark processing as failed
