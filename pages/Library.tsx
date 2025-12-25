@@ -2,18 +2,21 @@ import React, { useState, useRef, useCallback } from 'react';
 import { Conversation } from '../types';
 import { formatTime, cn, createMockConversation } from '../utils';
 import { useConversations } from '../contexts/ConversationContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2 } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2, Settings } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
 import { ProcessingProgress } from '../components/viewer/ProcessingProgress';
 
 interface LibraryProps {
   onOpen: (id: string) => void;
+  onAdminClick: () => void;
 }
 
-export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
+export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const { conversations, addConversation, deleteConversation, syncStatus } = useConversations();
+  const { isAdmin } = useAuth();
 
   const handleDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -73,6 +76,16 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
              <p className="text-slate-500 mt-1">Your transcribed conversations and meetings.</p>
           </div>
           <div className="flex items-center gap-3">
+            {isAdmin && (
+              <Button
+                variant="ghost"
+                onClick={onAdminClick}
+                className="gap-2"
+              >
+                <Settings size={18} />
+                Admin Dashboard
+              </Button>
+            )}
             <Button
               onClick={() => setIsModalOpen(true)}
               className="gap-2 shadow-lg shadow-blue-500/20"

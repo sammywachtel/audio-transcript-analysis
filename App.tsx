@@ -1,18 +1,20 @@
 import React, { useState } from 'react';
 import { Library } from './pages/Library';
 import { Viewer } from './pages/Viewer';
+import { AdminDashboard } from './pages/AdminDashboard';
 import { AuthProvider } from './contexts/AuthContext';
 import { ConversationProvider, useConversations } from './contexts/ConversationContext';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
+import { AdminRoute } from './components/auth/AdminRoute';
 
 /**
  * AppContent - Main app routing logic
  *
- * Simplified to just handle view switching. All state management
- * is delegated to ConversationContext. Much cleaner than before.
+ * Handles view switching between Library, Viewer, and Admin Dashboard.
+ * Admin dashboard is gated by AdminRoute component.
  */
 function AppContent() {
-  const [currentView, setCurrentView] = useState<'library' | 'viewer'>('library');
+  const [currentView, setCurrentView] = useState<'library' | 'viewer' | 'admin'>('library');
   const { isLoaded, activeConversation, setActiveConversationId } = useConversations();
 
   const handleOpen = (id: string) => {
@@ -25,6 +27,14 @@ function AppContent() {
     setActiveConversationId(null);
   };
 
+  const handleAdminClick = () => {
+    setCurrentView('admin');
+  };
+
+  const handleAdminBack = () => {
+    setCurrentView('library');
+  };
+
   if (!isLoaded) {
     return (
       <div className="h-screen w-screen flex items-center justify-center bg-slate-50 text-slate-400">
@@ -33,11 +43,19 @@ function AppContent() {
     );
   }
 
+  if (currentView === 'admin') {
+    return (
+      <AdminRoute fallback={<Library onOpen={handleOpen} onAdminClick={handleAdminClick} />}>
+        <AdminDashboard onBack={handleAdminBack} />
+      </AdminRoute>
+    );
+  }
+
   if (currentView === 'viewer' && activeConversation) {
     return <Viewer onBack={handleBack} />;
   }
 
-  return <Library onOpen={handleOpen} />;
+  return <Library onOpen={handleOpen} onAdminClick={handleAdminClick} />;
 }
 
 /**

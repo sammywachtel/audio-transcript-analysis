@@ -83,6 +83,17 @@ export interface PlaybackState {
   playbackRate: number;
 }
 
+// User profile stored in Firestore users/{userId} collection
+export interface UserProfile {
+  userId: string;
+  email: string;
+  displayName?: string;
+  photoURL?: string;
+  isAdmin: boolean; // Admin users can access observability dashboard
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
 // Processing step enum for granular status tracking
 export enum ProcessingStep {
   PENDING = 'pending',

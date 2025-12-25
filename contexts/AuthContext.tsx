@@ -6,10 +6,12 @@ import {
   onAuthStateChanged,
   GoogleAuthProvider
 } from 'firebase/auth';
-import { auth, googleProvider } from '../firebase-config';
+import { doc, getDoc } from 'firebase/firestore';
+import { auth, googleProvider, db } from '../firebase-config';
 
 interface AuthContextValue {
   user: User | null;
+  isAdmin: boolean;
   loading: boolean;
   error: Error | null;
   signInWithGoogle: () => Promise<void>;
@@ -32,6 +34,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
  */
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
@@ -49,6 +52,23 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         });
 
         setUser(firebaseUser);
+
+        // Fetch admin status from Firestore if user is signed in
+        if (firebaseUser) {
+          try {
+            const userDocRef = doc(db, 'users', firebaseUser.uid);
+            const userDoc = await getDoc(userDocRef);
+            const adminStatus = userDoc.exists() && userDoc.data()?.isAdmin === true;
+            setIsAdmin(adminStatus);
+            console.log('[Auth] Admin status:', adminStatus);
+          } catch (err) {
+            console.error('[Auth] Failed to fetch admin status:', err);
+            setIsAdmin(false);
+          }
+        } else {
+          setIsAdmin(false);
+        }
+
         setLoading(false);
       },
       (err) => {
@@ -148,6 +168,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const value: AuthContextValue = {
     user,
+    isAdmin,
     loading,
     error,
     signInWithGoogle,

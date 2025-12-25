@@ -16,6 +16,13 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    // Helper function: Check if user is admin
+    function isAdmin() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true;
+    }
+
     // Helper function: Validate conversation document structure
     function isValidConversation() {
       let data = request.resource.data;
@@ -53,6 +60,12 @@ service cloud.firestore {
       // Users can delete their own conversations
       allow delete: if isAuthenticated()
         && resource.data.userId == request.auth.uid;
+    }
+
+    // Metrics collection - admin read only, Cloud Functions write only
+    match /_metrics/{doc} {
+      allow read: if isAdmin();
+      allow write: if false; // Only Cloud Functions can write metrics
     }
 
     // Future: Shares subcollection for collaboration
