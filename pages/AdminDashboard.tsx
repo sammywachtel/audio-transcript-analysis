@@ -1,18 +1,25 @@
 import React, { useState, useEffect } from 'react';
-import { collection, query, orderBy, limit, getDocs } from 'firebase/firestore';
+import { collection, query, orderBy, limit, getDocs, Timestamp } from 'firebase/firestore';
 import { db } from '../firebase-config';
 import { Button } from '../components/Button';
-import { ArrowLeft, Activity, Clock, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
+import { ArrowLeft, Activity, Clock, CheckCircle2, XCircle, Loader2, User } from 'lucide-react';
 import { formatTime } from '../utils';
 
 interface AdminDashboardProps {
   onBack: () => void;
 }
 
+// Firestore Timestamp comes back as an object with seconds/nanoseconds
+interface FirestoreTimestamp {
+  seconds: number;
+  nanoseconds: number;
+  toDate?: () => Date;
+}
+
 interface MetricData {
   conversationId: string;
   success: boolean;
-  timestamp: string;
+  timestamp: FirestoreTimestamp | null;
   userId?: string;
   errorMessage?: string;
   alignmentStatus?: 'aligned' | 'fallback' | 'pending';
@@ -40,6 +47,17 @@ interface MetricData {
  * Server-side Cloud Functions write to _metrics after each processing job.
  * Simple table display - no fancy charts yet, just the data we need.
  */
+// Helper to format Firestore timestamp to readable string
+function formatTimestamp(ts: FirestoreTimestamp | null): string {
+  if (!ts) return '--';
+  // Firestore Timestamp has toDate() method, or we can use seconds
+  if (ts.toDate) {
+    return ts.toDate().toLocaleString();
+  }
+  // Fallback: construct from seconds
+  return new Date(ts.seconds * 1000).toLocaleString();
+}
+
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
   const [metrics, setMetrics] = useState<MetricData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -216,6 +234,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
                   <thead className="bg-slate-50 border-b border-slate-200">
                     <tr className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">
                       <th className="px-6 py-3">Timestamp</th>
+                      <th className="px-6 py-3">User ID</th>
                       <th className="px-6 py-3">Conversation ID</th>
                       <th className="px-6 py-3">Status</th>
                       <th className="px-6 py-3">Processing Time</th>
@@ -226,7 +245,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
                   <tbody className="divide-y divide-slate-100">
                     {metrics.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="px-6 py-12 text-center text-slate-500">
+                        <td colSpan={7} className="px-6 py-12 text-center text-slate-500">
                           No metrics data available yet
                         </td>
                       </tr>
@@ -234,7 +253,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
                       metrics.map((metric) => (
                         <tr key={metric.conversationId} className="hover:bg-slate-50">
                           <td className="px-6 py-4 text-sm text-slate-600">
-                            {new Date(metric.timestamp).toLocaleString()}
+                            {formatTimestamp(metric.timestamp)}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-slate-600 font-mono">
+                            {metric.userId ? metric.userId.substring(0, 8) + '...' : '--'}
                           </td>
                           <td className="px-6 py-4 text-sm text-slate-900 font-mono">
                             {metric.conversationId.substring(0, 12)}...
