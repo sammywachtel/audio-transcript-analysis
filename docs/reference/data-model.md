@@ -45,7 +45,7 @@ interface ConversationDoc {
 
 ### users
 
-User profile and preferences.
+User profile, preferences, and admin status.
 
 **Path**: `users/{userId}`
 
@@ -56,11 +56,59 @@ interface UserDoc {
   displayName: string;
   photoURL?: string;
   createdAt: Timestamp;
+  isAdmin?: boolean;      // Grants access to admin dashboard
   preferences?: {
     theme?: 'light' | 'dark';
   };
 }
 ```
+
+**Note**: The `isAdmin` field must be manually set in Firestore to grant admin access. There is no self-service admin enrollment.
+
+### _metrics
+
+Processing metrics for observability (admin read-only).
+
+**Path**: `_metrics/{docId}`
+
+```typescript
+interface MetricsDoc {
+  conversationId: string;
+  userId: string;
+  status: 'success' | 'failed';
+  errorMessage?: string;
+  alignmentStatus?: 'aligned' | 'fallback';
+
+  // Stage timings (milliseconds)
+  timingMs: {
+    download: number;      // Audio download from Storage
+    whisperx: number;      // WhisperX transcription + diarization
+    buildSegments: number; // Segment construction
+    gemini: number;        // Gemini analysis (topics, terms, etc.)
+    speakerCorrection: number; // Gemini speaker reassignment
+    transform: number;     // Data transformation
+    firestore: number;     // Firestore write
+    total: number;         // Total processing time
+  };
+
+  // Result counts
+  segmentCount: number;
+  speakerCount: number;
+  termCount: number;
+  topicCount: number;
+  personCount: number;
+  speakerCorrectionsApplied: number;
+
+  // Audio metadata
+  audioSizeMB: number;
+  durationMs: number;
+
+  // Timestamp
+  timestamp: Timestamp;
+}
+```
+
+**Security**: Only Cloud Functions can write to `_metrics`. Only admin users can read.
 
 ## TypeScript Types
 
@@ -206,6 +254,13 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // Helper: Check if user is admin
+    function isAdmin() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true;
+    }
+
     match /users/{userId} {
       allow read, write: if request.auth != null
         && request.auth.uid == userId;
@@ -227,6 +282,12 @@ service cloud.firestore {
       // Delete: must be owner
       allow delete: if request.auth != null
         && resource.data.userId == request.auth.uid;
+    }
+
+    // Metrics collection - admin read only, Cloud Functions write only
+    match /_metrics/{doc} {
+      allow read: if isAdmin();
+      allow write: if false;  // Only Cloud Functions can write
     }
   }
 }

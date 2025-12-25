@@ -2,7 +2,7 @@
 
 Transform audio recordings into interactive, navigable transcripts with AI-powered analysis.
 
-**Status:** Beta (v1.0.0-beta)
+**Status:** Beta (v1.3.0-beta)
 
 ## Features
 
@@ -16,6 +16,7 @@ Transform audio recordings into interactive, navigable transcripts with AI-power
 - **Person Detection** - Named entity recognition for people mentioned
 - **Synchronized Playback** - Click any segment to jump to that point in audio
 - **Real-time Updates** - Live UI updates via Firestore listeners
+- **Admin Dashboard** - Observability metrics for processing jobs (admin-only)
 
 ## Architecture
 
@@ -150,10 +151,10 @@ Firebase secrets (stored via Firebase Secret Manager):
 ```
 audio-transcript-analysis-app/
 ├── components/              # React components
-│   ├── auth/               # SignInButton, UserMenu, ProtectedRoute
+│   ├── auth/               # SignInButton, UserMenu, ProtectedRoute, AdminRoute
 │   └── viewer/             # TranscriptSegment, AudioPlayer, Sidebar, etc.
 ├── contexts/               # React contexts
-│   ├── AuthContext.tsx     # Firebase Auth state
+│   ├── AuthContext.tsx     # Firebase Auth state + isAdmin role
 │   └── ConversationContext.tsx  # Real-time Firestore subscription
 ├── hooks/                  # Custom React hooks
 │   ├── useAudioPlayer.ts   # Playback, seeking, drift correction
@@ -162,15 +163,18 @@ audio-transcript-analysis-app/
 │   └── useTranscriptSelection.ts # Two-way transcript/sidebar sync
 ├── pages/                  # Page components
 │   ├── Library.tsx         # Conversation list + upload
-│   └── Viewer.tsx          # Main transcript viewer
+│   ├── Viewer.tsx          # Main transcript viewer
+│   └── AdminDashboard.tsx  # Processing metrics (admin-only)
 ├── services/               # Firebase services
 │   ├── firestoreService.ts # Firestore CRUD + real-time listeners
 │   └── storageService.ts   # Audio upload/download
 ├── functions/              # Cloud Functions (Node.js)
 │   └── src/
 │       ├── index.ts        # Function exports
-│       ├── transcribe.ts   # Gemini + WhisperX + speaker corrections
-│       └── alignment.ts    # HARDY timestamp alignment algorithm
+│       ├── transcribe.ts   # WhisperX + Gemini analysis + speaker corrections
+│       ├── alignment.ts    # WhisperX integration via Replicate
+│       ├── metrics.ts      # Processing metrics recording
+│       └── logger.ts       # Structured logging utility
 ├── docs/                   # Documentation (Diátaxis structure)
 │   ├── tutorials/          # Getting started guides
 │   ├── how-to/             # Task-oriented guides
@@ -185,14 +189,11 @@ audio-transcript-analysis-app/
 
 The app uses a "WhisperX-first" architecture for precise timestamps:
 
-1. **WhisperX Alignment (Primary)** - Word-level forced alignment via Replicate + pyannote speaker diarization (~$0.02/10min)
-2. **Gemini Fallback** - If WhisperX fails, uses Gemini's timestamps (may be ~5-10s off)
+1. **WhisperX Transcription** - Word-level forced alignment via Replicate + pyannote speaker diarization (~$0.02/10min)
+2. **Gemini Analysis** - Analyzes WhisperX transcript for topics, terms, people, and speaker corrections
 3. **Client Drift Correction** - For legacy data without server alignment, applies linear timestamp scaling
 
-The `alignmentStatus` field indicates timestamp quality:
-- `aligned` - WhisperX succeeded (precise timestamps)
-- `fallback` - WhisperX failed, using Gemini timestamps
-- `pending` - Processing not yet complete
+WhisperX is mandatory - if it fails, the entire job fails (no fallback to less precise timestamps).
 
 See [docs/reference/alignment-architecture.md](docs/reference/alignment-architecture.md) for details.
 
