@@ -125,9 +125,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
     ? metricsWithTiming.reduce((sum, m) => sum + (m.timingMs?.whisperx || 0), 0) / metricsWithTiming.length
     : 0;
 
-  // Timestamp source stats (WhisperX vs Fallback)
-  const alignedCount = metrics.filter((m) => m.alignmentStatus === 'aligned').length;
-  const fallbackCount = metrics.filter((m) => m.alignmentStatus === 'fallback').length;
 
   // Speaker correction stats
   const totalCorrections = metrics.reduce((sum, m) => sum + (m.speakerCorrectionsApplied || 0), 0);
@@ -207,21 +204,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
               />
             </div>
 
-            {/* Alignment Stats */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-              <StatCard
-                icon={<CheckCircle2 size={20} />}
-                label="WhisperX Aligned"
-                value={alignedCount.toString()}
-                color="emerald"
-              />
-              <StatCard
-                icon={<XCircle size={20} />}
-                label="Timestamp Fallback"
-                value={fallbackCount.toString()}
-                color="amber"
-              />
-            </div>
 
             {/* Recent Jobs Table */}
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
