@@ -67,7 +67,7 @@ interface UserDoc {
 
 ### _metrics
 
-Processing metrics for observability (admin read-only).
+Processing metrics for observability (admin read-only). Tracks detailed processing statistics, LLM usage, and estimated costs.
 
 **Path**: `_metrics/{docId}`
 
@@ -103,12 +103,207 @@ interface MetricsDoc {
   audioSizeMB: number;
   durationMs: number;
 
+  // LLM Usage (added in observability system)
+  llmUsage?: {
+    geminiAnalysis: {
+      inputTokens: number;
+      outputTokens: number;
+      model: string;
+    };
+    geminiSpeakerCorrection: {
+      inputTokens: number;
+      outputTokens: number;
+      model: string;
+    };
+    whisperx: {
+      predictionId?: string;
+      computeTimeSeconds: number;
+      model: string;
+    };
+    diarization?: {
+      predictionId?: string;
+      computeTimeSeconds: number;
+      model: string;
+    };
+  };
+
+  // Estimated costs (calculated from _pricing collection)
+  estimatedCost?: {
+    geminiUsd: number;
+    whisperxUsd: number;
+    diarizationUsd: number;
+    totalUsd: number;
+  };
+
   // Timestamp
   timestamp: Timestamp;
 }
 ```
 
 **Security**: Only Cloud Functions can write to `_metrics`. Only admin users can read.
+
+### _user_events
+
+User activity events for audit trail and analytics.
+
+**Path**: `_user_events/{eventId}`
+
+```typescript
+interface UserEventDoc {
+  eventType: 'conversation_created' | 'conversation_deleted' | 'processing_completed' | 'processing_failed';
+  userId: string;
+  conversationId?: string;
+  metadata?: Record<string, unknown>;  // e.g., { durationMs, estimatedCostUsd }
+  timestamp: Timestamp;
+}
+```
+
+**Security**: Only Cloud Functions can write. Only admin users can read.
+
+### _user_stats
+
+Pre-computed user aggregates with lifetime totals and rolling windows.
+
+**Path**: `_user_stats/{userId}`
+
+```typescript
+interface UserStatsDoc {
+  userId: string;
+
+  lifetime: {
+    conversationsCreated: number;
+    conversationsDeleted: number;
+    conversationsExisting: number;  // created - deleted
+    jobsSucceeded: number;
+    jobsFailed: number;
+    audioHoursProcessed: number;
+    estimatedCostUsd: number;
+    totalAudioFiles: number;
+  };
+
+  last7Days: {
+    conversationsCreated: number;
+    conversationsDeleted: number;
+    jobsSucceeded: number;
+    jobsFailed: number;
+    audioHoursProcessed: number;
+    estimatedCostUsd: number;
+  };
+
+  last30Days: {
+    conversationsCreated: number;
+    conversationsDeleted: number;
+    jobsSucceeded: number;
+    jobsFailed: number;
+    audioHoursProcessed: number;
+    estimatedCostUsd: number;
+  };
+
+  firstActivityAt: Timestamp;
+  lastActivityAt: Timestamp;
+  updatedAt: Timestamp;
+}
+```
+
+**Security**: Users can read their own stats. Admin users can read all. Only Cloud Functions can write.
+
+### _global_stats
+
+System-wide aggregates for admin dashboard.
+
+**Path**: `_global_stats/current`
+
+```typescript
+interface GlobalStatsDoc {
+  users: {
+    totalUsers: number;
+    activeUsersLast7Days: number;
+    activeUsersLast30Days: number;
+  };
+
+  processing: {
+    totalJobsAllTime: number;
+    successRate: number;  // 0-100
+    avgProcessingTimeMs: number;
+    totalAudioHoursProcessed: number;
+  };
+
+  llmUsage: {
+    totalGeminiInputTokens: number;
+    totalGeminiOutputTokens: number;
+    totalWhisperXComputeSeconds: number;
+    estimatedTotalCostUsd: number;
+  };
+
+  conversations: {
+    totalConversationsCreated: number;
+    totalConversationsDeleted: number;
+    totalConversationsExisting: number;
+  };
+
+  lastUpdatedAt: Timestamp;
+  computedAt: string;  // ISO timestamp
+}
+```
+
+**Security**: Only admin users can read. Only Cloud Functions can write.
+
+### _daily_stats
+
+Time-series data for admin charts.
+
+**Path**: `_daily_stats/{YYYY-MM-DD}`
+
+```typescript
+interface DailyStatsDoc {
+  date: string;  // YYYY-MM-DD
+  activeUsers: number;
+  newUsers: number;
+  conversationsCreated: number;
+  conversationsDeleted: number;
+  jobsSucceeded: number;
+  jobsFailed: number;
+  audioHoursProcessed: number;
+  geminiTokensUsed: number;
+  whisperXComputeSeconds: number;
+  estimatedCostUsd: number;
+  avgProcessingTimeMs: number;
+  createdAt: Timestamp;
+}
+```
+
+**Security**: Only admin users can read. Only Cloud Functions can write.
+
+### _pricing
+
+LLM pricing configuration for cost estimation.
+
+**Path**: `_pricing/{pricingId}`
+
+```typescript
+interface PricingDoc {
+  model: string;  // e.g., 'gemini-2.5-flash', 'whisperx'
+  service: 'gemini' | 'replicate';
+
+  // Token-based pricing (for Gemini)
+  inputPricePerMillion?: number;   // USD per 1M input tokens
+  outputPricePerMillion?: number;  // USD per 1M output tokens
+
+  // Time-based pricing (for Replicate/WhisperX)
+  pricePerSecond?: number;         // USD per compute second
+
+  // Validity period
+  effectiveFrom: Timestamp;        // Start date (inclusive)
+  effectiveUntil?: Timestamp;      // End date (exclusive), null = current
+
+  // Metadata
+  notes?: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+```
+
+**Security**: All authenticated users can read (for cost display). Only admin users can write.
 
 ## TypeScript Types
 
@@ -288,6 +483,36 @@ service cloud.firestore {
     match /_metrics/{doc} {
       allow read: if isAdmin();
       allow write: if false;  // Only Cloud Functions can write
+    }
+
+    // User events - admin read only, Cloud Functions write
+    match /_user_events/{eventId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // User stats - owner or admin can read, Cloud Functions write
+    match /_user_stats/{userId} {
+      allow read: if request.auth.uid == userId || isAdmin();
+      allow write: if false;
+    }
+
+    // Global stats - admin read only, Cloud Functions write
+    match /_global_stats/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Daily stats - admin read only, Cloud Functions write
+    match /_daily_stats/{dateId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Pricing - anyone can read, admin can write
+    match /_pricing/{pricingId} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
     }
   }
 }

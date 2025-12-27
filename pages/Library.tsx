@@ -3,7 +3,7 @@ import { Conversation } from '../types';
 import { formatTime, cn, createMockConversation } from '../utils';
 import { useConversations } from '../contexts/ConversationContext';
 import { useAuth } from '../contexts/AuthContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2, Settings } from 'lucide-react';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2, Settings, BarChart3 } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
 import { ProcessingProgress } from '../components/viewer/ProcessingProgress';
@@ -11,9 +11,10 @@ import { ProcessingProgress } from '../components/viewer/ProcessingProgress';
 interface LibraryProps {
   onOpen: (id: string) => void;
   onAdminClick: () => void;
+  onStatsClick: () => void;
 }
 
-export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick }) => {
+export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsClick }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const { conversations, addConversation, deleteConversation, syncStatus } = useConversations();
   const { isAdmin } = useAuth();
@@ -76,6 +77,14 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick }) => {
              <p className="text-slate-500 mt-1">Your transcribed conversations and meetings.</p>
           </div>
           <div className="flex items-center gap-3">
+            <Button
+              variant="ghost"
+              onClick={onStatsClick}
+              className="gap-2"
+            >
+              <BarChart3 size={18} />
+              My Stats
+            </Button>
             {isAdmin && (
               <Button
                 variant="ghost"

@@ -62,10 +62,44 @@ service cloud.firestore {
         && resource.data.userId == request.auth.uid;
     }
 
-    // Metrics collection - admin read only, Cloud Functions write only
+    // =======================================================================
+    // Observability Collections - Various read access, Cloud Functions write
+    // =======================================================================
+
+    // Metrics collection - admin read only, Cloud Functions write
     match /_metrics/{doc} {
       allow read: if isAdmin();
       allow write: if false; // Only Cloud Functions can write metrics
+    }
+
+    // User events collection - admin read only, Cloud Functions write
+    match /_user_events/{eventId} {
+      allow read: if isAdmin();
+      allow write: if false; // Only Cloud Functions can write events
+    }
+
+    // User stats collection - owner or admin can read, Cloud Functions write
+    match /_user_stats/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow write: if false; // Only Cloud Functions can write stats
+    }
+
+    // Global stats collection - admin read only, Cloud Functions write
+    match /_global_stats/{docId} {
+      allow read: if isAdmin();
+      allow write: if false; // Only Cloud Functions can write
+    }
+
+    // Daily stats collection - admin read only, Cloud Functions write
+    match /_daily_stats/{dateId} {
+      allow read: if isAdmin();
+      allow write: if false; // Only Cloud Functions can write
+    }
+
+    // Pricing configuration - anyone can read (for cost display), admin write
+    match /_pricing/{pricingId} {
+      allow read: if isAuthenticated();  // Users need to see pricing for their stats
+      allow write: if isAdmin();         // Only admins can update pricing
     }
 
     // Future: Shares subcollection for collaboration

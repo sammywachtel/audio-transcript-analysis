@@ -109,21 +109,36 @@ audio-transcript-analysis-app/
 ├── hooks/                  # Custom React hooks
 │   ├── useAudioPlayer.ts
 │   ├── useAutoScroll.ts
+│   ├── useMetrics.ts       # Observability data hooks
 │   ├── usePersonMentions.ts
 │   └── useTranscriptSelection.ts
 ├── pages/                  # Page components
 │   ├── Library.tsx         # Conversation list + upload
 │   ├── Viewer.tsx          # Transcript viewer
-│   └── AdminDashboard.tsx  # Processing metrics (admin-only)
+│   ├── AdminDashboard.tsx  # Admin dashboard with metrics, users, pricing
+│   └── UserStats.tsx       # Personal usage statistics
 ├── services/               # Firebase services
 │   ├── firestoreService.ts
-│   └── storageService.ts
+│   ├── storageService.ts
+│   └── metricsService.ts   # Observability queries
+├── components/
+│   ├── admin/              # Admin dashboard components
+│   │   └── PricingManager.tsx  # LLM pricing configuration
+│   └── metrics/            # Metrics visualization
+│       ├── StatCard.tsx
+│       ├── TimeSeriesChart.tsx
+│       ├── LLMUsageBreakdown.tsx
+│       └── MetricsTable.tsx
 ├── functions/              # Cloud Functions (Node.js)
 │   └── src/
 │       ├── index.ts        # Function exports
 │       ├── transcribe.ts   # WhisperX + Gemini analysis
 │       ├── alignment.ts    # WhisperX integration via Replicate
 │       ├── metrics.ts      # Processing metrics recording
+│       ├── userEvents.ts   # User activity event tracking
+│       ├── statsTriggers.ts    # Firestore triggers for stats
+│       ├── statsAggregator.ts  # Scheduled daily aggregation
+│       ├── pricing.ts      # Pricing lookup and cost calculation
 │       └── logger.ts       # Structured logging utility
 ├── types.ts                # TypeScript types
 ├── utils.ts                # Helper functions
@@ -299,46 +314,183 @@ users/{userId}
 
 The `AuthContext` fetches this field on login and exposes `isAdmin` to the app. The `AdminRoute` component gates admin-only content.
 
-## Observability
+## Observability System
 
-### Metrics Collection
+The observability system provides comprehensive metrics, cost tracking, and usage analytics for both admins and regular users.
 
-Processing metrics are recorded to `_metrics` collection after each transcription job:
+### Data Flow
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    Cloud Functions                                │
+│                                                                  │
+│  ┌───────────────┐    ┌──────────────┐    ┌─────────────────┐   │
+│  │ transcribe.ts │───▶│  metrics.ts  │───▶│ _metrics/{id}   │   │
+│  │               │    │  (LLM usage, │    └─────────────────┘   │
+│  │ Gemini +      │    │   costs)     │                          │
+│  │ WhisperX      │    └──────────────┘                          │
+│  └───────────────┘                                              │
+│                                                                  │
+│  ┌───────────────────┐    ┌──────────────────────────────────┐  │
+│  │ statsTriggers.ts  │───▶│ _user_events, _user_stats        │  │
+│  │ (onCreate/Delete) │    │ (per-user aggregates)            │  │
+│  └───────────────────┘    └──────────────────────────────────┘  │
+│                                                                  │
+│  ┌───────────────────┐    ┌──────────────────────────────────┐  │
+│  │ statsAggregator   │───▶│ _global_stats, _daily_stats      │  │
+│  │ (scheduled 2AM)   │    │ (system-wide aggregates)         │  │
+│  └───────────────────┘    └──────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                       Frontend                                   │
+│                                                                  │
+│  ┌────────────────┐    ┌───────────────────┐                    │
+│  │ metricsService │───▶│ hooks/useMetrics  │                    │
+│  │ (Firestore     │    │ (React state)     │                    │
+│  │  queries)      │    └─────────┬─────────┘                    │
+│  └────────────────┘              │                              │
+│                                  ▼                              │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                   UI Components                          │    │
+│  │  ┌──────────────┐  ┌─────────────┐  ┌────────────────┐  │    │
+│  │  │ AdminDash    │  │ UserStats   │  │ PricingManager │  │    │
+│  │  │ (admin)      │  │ (all users) │  │ (admin)        │  │    │
+│  │  └──────────────┘  └─────────────┘  └────────────────┘  │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Firestore Collections
+
+| Collection | Purpose | Writers | Readers |
+|------------|---------|---------|---------|
+| `_metrics` | Per-job processing details + LLM usage | Cloud Functions | Admin |
+| `_user_events` | Activity audit trail | Cloud Functions | Admin |
+| `_user_stats` | Pre-computed user aggregates | Cloud Functions | Owner, Admin |
+| `_global_stats` | System-wide aggregates | Cloud Functions | Admin |
+| `_daily_stats` | Time-series for charts | Cloud Functions | Admin |
+| `_pricing` | LLM pricing configuration | Admin | All authenticated |
+
+See [Data Model](data-model.md) for detailed schemas.
+
+### LLM Usage Tracking
+
+Each processing job captures LLM usage from both Gemini and Replicate:
 
 ```typescript
-interface ProcessingMetrics {
-  conversationId: string;
-  userId: string;
-  status: 'success' | 'failed';
-  errorMessage?: string;
-  timingMs: {
-    download: number;
-    whisperx: number;
-    buildSegments: number;
-    gemini: number;
-    speakerCorrection: number;
-    transform: number;
-    firestore: number;
-    total: number;
+llmUsage: {
+  geminiAnalysis: {
+    inputTokens: number;
+    outputTokens: number;
+    model: string;  // e.g., 'gemini-2.5-flash'
   };
-  segmentCount: number;
-  speakerCount: number;
-  speakerCorrectionsApplied: number;
-  audioSizeMB: number;
-  durationMs: number;
-  timestamp: Timestamp;
+  geminiSpeakerCorrection: {
+    inputTokens: number;
+    outputTokens: number;
+    model: string;
+  };
+  whisperx: {
+    predictionId: string;
+    computeTimeSeconds: number;
+    model: string;  // 'whisperx'
+  };
+  diarization?: {
+    predictionId: string;
+    computeTimeSeconds: number;
+    model: string;
+  };
 }
 ```
 
+### Cost Calculation
+
+Costs are calculated using database-driven pricing configuration:
+
+```typescript
+// Gemini (token-based)
+geminiCost = (inputTokens * inputPricePerMillion / 1_000_000)
+           + (outputTokens * outputPricePerMillion / 1_000_000)
+
+// Replicate (time-based)
+replicateCost = computeTimeSeconds * pricePerSecond
+```
+
+Pricing is looked up by model and timestamp, supporting historical accuracy as prices change.
+
+### User Activity Tracking
+
+Firestore triggers capture user activity:
+
+```typescript
+// On conversation create
+onConversationCreated → recordUserEvent('conversation_created') → updateUserStats
+
+// On conversation delete
+onConversationDeleted → recordUserEvent('conversation_deleted') → updateUserStats
+
+// On processing complete (in transcribe.ts)
+recordUserEvent('processing_completed', { durationMs, estimatedCostUsd })
+```
+
+### Rolling Window Stats
+
+User stats maintain three time windows:
+- **Lifetime**: All-time totals
+- **Last 7 Days**: Rolling week
+- **Last 30 Days**: Rolling month
+
+Rolling windows are recalculated during the scheduled aggregation job.
+
 ### Admin Dashboard
 
-The `AdminDashboard` page displays aggregate metrics:
-- Total jobs, success rate, failed jobs
-- Average processing times (total, Gemini, WhisperX)
-- Speaker corrections applied
-- Recent processing jobs table with per-user visibility
+Four-tab interface for administrators:
 
-Only users with `isAdmin: true` can access this page.
+1. **Overview**: Global stats cards, time-series charts (jobs, costs, usage)
+2. **Users**: User list with drill-down to individual user metrics
+3. **Jobs**: Processing history table with expandable details
+4. **Pricing**: View/add LLM pricing configurations
+
+### User Stats Page
+
+Personal usage statistics for all users:
+- Lifetime totals (conversations, audio hours, estimated cost)
+- 7-day and 30-day rolling windows
+- Recent processing jobs table
+
+Access: All authenticated users can view their own stats via "My Stats" in Library header.
+
+### Scheduled Aggregation
+
+The `computeGlobalStats` Cloud Function runs daily at 2 AM UTC:
+
+1. Queries all `_user_stats` documents
+2. Computes global totals and rolling windows
+3. Recalculates user rolling windows from `_user_events`
+4. Writes to `_global_stats/current` and `_daily_stats/{date}`
+
+### Security Model
+
+```javascript
+// Admin-only collections
+match /_metrics/{doc} { allow read: if isAdmin(); allow write: if false; }
+match /_user_events/{doc} { allow read: if isAdmin(); allow write: if false; }
+match /_global_stats/{doc} { allow read: if isAdmin(); allow write: if false; }
+match /_daily_stats/{doc} { allow read: if isAdmin(); allow write: if false; }
+
+// User stats - owner or admin
+match /_user_stats/{userId} {
+  allow read: if request.auth.uid == userId || isAdmin();
+  allow write: if false;
+}
+
+// Pricing - anyone can read (for cost display), admin can write
+match /_pricing/{pricingId} {
+  allow read: if request.auth != null;
+  allow write: if isAdmin();
+}
+```
 
 ## Offline Support
 
