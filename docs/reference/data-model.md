@@ -26,7 +26,7 @@ interface ConversationDoc {
   audioStoragePath: string; // Firebase Storage path
 
   // Processing Status (Queue-Driven Architecture)
-  status: 'queued' | 'processing' | 'complete' | 'failed' | 'aborted';
+  status: 'queued' | 'processing' | 'merging' | 'reprocessing' | 'complete' | 'failed' | 'aborted';
   processingError?: string;
 
   // Processing Timestamps (Queue-Driven Architecture)
@@ -43,6 +43,10 @@ interface ConversationDoc {
   // Speaker Reconciliation (Parallel Mode Only)
   reconciliationConfidence?: number;           // Overall confidence (0-1) of speaker matching
   reconciliationDetails?: ReconciliationDetails; // Detailed match evidence per cluster
+  reconciliationMetadata?: ReconciliationMetadata; // Extended observability (signals, durations)
+
+  // Fallback Metadata (Parallel → Sequential Fallback)
+  fallbackMetadata?: FallbackMetadata;         // Present if fallback was triggered
 
   // Abort Control
   abortRequested?: boolean;     // User requested processing stop
@@ -60,9 +64,11 @@ interface ConversationDoc {
 **Processing Status Flow:**
 1. `queued` - Audio uploaded, Cloud Task enqueued (set by `transcribeAudio`)
 2. `processing` - Heavy processing started (set by `processTranscription`)
-3. `complete` - Processing succeeded
-4. `failed` - Processing failed (may retry via Cloud Tasks)
-5. `aborted` - User cancelled processing
+3. `merging` - Chunk processing complete, merge in progress (large files only)
+4. `reprocessing` - Parallel fallback triggered, sequential reprocessing in progress
+5. `complete` - Processing succeeded
+6. `failed` - Processing failed (may retry via Cloud Tasks)
+7. `aborted` - User cancelled processing
 
 **New Timestamps:**
 - `queuedAt` - Set when `transcribeAudio` enqueues the Cloud Task
@@ -683,6 +689,50 @@ interface ReconciliationDetails {
 **Purpose**: Provides transparency into how speakers were matched across chunks in parallel mode. Includes confidence scores and match evidence for debugging and quality assessment.
 
 **When present**: Only for conversations processed in parallel mode with multiple chunks. Sequential mode doesn't need reconciliation since speaker IDs are consistent across chunks.
+
+### ReconciliationMetadata
+
+Extended observability data for speaker reconciliation:
+
+```typescript
+interface ReconciliationMetadata {
+  signalsUsed: string[];           // Matching signals used: ['name', 'topic', 'term']
+  fallbackTriggered: boolean;      // True if fallback to sequential occurred
+  speakerMatchConfidences: Array<{
+    canonicalId: string;
+    confidence: number;            // Per-speaker confidence (0-1)
+  }>;
+  reconciliationDurationMs?: number; // Processing time for reconciliation phase
+}
+```
+
+**Purpose**: Provides performance and signal data for reconciliation monitoring. Helps identify slow reconciliations and track which signals contributed to matches.
+
+### FallbackMetadata
+
+Metadata stored when parallel processing falls back to sequential:
+
+```typescript
+type FallbackReason = 'low_speaker_confidence' | 'reconciliation_error';
+
+interface FallbackMetadata {
+  triggeredAt: string;             // ISO timestamp when fallback was triggered
+  parallelConfidence: number;      // Confidence score that triggered fallback
+  archiveId: string;               // Path to archived parallel chunks
+  reason: FallbackReason;          // Why fallback occurred
+  parallelDurationMs?: number;     // How long the parallel attempt took
+  sequentialDurationMs?: number;   // Populated after sequential completes
+  configuredThreshold: number;     // CONFIDENCE_THRESHOLD at time of trigger
+}
+```
+
+**Purpose**: Provides audit trail for fallback events. Enables:
+- Debugging why fallback occurred (confidence vs threshold)
+- Accessing archived parallel chunks for post-mortem analysis
+- Measuring processing time difference between parallel and sequential
+- Tracking threshold configuration at time of trigger
+
+**When present**: Only on conversations where fallback to sequential was triggered. Can query `fallbackMetadata.triggeredAt IS NOT NULL` to find all fallback occurrences.
 
 ## Firebase Storage Structure
 

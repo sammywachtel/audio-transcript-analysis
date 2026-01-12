@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Voice Embedding Speaker Reconciliation** - Acoustic-based speaker matching across chunks using 256-dimensional voice embeddings
+  - Replaces content-based reconciliation (which produced 23 speakers from 2-speaker audio) with voice-signature matching
+  - Uses forked Replicate model `sammywachtel/whisper-diarization-embeddings-01` with pyannote/wespeaker-voxceleb-resnet34-LM
+  - Agglomerative clustering groups speakers by voice similarity (cosine threshold: 0.70) without assuming speaker count
+  - Falls back to content-based reconciliation if embeddings unavailable (backward compatible with existing transcripts)
+  - Speaker embeddings stored in `ChunkArtifact.speakerEmbeddings` for downstream reconciliation
+  - Expected improvement: 23 clusters → 2-3 clusters for 2-speaker audio
 - **Speaker Reconciliation for Parallel Processing** - Automatic speaker identity matching across independently-processed chunks
   - Uses multi-signal similarity algorithm: name matching (50%), topic overlap (25%), term overlap (25%)
   - Greedy clustering identifies same speaker appearing in different chunks
@@ -70,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `sanitizeForFirestore()` utility that recursively strips undefined values from objects
   - Fixes "Cannot use undefined as a Firestore value" error in `emittedContext.speakerMap.voiceSignature`
   - Optional fields like `voiceSignature` and `displayName` in speaker mappings now properly omitted when undefined
+- **Progress Regression in Parallel Processing** - Fixed progress percentage jumping backwards when chunks complete out of order
+  - Each chunk instance now reads existing Firestore `processingProgress.percentComplete` before updating
+  - Progress floor = `max(existingFirestoreProgress, lastLocalProgress)` prevents regression
+  - Example: chunk 7 finishes at 75%, chunk 5 later finishes with calculated 60% → clamped to 75%
 
 ## [1.8.0-beta] - 2026-01-05
 

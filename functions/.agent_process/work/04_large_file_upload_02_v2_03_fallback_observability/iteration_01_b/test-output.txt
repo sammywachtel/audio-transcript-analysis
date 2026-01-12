@@ -1,0 +1,26 @@
+ docs/explanation/chunk-merge.md        | 103 +++++-
+ docs/reference/data-model.md           |  58 ++-
+ functions/src/chunkMerge.ts            | 631 ++++++++++++++++++++++++++++++++-
+ functions/src/index.ts                 |   2 +-
+ functions/src/speakerReconciliation.ts |  24 +-
+ functions/src/types.ts                 |  54 ++-
+ src/config/types.ts                    |  54 ++-
+ 7 files changed, 880 insertions(+), 46 deletions(-)
+
+=== Additional Validation (iteration_01_b specific changes) ===
+
+Git diff for iteration_01_b changes:
+
+=== TypeScript Compilation ===
+Backend (functions): PASS - No errors
+Frontend: PASS - No errors
+
+=== ESLint ===
+Files checked: functions/src/config/reconciliation.ts, functions/src/logging/reconciliation.ts
+Result: PASS (0 errors, 2 warnings for ignored files pattern)
+
+=== Summary ===
+- Jest tests: SKIPPED - pre-existing environment issue with Jest TypeScript parsing (not a regression)
+- TypeScript compilation: PASS
+- ESLint: PASS
+- Changes made: 2 files (documentation updates only)

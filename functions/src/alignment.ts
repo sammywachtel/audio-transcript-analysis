@@ -16,8 +16,9 @@ import Replicate from 'replicate';
 import fuzz from 'fuzzball';
 
 // Whisper diarization model on Replicate - provides word/sentence-level timestamps + speaker diarization
-// Using thomasmol/whisper-diarization: Whisper Large V3 Turbo, better diarization, groups segments by speaker
-const WHISPERX_MODEL = 'thomasmol/whisper-diarization:1495a9cddc83b2203b0d8d3516e38b80fd1572ebc4bc5700ac1da56a9b3ed886';
+// Using forked model with speaker embeddings for cross-chunk reconciliation
+// Original: thomasmol/whisper-diarization, Fork adds: 256-dim speaker embeddings per speaker
+const WHISPERX_MODEL = 'sammywachtel/whisper-diarization-embeddings-01:cc41ceb74b866a2e649862a7e2187724b38f6fb2581a80d0f9bcbc6ebcb49eb3';
 
 // =============================================================================
 // Configuration
@@ -1485,6 +1486,10 @@ export interface WhisperXResult {
   predictionId?: string;
   /** Actual GPU compute time in seconds (from Replicate metrics.predict_time) */
   actualComputeSeconds?: number;
+  /** Speaker embeddings from pyannote/embedding (256-dim vectors per speaker) */
+  speakerEmbeddings?: {
+    [speakerId: string]: number[];
+  };
 }
 
 /**
@@ -1611,8 +1616,9 @@ export async function transcribeWithWhisperX(
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`[WhisperX] API call completed in ${duration}s`);
 
-    // Parse the output to extract segments
+    // Parse the output to extract segments and speaker embeddings
     const segments: WhisperXSegment[] = [];
+    let speakerEmbeddings: { [speakerId: string]: number[] } | undefined;
 
     if (typeof output === 'object' && output !== null) {
       const outputObj = output as Record<string, unknown>;
@@ -1641,6 +1647,7 @@ export async function transcribeWithWhisperX(
       }
       console.log('[WhisperX] === END DIAGNOSTIC ===');
 
+      // Parse segments
       if (Array.isArray(outputObj.segments)) {
         for (const segment of outputObj.segments) {
           if (typeof segment === 'object' && segment !== null) {
@@ -1657,6 +1664,34 @@ export async function transcribeWithWhisperX(
             }
           }
         }
+      }
+
+      // Parse speaker embeddings (if present)
+      if (typeof outputObj.speaker_embeddings === 'object' && outputObj.speaker_embeddings !== null) {
+        const embeddingsObj = outputObj.speaker_embeddings as Record<string, unknown>;
+        speakerEmbeddings = {};
+
+        for (const [speakerId, embedding] of Object.entries(embeddingsObj)) {
+          if (Array.isArray(embedding) && embedding.length > 0) {
+            // Validate that all elements are numbers
+            const validEmbedding = embedding.every(val => typeof val === 'number');
+            if (validEmbedding) {
+              speakerEmbeddings[speakerId] = embedding as number[];
+              console.log(`[WhisperX] Extracted embedding for ${speakerId}: ${embedding.length} dimensions`);
+            } else {
+              console.warn(`[WhisperX] Invalid embedding for ${speakerId}: contains non-numeric values`);
+            }
+          }
+        }
+
+        if (Object.keys(speakerEmbeddings).length > 0) {
+          console.log(`[WhisperX] ✅ Extracted embeddings for ${Object.keys(speakerEmbeddings).length} speakers`);
+        } else {
+          console.warn('[WhisperX] speaker_embeddings field present but no valid embeddings extracted');
+          speakerEmbeddings = undefined;
+        }
+      } else {
+        console.log('[WhisperX] No speaker_embeddings field in output (may be older model version)');
       }
     }
 
@@ -1698,7 +1733,8 @@ export async function transcribeWithWhisperX(
       segments,
       status: 'success',
       predictionId: prediction.id,
-      actualComputeSeconds
+      actualComputeSeconds,
+      speakerEmbeddings
     };
 
   } catch (error) {
@@ -1807,14 +1843,14 @@ export async function transcribeWithWhisperXRobust(
           console.log(`[WhisperX-Robust] Prediction succeeded in ${duration}s wall-clock (${actualComputeSeconds || 'unknown'}s compute, id: ${prediction.id})`);
 
           // Parse output
-          const segments = parseWhisperXOutput(status.output);
+          const { segments, speakerEmbeddings } = parseWhisperXOutput(status.output);
 
           if (segments.length === 0) {
             throw new Error('WhisperX returned no segments');
           }
 
-          // Return with prediction ID and actual compute time for cost traceability
-          return { segments, status: 'success', predictionId: prediction.id, actualComputeSeconds };
+          // Return with prediction ID, actual compute time, and embeddings
+          return { segments, status: 'success', predictionId: prediction.id, actualComputeSeconds, speakerEmbeddings };
 
         } else if (status.status === 'failed' || status.status === 'canceled') {
           throw new Error(`Prediction ${status.status}: ${status.error || 'Unknown error'}`);
@@ -1870,14 +1906,18 @@ export async function transcribeWithWhisperXRobust(
 }
 
 /**
- * Parse WhisperX output into segments
+ * Parse WhisperX output into segments and speaker embeddings
  */
-function parseWhisperXOutput(output: unknown): WhisperXSegment[] {
+function parseWhisperXOutput(output: unknown): {
+  segments: WhisperXSegment[],
+  speakerEmbeddings?: { [speakerId: string]: number[] }
+} {
   const segments: WhisperXSegment[] = [];
+  let speakerEmbeddings: { [speakerId: string]: number[] } | undefined;
 
   if (typeof output !== 'object' || output === null) {
     console.error('[WhisperX] Output is not an object');
-    return segments;
+    return { segments };
   }
 
   const outputObj = output as Record<string, unknown>;
@@ -1887,9 +1927,10 @@ function parseWhisperXOutput(output: unknown): WhisperXSegment[] {
 
   if (!Array.isArray(outputObj.segments)) {
     console.error('[WhisperX] No segments array in output');
-    return segments;
+    return { segments };
   }
 
+  // Parse segments
   for (const segment of outputObj.segments) {
     if (typeof segment === 'object' && segment !== null) {
       const segObj = segment as Record<string, unknown>;
@@ -1906,7 +1947,28 @@ function parseWhisperXOutput(output: unknown): WhisperXSegment[] {
   }
 
   console.log(`[WhisperX] Parsed ${segments.length} segments`);
-  return segments;
+
+  // Parse speaker embeddings (if present)
+  if (typeof outputObj.speaker_embeddings === 'object' && outputObj.speaker_embeddings !== null) {
+    const embeddingsObj = outputObj.speaker_embeddings as Record<string, unknown>;
+    speakerEmbeddings = {};
+
+    for (const [speakerId, embedding] of Object.entries(embeddingsObj)) {
+      if (Array.isArray(embedding) && embedding.length > 0) {
+        const validEmbedding = embedding.every(val => typeof val === 'number');
+        if (validEmbedding) {
+          speakerEmbeddings[speakerId] = embedding as number[];
+          console.log(`[WhisperX] Extracted embedding for ${speakerId}: ${embedding.length} dimensions`);
+        }
+      }
+    }
+
+    if (Object.keys(speakerEmbeddings).length === 0) {
+      speakerEmbeddings = undefined;
+    }
+  }
+
+  return { segments, speakerEmbeddings };
 }
 
 /**
