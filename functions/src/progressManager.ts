@@ -118,19 +118,28 @@ export interface ProcessingTimeline {
  *
  * Manages the processingProgress and processingTimeline fields in Firestore,
  * providing real-time feedback to the frontend about processing status.
+ *
+ * For chunked processing, computes aggregate progress across all chunks.
  */
 export class ProgressManager {
   private conversationId: string;
   private timeline: ProcessingTimeline[] = [];
   private currentStepStartTime: number = Date.now();
+  private chunkIndex?: number;
+  private totalChunks?: number;
+  private lastReportedProgress: number = 0; // For monotonic clamping
 
-  constructor(conversationId: string) {
+  constructor(conversationId: string, chunkIndex?: number, totalChunks?: number) {
     this.conversationId = conversationId;
+    this.chunkIndex = chunkIndex;
+    this.totalChunks = totalChunks;
   }
 
   /**
    * Transition to a new processing step
    * Updates Firestore with current progress and timeline
+   *
+   * For chunked processing, computes aggregate progress based on completed chunks.
    */
   async setStep(step: ProcessingStep, errorMessage?: string): Promise<void> {
     const now = Date.now();
@@ -157,9 +166,68 @@ export class ProgressManager {
       ? { ...baseMeta, category: 'error' } // Override category to 'error' when error present
       : baseMeta;
 
+    // Calculate aggregate progress for chunked processing
+    let percentComplete = STEP_PERCENTAGES[step];
+
+    if (this.chunkIndex !== undefined && this.totalChunks !== undefined && this.totalChunks > 1) {
+      // For chunked processing, use completedChunks from Firestore for accurate aggregate progress.
+      // This handles out-of-order chunk completion correctly (parallel processing).
+      //
+      // Monotonic clamping: progress should never decrease.
+      // In parallel processing, each chunk runs in a separate Cloud Function instance
+      // (no shared memory), so we must also check the existing Firestore value—not
+      // just lastReportedProgress, which is per-instance.
+      let existingProgress = 0;
+
+      try {
+        const conversationSnap = await db.collection('conversations').doc(this.conversationId).get();
+        const data = conversationSnap.data();
+        const completedChunks = data?.chunkingMetadata?.completedChunks ?? this.chunkIndex;
+        existingProgress = data?.processingProgress?.percentComplete ?? 0;
+
+        // Base progress: completed chunks as percentage of total
+        const baseProgress = (completedChunks / this.totalChunks) * 100;
+        // Current chunk's step progress as a fraction of one chunk's worth
+        const chunkProgress = (STEP_PERCENTAGES[step] / 100) * (100 / this.totalChunks);
+        percentComplete = Math.min(99, Math.floor(baseProgress + chunkProgress)); // Cap at 99% until merge
+
+        console.log(`[ProgressManager] Chunk ${this.chunkIndex + 1}/${this.totalChunks} at step ${step}:`, {
+          completedChunks,
+          baseProgress: baseProgress.toFixed(1),
+          chunkProgress: chunkProgress.toFixed(1),
+          aggregateProgress: percentComplete,
+          existingProgress
+        });
+      } catch (error) {
+        // If we can't read from Firestore, fall back to chunkIndex-based calculation.
+        // existingProgress stays 0—we can't clamp against unknown Firestore state.
+        const baseProgress = (this.chunkIndex / this.totalChunks) * 100;
+        const chunkProgress = (STEP_PERCENTAGES[step] / 100) * (100 / this.totalChunks);
+        percentComplete = Math.min(99, Math.floor(baseProgress + chunkProgress));
+
+        console.warn(`[ProgressManager] Failed to read completedChunks, using fallback:`, {
+          error: error instanceof Error ? error.message : String(error),
+          fallbackProgress: percentComplete
+        });
+      }
+
+      // Apply monotonic clamping using the higher of Firestore and local memory
+      const progressFloor = Math.max(existingProgress, this.lastReportedProgress);
+      if (percentComplete < progressFloor) {
+        console.log(`[ProgressManager] Clamping progress to prevent regression:`, {
+          calculated: percentComplete,
+          existingFirestore: existingProgress,
+          lastReportedLocal: this.lastReportedProgress,
+          usingClamped: progressFloor
+        });
+        percentComplete = progressFloor;
+      }
+      this.lastReportedProgress = Math.max(this.lastReportedProgress, percentComplete);
+    }
+
     const progress: ProcessingProgress = {
       currentStep: step,
-      percentComplete: STEP_PERCENTAGES[step],
+      percentComplete,
       stepStartedAt: FieldValue.serverTimestamp() as any,
       stepMeta
     };
@@ -176,10 +244,13 @@ export class ProgressManager {
         updatedAt: FieldValue.serverTimestamp()
       });
 
-      console.log(`[ProgressManager] Step: ${step} (${STEP_PERCENTAGES[step]}%)`, {
+      console.log(`[ProgressManager] Step: ${step} (${percentComplete}%)`, {
         conversationId: this.conversationId,
         step,
-        percentComplete: STEP_PERCENTAGES[step]
+        percentComplete,
+        isChunked: this.chunkIndex !== undefined,
+        chunkIndex: this.chunkIndex,
+        totalChunks: this.totalChunks
       });
     } catch (error) {
       // Log but don't throw - progress updates are nice-to-have, not critical

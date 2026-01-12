@@ -860,8 +860,12 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
   const { conversationId, userId, filePath, replicateApiToken, huggingfaceAccessToken, audioSizeBytes, chunkContext, chunkMetadata } = params;
   const isChunkTask = !!chunkMetadata;
 
-  // Initialize progress tracking
-  const progressManager = new ProgressManager(conversationId);
+  // Initialize progress tracking (with chunk info for aggregate progress calculation)
+  const progressManager = new ProgressManager(
+    conversationId,
+    chunkMetadata?.chunkIndex,
+    chunkMetadata?.totalChunks
+  );
 
   // Track partial metrics for abort scenarios
   const partialMetrics = {
@@ -1198,7 +1202,8 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
       whisperxSegments,
       analysis,
       conversationId,
-      userId
+      userId,
+      chunkMetadata?.chunkIndex // Pass chunk index for unique IDs
     );
 
     const transformDurationMs = Date.now() - transformStartTime;
@@ -1242,6 +1247,8 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
           overlapAfterMs: chunkMetadata.overlapAfterMs
         },
         emittedContext: chunkContext!, // Will be replaced by processTranscription with actual emitted context
+        // Include speaker embeddings if present (from WhisperX fork)
+        speakerEmbeddings: whisperxResult.speakerEmbeddings,
         createdAt: new Date().toISOString(),
         storagePath: filePath
       };
@@ -3141,7 +3148,8 @@ function mergeWhisperXAndGeminiData(
   },
   analysis: GeminiAnalysis,
   conversationId: string,
-  userId: string
+  userId: string,
+  chunkIndex?: number // Optional chunk index for generating unique IDs in parallel mode
 ): {
   title: string;
   speakers: Record<string, Speaker>;
@@ -3214,9 +3222,12 @@ function mergeWhisperXAndGeminiData(
   const speakerSummary = Object.values(speakers).map(s => s.displayName).join(', ');
   console.log(`[Merge] Speaker identification (source: ${speakerIdentificationSource}): ${speakerSummary}`);
 
+  // Generate segment ID suffix for chunk mode (ensures uniqueness across chunks)
+  const idSuffix = chunkIndex !== undefined ? `_chunk${chunkIndex}` : '';
+
   // Map segments (already have correct timestamps from WhisperX)
   const segments: Segment[] = whisperxData.segments.map((seg, idx) => ({
-    segmentId: `seg_${idx}`,
+    segmentId: `seg_${idx}${idSuffix}`,
     index: idx,
     speakerId: seg.speakerId,
     startMs: seg.startMs,
@@ -3250,9 +3261,9 @@ function mergeWhisperXAndGeminiData(
       let match;
       while ((match = regex.exec(seg.text)) !== null) {
         termOccurrences.push({
-          occurrenceId: `occ_${occCount++}`,
+          occurrenceId: `occ_${occCount++}${idSuffix}`, // Chunk-aware occurrence IDs
           termId: term.termId,
-          segmentId: seg.segmentId,
+          segmentId: seg.segmentId, // Already includes chunk suffix from above
           startChar: match.index,
           endChar: match.index + match[0].length
         });

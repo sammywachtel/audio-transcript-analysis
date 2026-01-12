@@ -12,6 +12,7 @@
  */
 
 import { SpeakerSignature } from './types';
+import { ReconciliationConfig } from './config/reconciliation';
 
 /**
  * Result of speaker reconciliation with canonical mappings and confidence details.
@@ -87,19 +88,24 @@ const WEIGHTS = {
 };
 
 /**
- * Confidence thresholds for clustering and error reporting.
+ * Confidence thresholds for clustering.
+ * Note: The low-confidence threshold check is performed in chunkMerge.ts
+ * against ReconciliationConfig.CONFIDENCE_THRESHOLD for env var override support.
+ * This module only computes confidence - it does not enforce thresholds.
  */
 const THRESHOLDS = {
-  highConfidenceMatch: 0.7,   // Pairs above this are merged greedily
-  lowConfidenceError: 0.6     // Overall confidence below this triggers error
+  highConfidenceMatch: ReconciliationConfig.HIGH_CONFIDENCE_MATCH   // Pairs above this are merged greedily
 };
 
 /**
  * Main entry point: reconcile speakers across chunks.
  *
+ * Note: This function no longer throws on low confidence. The caller
+ * (chunkMerge.ts) is responsible for checking the overallConfidence
+ * against ReconciliationConfig.CONFIDENCE_THRESHOLD and handling fallback.
+ *
  * @param signatures - Speaker signatures from all chunks
  * @returns Reconciliation result with canonical IDs and confidence
- * @throws ReconciliationLowConfidenceError if confidence below threshold
  */
 export function reconcileSpeakers(signatures: SpeakerSignature[]): ReconciliationResult {
   console.log('[Reconciliation] Starting speaker reconciliation:', {
@@ -178,14 +184,8 @@ export function reconcileSpeakers(signatures: SpeakerSignature[]): Reconciliatio
     clusterCount: clusterDetails.length
   });
 
-  // Step 5: Check confidence threshold
-  if (overallConfidence < THRESHOLDS.lowConfidenceError) {
-    throw new ReconciliationLowConfidenceError(
-      `Speaker reconciliation confidence too low: ${overallConfidence.toFixed(2)} < ${THRESHOLDS.lowConfidenceError}`,
-      overallConfidence,
-      clusterDetails
-    );
-  }
+  // Note: Threshold enforcement moved to chunkMerge.ts
+  // This module returns the result; the caller decides how to handle low confidence
 
   return {
     speakerIdMap,
@@ -367,7 +367,7 @@ function clusterSpeakers(
     const clusterId = clusters.length;
     clusters.push({
       signatures: [sig],
-      avgSimilarity: 1.0,
+      avgSimilarity: 0.0, // Singleton clusters have no similarity evidence (not 1.0!)
       evidence: { nameMatches: 0, topicOverlap: 0, termOverlap: 0 }
     });
     sigToClusterId.set(sig, clusterId);

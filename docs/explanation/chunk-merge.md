@@ -50,12 +50,13 @@ conversations/{id}/chunks/*  → mergeChunks() → conversations/{id}
 ```
 processing → chunking → merging → complete
                 ↓           ↓
-           (chunks enqueued) (merge enqueued)
+           (chunks enqueued) [fallback?] → reprocessing → complete
 ```
 
 - **processing**: Initial audio upload (before chunking decision)
 - **chunking**: Chunks created, tasks enqueued, processing in progress
 - **merging**: All chunks complete, merge task running
+- **reprocessing**: Fallback triggered, sequential reprocessing in progress (see Fallback section)
 - **complete**: Merge complete, final conversation ready
 
 ## Speaker Reconciliation (Parallel Mode)
@@ -93,14 +94,95 @@ The reconciliation algorithm matches speakers across chunks using three signals:
 5. Remap segment `speakerId` fields to canonical IDs
 
 **Confidence Threshold**:
-- If overall confidence < 0.6, throw `ReconciliationLowConfidenceError`
+- Configurable via `RECONCILIATION_CONFIDENCE_THRESHOLD` env var (default: 0.75)
+- If overall confidence < threshold, triggers fallback to sequential reprocessing
 - This prevents merging speakers when the match is too uncertain
 
 **Metadata Stored**:
 - `reconciliationConfidence`: Overall confidence score (0-1)
 - `reconciliationDetails`: Per-cluster match evidence for debugging
+- `reconciliationMetadata`: Extended observability data (signals used, per-speaker confidences, duration)
 
 **Sequential Mode**: No reconciliation needed - speaker IDs are consistent via context propagation.
+
+## Fallback to Sequential Processing
+
+When speaker reconciliation confidence is too low, the system automatically falls back to sequential reprocessing to ensure consistent speaker identification.
+
+### Fallback Flow
+
+```
+Parallel Processing → Low Confidence → Fallback Triggered
+                                              ↓
+                                    Archive Parallel Chunks
+                                              ↓
+                                    Update Status: reprocessing
+                                              ↓
+                                    Enqueue Sequential Tasks
+                                              ↓
+Sequential Processing → Merge (no reconciliation needed) → Complete
+```
+
+### When Fallback Triggers
+
+1. **Merge attempts reconciliation**: `mergeChunks()` runs `reconcileSpeakers()` on parallel chunk signatures
+2. **Confidence check fails**: The result's `overallConfidence` is compared against `ReconciliationConfig.CONFIDENCE_THRESHOLD`
+3. **Exception thrown**: If confidence is below threshold, `ReconciliationLowConfidenceError` is thrown
+4. **Exception caught**: The catch block handles the error, persists reconciliation metadata, and calls `handleLowConfidenceFallback()`:
+   - Archives existing chunk artifacts to `conversations/{id}/chunks.archived-{timestamp}/`
+   - Records `fallbackMetadata` with parallel attempt details
+   - Updates status to `reprocessing`
+   - Enqueues sequential reprocessing via `processReprocessing` Cloud Task
+
+### Fallback Metadata
+
+When fallback occurs, the conversation record stores:
+
+```typescript
+fallbackMetadata: {
+  triggeredAt: string;          // ISO timestamp
+  parallelConfidence: number;   // Confidence that triggered fallback
+  archiveId: string;            // Path to archived parallel chunks
+  reason: 'low_speaker_confidence' | 'reconciliation_error';
+  parallelDurationMs?: number;  // How long parallel attempt took
+  sequentialDurationMs?: number; // Populated after sequential completes
+  configuredThreshold: number;  // Threshold at time of trigger
+}
+```
+
+### Archived Chunks
+
+Parallel chunks are preserved for debugging:
+- Location: `conversations/{id}/chunks.archived-{timestamp}/{chunkIndex}`
+- Contains full chunk artifacts including speaker signatures
+- Useful for post-mortem analysis of reconciliation failures
+- Can be TTL'd after 30 days if storage is a concern
+
+### Sequential Reprocessing
+
+After fallback:
+1. Original audio is re-chunked (same boundaries as parallel)
+2. Chunks are processed sequentially with context propagation
+3. Speaker IDs remain consistent across chunks (no reconciliation needed)
+4. Merge completes normally with sequential speaker data
+
+### Idempotency
+
+The fallback system is idempotent:
+- If `fallbackMetadata.triggeredAt` exists, merge is skipped (already in reprocessing)
+- Prevents double-fallback if merge is retried
+- Sequential reprocessing handles its own idempotency via chunk status tracking
+
+### Status Transitions with Fallback
+
+```
+processing → chunking → merging → [fallback?]
+                          ↓              ↓
+                       complete    reprocessing → complete
+```
+
+- **reprocessing**: Fallback triggered, sequential processing in progress
+- **complete**: Either parallel succeeded or sequential fallback completed
 
 ## Deduplication Strategy
 
@@ -334,16 +416,20 @@ Start merging early chunks while later chunks still processing (reduces time to 
 - [Chunking Overview](./chunking.md) - How audio is split into chunks
 - [Context Propagation](./chunk-context.md) - How data flows between chunks
 - [Chunk Bounds](./chunk-bounds.md) - Timestamp math for overlap regions
+- [Reconciliation Queries](../admin/reconciliation-queries.md) - Monitoring and operator queries
+- [Data Model Reference](../reference/data-model.md) - Field definitions
 - [How-To: Deploy Functions](../how-to/deploy.md) - Deploying the merge function
 
 ## Key Takeaways
 
 1. **Chunk artifacts** store intermediate results in `conversations/{id}/chunks/*`
 2. **Speaker reconciliation** (parallel mode) matches speakers across chunks using name/topic/term signals
-3. **Merge trigger** fires atomically when all chunks complete
-4. **Deduplication** uses "preferred chunk" logic (later chunk wins in overlaps)
-5. **Idempotency** ensures safe retries and manual reruns
-6. **Confidence threshold** (0.6) prevents low-quality speaker matches
-7. **Status flow**: `chunking → merging → complete`
+3. **Confidence threshold** (default 0.75) triggers fallback if reconciliation is uncertain
+4. **Fallback flow**: Low confidence → archive parallel chunks → reprocess sequentially
+5. **Merge trigger** fires atomically when all chunks complete
+6. **Deduplication** uses "preferred chunk" logic (later chunk wins in overlaps)
+7. **Idempotency** ensures safe retries and prevents double-fallback
+8. **Status flow**: `chunking → merging → [reprocessing?] → complete`
+9. **Observability**: Structured logs + `reconciliationMetadata` + `fallbackMetadata` for monitoring
 
-The merge layer is the final step that transforms chunked processing back into a seamless user experience, with speaker reconciliation ensuring consistent identities across chunk boundaries.
+The merge layer is the final step that transforms chunked processing back into a seamless user experience. Speaker reconciliation ensures consistent identities across chunk boundaries, and automatic fallback to sequential processing protects users from mislabeled transcripts when confidence is low.

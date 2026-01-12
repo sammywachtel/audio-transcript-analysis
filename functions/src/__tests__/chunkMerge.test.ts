@@ -310,14 +310,14 @@ describe('chunkMerge', () => {
         chunkIndex: 0,
         totalChunks: 2,
         segments: [
-          { segmentId: 'seg-0', index: 0, speakerId: 'spk-0', startMs: 0, endMs: 10000, text: 'Kubernetes cluster' }
+          { segmentId: 'seg_0_chunk0', index: 0, speakerId: 'spk-0', startMs: 0, endMs: 10000, text: 'Kubernetes cluster' }
         ],
         speakers: {},
         terms: {
           'term-1': { termId: 'term-1', key: 'kubernetes', display: 'Kubernetes', definition: 'Container orchestration', aliases: ['k8s'] }
         },
         termOccurrences: [
-          { occurrenceId: 'occ-1', termId: 'term-1', segmentId: 'seg-0', startChar: 0, endChar: 10 }
+          { occurrenceId: 'occ_0_chunk0', termId: 'term-1', segmentId: 'seg_0_chunk0', startChar: 0, endChar: 10 }
         ],
         topics: [],
         people: [],
@@ -334,14 +334,14 @@ describe('chunkMerge', () => {
         totalChunks: 2,
         segments: [
           // Chunk-local timestamps: 0ms in chunk 1 = 10000ms in original (chunkBounds.startMs - overlapBeforeMs)
-          { segmentId: 'seg-1', index: 0, speakerId: 'spk-0', startMs: 0, endMs: 10000, text: 'Docker containers' }
+          { segmentId: 'seg_0_chunk1', index: 0, speakerId: 'spk-0', startMs: 0, endMs: 10000, text: 'Docker containers' }
         ],
         speakers: {},
         terms: {
           'term-2': { termId: 'term-2', key: 'docker', display: 'Docker', definition: 'Container platform', aliases: [] }
         },
         termOccurrences: [
-          { occurrenceId: 'occ-2', termId: 'term-2', segmentId: 'seg-1', startChar: 0, endChar: 6 }
+          { occurrenceId: 'occ_0_chunk1', termId: 'term-2', segmentId: 'seg_0_chunk1', startChar: 0, endChar: 6 }
         ],
         topics: [],
         people: [],
@@ -364,7 +364,7 @@ describe('chunkMerge', () => {
       // lastUpdatePayload should contain the final update with terms
       expect(lastUpdatePayload).not.toBeNull();
       const terms = lastUpdatePayload!.terms as Record<string, { key: string }>;
-      const termOccurrences = lastUpdatePayload!.termOccurrences as Array<unknown>;
+      const termOccurrences = lastUpdatePayload!.termOccurrences as Array<{ occurrenceId: string; segmentId: string; startChar: number; endChar: number }>;
 
       // Should have both terms
       expect(Object.keys(terms)).toHaveLength(2);
@@ -373,6 +373,38 @@ describe('chunkMerge', () => {
 
       // Should have both occurrences (both segments kept)
       expect(termOccurrences).toHaveLength(2);
+
+      // Verify term occurrences have chunk-aware IDs and correct segment references
+      const occ0 = termOccurrences.find(o => o.occurrenceId === 'occ_0_chunk0');
+      expect(occ0).toBeDefined();
+      expect(occ0!.segmentId).toBe('seg_0_chunk0'); // Chunk-aware segment ID
+      expect(occ0!.startChar).toBe(0);
+      expect(occ0!.endChar).toBe(10);
+
+      const occ1 = termOccurrences.find(o => o.occurrenceId === 'occ_0_chunk1');
+      expect(occ1).toBeDefined();
+      expect(occ1!.segmentId).toBe('seg_0_chunk1'); // Chunk-aware segment ID
+      expect(occ1!.startChar).toBe(0);
+      expect(occ1!.endChar).toBe(6);
+
+      // CRITICAL: Verify substring(startChar, endChar) actually matches the term
+      // This is the real test - if offsets are wrong, highlights will show garbage
+      const segments = lastUpdatePayload!.segments as Array<{ segmentId: string; text: string }>;
+
+      const seg0 = segments.find(s => s.segmentId === 'seg_0_chunk0')!;
+      const highlight0 = seg0.text.substring(occ0!.startChar, occ0!.endChar);
+      const term1 = (lastUpdatePayload!.terms as Record<string, { display: string; aliases: string[] }>)['term-1'];
+      // Must match display OR one of the aliases
+      expect(
+        highlight0 === term1.display || term1.aliases.includes(highlight0)
+      ).toBe(true);
+
+      const seg1 = segments.find(s => s.segmentId === 'seg_0_chunk1')!;
+      const highlight1 = seg1.text.substring(occ1!.startChar, occ1!.endChar);
+      const term2 = (lastUpdatePayload!.terms as Record<string, { display: string; aliases: string[] }>)['term-2'];
+      expect(
+        highlight1 === term2.display || term2.aliases.includes(highlight1)
+      ).toBe(true);
     });
 
     it('should throw error if conversation not found', async () => {

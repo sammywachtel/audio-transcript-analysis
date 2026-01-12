@@ -61,7 +61,7 @@ export interface Conversation {
   durationMs: number;
   audioUrl?: string; // Ephemeral signed URL for audio playback (not stored in Firestore)
   audioStoragePath?: string; // Firebase Storage path for audio file
-  status: 'processing' | 'needs_review' | 'complete' | 'failed' | 'aborted';
+  status: 'processing' | 'chunking' | 'merging' | 'reprocessing' | 'needs_review' | 'complete' | 'failed' | 'aborted';
   abortRequested?: boolean;  // Set to true to request abort, Cloud Function checks this
   speakers: Record<string, Speaker>;
   segments: Segment[];
@@ -80,6 +80,10 @@ export interface Conversation {
   // Speaker reconciliation metadata (parallel mode only)
   reconciliationConfidence?: number;
   reconciliationDetails?: ReconciliationDetails;
+  // Extended reconciliation observability (parallel mode)
+  reconciliationMetadata?: ReconciliationMetadata;
+  // Fallback metadata (when parallel → sequential fallback occurred)
+  fallbackMetadata?: FallbackMetadata;
 
   // Progressive processing status (all optional for backward compatibility)
   processingProgress?: ProcessingProgress;
@@ -286,4 +290,52 @@ export interface ReconciliationDetails {
       termOverlap: number;
     };
   }>;
+}
+
+// =============================================================================
+// Fallback & Observability Types
+// =============================================================================
+
+/**
+ * Reasons why fallback to sequential reprocessing was triggered.
+ */
+export type FallbackReason = 'low_speaker_confidence' | 'reconciliation_error';
+
+/**
+ * Metadata stored when parallel processing falls back to sequential.
+ * Provides audit trail and debugging information for operators.
+ */
+export interface FallbackMetadata {
+  /** When fallback was triggered (ISO timestamp) */
+  triggeredAt: string;
+  /** The confidence score that triggered fallback */
+  parallelConfidence: number;
+  /** Reference to archived parallel chunks (subcollection path) */
+  archiveId: string;
+  /** Reason for fallback */
+  reason: FallbackReason;
+  /** How long the parallel attempt took (ms) */
+  parallelDurationMs?: number;
+  /** How long the sequential reprocessing took (ms) - populated after completion */
+  sequentialDurationMs?: number;
+  /** Confidence threshold that was configured at the time */
+  configuredThreshold: number;
+}
+
+/**
+ * Extended reconciliation metadata for observability.
+ * Stored on conversation records for post-mortem analysis.
+ */
+export interface ReconciliationMetadata {
+  /** Which matching signals were used (e.g., ['name', 'topic', 'term']) */
+  signalsUsed: string[];
+  /** Whether fallback to sequential was triggered */
+  fallbackTriggered: boolean;
+  /** Per-speaker confidence scores for matched clusters */
+  speakerMatchConfidences: Array<{
+    canonicalId: string;
+    confidence: number;
+  }>;
+  /** Processing duration for reconciliation phase (ms) */
+  reconciliationDurationMs?: number;
 }

@@ -12,7 +12,7 @@
  */
 
 import { onRequest } from 'firebase-functions/v2/https';
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, WriteBatch } from 'firebase-admin/firestore';
 import { db } from './index';
 import {
   ChunkArtifact,
@@ -23,22 +23,255 @@ import {
   Topic,
   Person,
   SpeakerSignature,
-  ReconciliationDetails
+  ReconciliationDetails,
+  ReconciliationMetadata,
+  FallbackMetadata
 } from './types';
 import { getPreferredChunkForTimestamp, chunkToOriginalTimestamp } from './chunkBounds';
 import { ChunkMetadata } from './chunking';
 import { reconcileSpeakers, ReconciliationLowConfidenceError } from './speakerReconciliation';
+import {
+  reconcileSpeakersWithEmbeddings,
+  hasValidEmbeddings,
+  EmbeddingReconciliationConfig
+} from './speakerReconciliationEmbeddings';
+import { ReconciliationConfig } from './config/reconciliation';
+import {
+  logReconciliationStarted,
+  logReconciliationCompleted,
+  logFallbackTriggered,
+  logReconciliationFailed
+} from './logging/reconciliation';
+
+// =============================================================================
+// Fallback Handling Helpers
+// =============================================================================
+
+/**
+ * Archive parallel chunk artifacts to a timestamped subcollection.
+ * Used before sequential reprocessing to preserve parallel attempt for debugging.
+ *
+ * Archive location: conversations/{id}/chunks.archived-{timestamp}/{chunkIndex}
+ *
+ * @param conversationId - Conversation to archive chunks for
+ * @param chunksSnap - Snapshot of current chunks subcollection
+ * @returns Archive ID (timestamp-based identifier)
+ */
+async function archiveChunks(
+  conversationId: string,
+  chunksSnap: FirebaseFirestore.QuerySnapshot
+): Promise<string> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const archiveId = `chunks.archived-${timestamp}`;
+
+  console.log('[ChunkMerge] Archiving parallel chunks:', {
+    conversationId,
+    archiveId,
+    chunkCount: chunksSnap.docs.length
+  });
+
+  const conversationRef = db.collection('conversations').doc(conversationId);
+  const batch: WriteBatch = db.batch();
+
+  // Copy each chunk to the archive subcollection
+  for (const doc of chunksSnap.docs) {
+    const archiveRef = conversationRef
+      .collection(archiveId)
+      .doc(doc.id);
+    batch.set(archiveRef, {
+      ...doc.data(),
+      archivedAt: new Date().toISOString(),
+      archiveReason: 'low_speaker_confidence'
+    });
+  }
+
+  // Delete original chunks (will be replaced by sequential processing)
+  for (const doc of chunksSnap.docs) {
+    batch.delete(doc.ref);
+  }
+
+  await batch.commit();
+
+  console.log('[ChunkMerge] ✅ Chunks archived successfully:', {
+    conversationId,
+    archiveId
+  });
+
+  return archiveId;
+}
+
+/**
+ * Enqueue sequential reprocessing after parallel fallback.
+ * Resets chunking metadata and triggers fresh chunk tasks with sequential mode.
+ *
+ * @param conversationId - Conversation to reprocess
+ * @param originalStoragePath - Path to original audio file
+ * @param fallbackMetadata - Metadata about the failed parallel attempt
+ */
+async function enqueueSequentialReprocessing(
+  conversationId: string,
+  originalStoragePath: string,
+  fallbackMetadata: FallbackMetadata
+): Promise<void> {
+  console.log('[ChunkMerge] Enqueueing sequential reprocessing:', {
+    conversationId,
+    originalStoragePath,
+    fallbackReason: fallbackMetadata.reason
+  });
+
+  const { CloudTasksClient } = await import('@google-cloud/tasks');
+  const tasksClient = new CloudTasksClient();
+
+  const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+  if (!project) {
+    throw new Error('GCP project ID not found in environment');
+  }
+
+  const location = 'us-central1';
+  const queue = 'transcription-queue';
+  const parent = tasksClient.queuePath(project, location, queue);
+
+  // Get conversation to retrieve userId
+  const conversationSnap = await db.collection('conversations').doc(conversationId).get();
+  if (!conversationSnap.exists) {
+    throw new Error(`Conversation ${conversationId} not found for reprocessing`);
+  }
+  const conversationData = conversationSnap.data()!;
+
+  // Create reprocessing task payload
+  // This will trigger the chunking flow again, but with sequential mode
+  const functionName = 'processReprocessing';
+  const reprocessUrl = `https://${location}-${project}.cloudfunctions.net/${functionName}`;
+
+  const payload = {
+    conversationId,
+    userId: conversationData.userId,
+    filePath: originalStoragePath,
+    processingMode: 'sequential',
+    isReprocessing: true,
+    fallbackMetadata
+  };
+
+  const task = {
+    httpRequest: {
+      httpMethod: 'POST' as const,
+      url: reprocessUrl,
+      headers: { 'Content-Type': 'application/json' },
+      body: Buffer.from(JSON.stringify(payload)).toString('base64'),
+      oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
+    },
+    scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 }, // 5 second delay
+    dispatchDeadline: { seconds: 3600 } // 1 hour (sequential processing is slower)
+  };
+
+  console.log('[ChunkMerge] Creating sequential reprocessing task:', {
+    conversationId,
+    queue: `${location}/${queue}`,
+    targetUrl: reprocessUrl
+  });
+
+  const [createdTask] = await tasksClient.createTask({ parent, task });
+
+  console.log('[ChunkMerge] ✅ Sequential reprocessing task enqueued:', {
+    conversationId,
+    taskName: createdTask.name
+  });
+}
+
+/**
+ * Handle low-confidence reconciliation by triggering fallback to sequential.
+ *
+ * Steps:
+ * 1. Archive parallel chunk artifacts
+ * 2. Record fallback metadata on conversation
+ * 3. Update status to 'reprocessing'
+ * 4. Enqueue sequential reprocessing task
+ *
+ * @param conversationId - Conversation to handle fallback for
+ * @param confidence - The low confidence score that triggered fallback
+ * @param chunksSnap - Snapshot of current chunks for archiving
+ * @param originalStoragePath - Path to original audio for reprocessing
+ * @param parallelDurationMs - How long the parallel attempt took
+ * @param reconciliationDurationMs - How long the reconciliation computation took
+ */
+async function handleLowConfidenceFallback(
+  conversationId: string,
+  confidence: number,
+  chunksSnap: FirebaseFirestore.QuerySnapshot,
+  originalStoragePath: string,
+  parallelDurationMs: number,
+  reconciliationDurationMs: number
+): Promise<void> {
+  console.log('[ChunkMerge] 🔄 Initiating fallback to sequential processing:', {
+    conversationId,
+    parallelConfidence: confidence,
+    threshold: ReconciliationConfig.CONFIDENCE_THRESHOLD
+  });
+
+  // Step 1: Archive parallel chunks
+  const archiveId = await archiveChunks(conversationId, chunksSnap);
+
+  // Step 2: Build fallback metadata
+  const fallbackMetadata: FallbackMetadata = {
+    triggeredAt: new Date().toISOString(),
+    parallelConfidence: confidence,
+    archiveId,
+    reason: 'low_speaker_confidence',
+    parallelDurationMs,
+    configuredThreshold: ReconciliationConfig.CONFIDENCE_THRESHOLD
+  };
+
+  // Step 3: Update conversation with fallback metadata and reprocessing status
+  await db.collection('conversations').doc(conversationId).update({
+    status: 'reprocessing',
+    fallbackMetadata,
+    // Reset chunking metadata for fresh sequential processing
+    'chunkingMetadata.mergedAt': FieldValue.delete(),
+    'chunkingMetadata.mergeStartedAt': FieldValue.delete(),
+    'chunkingMetadata.mergeTaskEnqueued': false,
+    'chunkingMetadata.completedChunks': 0,
+    'chunkingMetadata.chunkStatuses': [],
+    'chunkingMetadata.chunkContexts': [],
+    processingMode: 'sequential',
+    updatedAt: FieldValue.serverTimestamp()
+  });
+
+  // Log the fallback event for observability
+  logFallbackTriggered(
+    conversationId,
+    confidence,
+    ReconciliationConfig.CONFIDENCE_THRESHOLD,
+    archiveId,
+    'parallel',
+    reconciliationDurationMs
+  );
+
+  // Step 4: Enqueue sequential reprocessing
+  await enqueueSequentialReprocessing(conversationId, originalStoragePath, fallbackMetadata);
+
+  console.log('[ChunkMerge] ✅ Fallback initiated successfully:', {
+    conversationId,
+    archiveId,
+    newMode: 'sequential'
+  });
+}
+
+// =============================================================================
+// Main Merge Logic
+// =============================================================================
 
 /**
  * Merge all chunk artifacts for a conversation into the final document.
  *
  * Steps:
- * 1. Check idempotency (skip if already merged)
+ * 1. Check idempotency (skip if already merged or fallback triggered)
  * 2. Load all chunk artifacts
- * 3. Deduplicate segments using overlap boundaries
- * 4. Merge speakers, terms, topics, people
- * 5. Write final conversation document
- * 6. Update status to 'complete'
+ * 3. Run speaker reconciliation (parallel mode)
+ * 4. If low confidence: trigger fallback to sequential and return
+ * 5. Deduplicate segments using overlap boundaries
+ * 6. Merge speakers, terms, topics, people
+ * 7. Write final conversation document
+ * 8. Update status to 'complete'
  *
  * @throws Error if chunks are missing or invalid
  */
@@ -68,6 +301,18 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     });
     return;
   }
+
+  // Idempotency check - if fallback already triggered, don't retry merge
+  if (conversationData.fallbackMetadata?.triggeredAt) {
+    console.log('[ChunkMerge] Fallback already triggered, skipping merge:', {
+      conversationId,
+      fallbackTriggeredAt: conversationData.fallbackMetadata.triggeredAt
+    });
+    return;
+  }
+
+  // Track merge start time for duration calculation
+  const mergeStartTime = Date.now();
 
   // Mark merge as started
   await conversationRef.update({
@@ -124,31 +369,88 @@ export async function mergeChunks(conversationId: string): Promise<void> {
 
   const processingMode = conversationData.processingMode || 'parallel';
 
+  // Track reconciliation metadata for observability
+  let reconciliationMetadata: ReconciliationMetadata | undefined;
+  const reconciliationStartTime = Date.now();
+
   if (processingMode === 'parallel') {
+    // Log reconciliation start for observability
+    logReconciliationStarted(conversationId, chunkArtifacts.length, 'parallel');
+
     console.log('[ChunkMerge] Running speaker reconciliation (parallel mode)...');
 
-    // Collect all speaker signatures from chunks
-    const allSignatures: SpeakerSignature[] = [];
-    for (const artifact of chunkArtifacts) {
-      if (artifact.chunkSpeakerSignatures) {
-        allSignatures.push(...artifact.chunkSpeakerSignatures);
+    // Try embedding-based reconciliation first (if embeddings are available)
+    let reconciliationMethod: 'embeddings' | 'content' = 'content';
+    let reconciliationResult: any;
+
+    if (hasValidEmbeddings(chunkArtifacts)) {
+      console.log('[ChunkMerge] Using embedding-based speaker reconciliation');
+      reconciliationMethod = 'embeddings';
+
+      try {
+        reconciliationResult = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+        const reconciliationDurationMs = Date.now() - reconciliationStartTime;
+
+        console.log('[ChunkMerge] Embedding reconciliation complete:', {
+          overallConfidence: reconciliationResult.overallConfidence,
+          totalClusters: reconciliationResult.clusterDetails.length,
+          durationMs: reconciliationDurationMs
+        });
+
+        // Check confidence threshold
+        if (reconciliationResult.overallConfidence < EmbeddingReconciliationConfig.CONFIDENCE_THRESHOLD) {
+          throw new ReconciliationLowConfidenceError(
+            `Embedding reconciliation confidence ${reconciliationResult.overallConfidence.toFixed(3)} below threshold ${EmbeddingReconciliationConfig.CONFIDENCE_THRESHOLD}`,
+            reconciliationResult.overallConfidence,
+            reconciliationResult.clusterDetails
+          );
+        }
+      } catch (error) {
+        // If embedding reconciliation fails, fall back to content-based
+        if (error instanceof ReconciliationLowConfidenceError) {
+          throw error; // Re-throw to trigger sequential fallback
+        }
+        console.warn('[ChunkMerge] Embedding reconciliation failed, falling back to content-based:', error);
+        reconciliationMethod = 'content';
+        reconciliationResult = null;
       }
     }
 
-    console.log('[ChunkMerge] Collected speaker signatures:', {
-      totalSignatures: allSignatures.length,
-      chunks: new Set(allSignatures.map(s => s.chunkIndex)).size
-    });
+    // Fall back to content-based reconciliation if needed
+    if (!reconciliationResult || reconciliationMethod === 'content') {
+      console.log('[ChunkMerge] Using content-based speaker reconciliation (fallback or no embeddings)');
+
+      // Collect all speaker signatures from chunks
+      const allSignatures: SpeakerSignature[] = [];
+      for (const artifact of chunkArtifacts) {
+        if (artifact.chunkSpeakerSignatures) {
+          allSignatures.push(...artifact.chunkSpeakerSignatures);
+        }
+      }
+
+      console.log('[ChunkMerge] Collected speaker signatures:', {
+        totalSignatures: allSignatures.length,
+        chunks: new Set(allSignatures.map(s => s.chunkIndex)).size
+      });
+
+      reconciliationResult = reconcileSpeakers(allSignatures);
+    }
 
     try {
-      const reconciliationResult = reconcileSpeakers(allSignatures);
+      const reconciliationDurationMs = Date.now() - reconciliationStartTime;
 
       // Store reconciliation metadata
       reconciliationConfidence = reconciliationResult.overallConfidence;
+
+      // Calculate original speaker count based on method
+      const originalSpeakerCount = reconciliationMethod === 'embeddings'
+        ? reconciliationResult.clusterDetails.reduce((sum: number, c: any) => sum + c.originalIds.length, 0)
+        : reconciliationResult.clusterDetails.reduce((sum: number, c: any) => sum + c.originalIds.length, 0);
+
       reconciliationDetails = {
         clusterCount: reconciliationResult.clusterDetails.length,
-        originalSpeakerCount: allSignatures.length,
-        clusters: reconciliationResult.clusterDetails.map(c => ({
+        originalSpeakerCount,
+        clusters: reconciliationResult.clusterDetails.map((c: any) => ({
           canonicalId: c.canonicalId,
           originalIds: c.originalIds,
           confidence: c.confidence,
@@ -157,27 +459,124 @@ export async function mergeChunks(conversationId: string): Promise<void> {
         }))
       };
 
+      // Build extended reconciliation metadata for observability
+      reconciliationMetadata = {
+        signalsUsed: reconciliationMethod === 'embeddings'
+          ? ['embeddings']  // Voice embeddings only
+          : ['name', 'topic', 'term'],  // Content-based signals
+        fallbackTriggered: false,
+        speakerMatchConfidences: reconciliationResult.clusterDetails.map((c: any) => ({
+          canonicalId: c.canonicalId,
+          confidence: c.confidence
+        })),
+        reconciliationDurationMs
+      };
+
+      // Log which reconciliation method was used
+      console.log('[ChunkMerge] Reconciliation method:', {
+        method: reconciliationMethod,
+        signalsUsed: reconciliationMetadata.signalsUsed
+      });
+
+      // Check confidence threshold - throw exception if below threshold
+      // The catch block handles fallback to sequential processing
+      if (reconciliationConfidence !== undefined && reconciliationConfidence < ReconciliationConfig.CONFIDENCE_THRESHOLD) {
+        throw new ReconciliationLowConfidenceError(
+          `Speaker reconciliation confidence ${reconciliationConfidence.toFixed(3)} below threshold ${ReconciliationConfig.CONFIDENCE_THRESHOLD}`,
+          reconciliationConfidence,
+          reconciliationResult.clusterDetails
+        );
+      }
+
       // Build remapping table
       for (const [originalId, canonicalId] of reconciliationResult.speakerIdMap) {
         speakerIdRemapping.set(originalId, canonicalId);
       }
 
+      // Log successful reconciliation (with type guard)
+      if (reconciliationConfidence !== undefined && reconciliationDetails && reconciliationMetadata) {
+        logReconciliationCompleted(
+          conversationId,
+          reconciliationConfidence,
+          reconciliationDetails.clusterCount,
+          reconciliationMetadata.signalsUsed,
+          reconciliationDurationMs,
+          'parallel'
+        );
+      }
+
       console.log('[ChunkMerge] Speaker reconciliation complete:', {
         overallConfidence: reconciliationConfidence,
         totalClusters: reconciliationDetails.clusterCount,
-        totalOriginalSpeakers: reconciliationDetails.originalSpeakerCount
+        totalOriginalSpeakers: reconciliationDetails.originalSpeakerCount,
+        durationMs: reconciliationDurationMs
       });
 
     } catch (error) {
+      // Handle low-confidence reconciliation by triggering fallback to sequential
       if (error instanceof ReconciliationLowConfidenceError) {
-        // Low confidence reconciliation - throw error to fail merge
-        console.error('[ChunkMerge] ❌ Speaker reconciliation confidence too low:', {
+        console.warn('[ChunkMerge] ⚠️ Speaker reconciliation confidence below threshold:', {
           confidence: error.overallConfidence,
+          threshold: ReconciliationConfig.CONFIDENCE_THRESHOLD,
           clusterCount: error.clusterDetails.length
         });
-        throw error;
+
+        // Calculate how long the parallel attempt took
+        const parallelDurationMs = Date.now() - mergeStartTime;
+        const reconciliationDurationMs = Date.now() - reconciliationStartTime;
+
+        // Build reconciliation metadata for observability
+        const fallbackReconciliationMetadata: ReconciliationMetadata = {
+          signalsUsed: ['name', 'topic', 'term'],
+          fallbackTriggered: true,
+          speakerMatchConfidences: error.clusterDetails.map(c => ({
+            canonicalId: c.canonicalId,
+            confidence: c.confidence
+          })),
+          reconciliationDurationMs
+        };
+
+        // Persist reconciliation metadata on fallback for observability
+        await db.collection('conversations').doc(conversationId).update({
+          reconciliationMetadata: fallbackReconciliationMetadata,
+          reconciliationConfidence: error.overallConfidence,
+          reconciliationDetails: {
+            clusterCount: error.clusterDetails.length,
+            originalSpeakerCount: error.clusterDetails.reduce(
+              (sum, c) => sum + c.originalIds.length, 0
+            ),
+            clusters: error.clusterDetails.map(c => ({
+              canonicalId: c.canonicalId,
+              originalIds: c.originalIds,
+              confidence: c.confidence,
+              displayName: c.displayName,
+              matchEvidence: c.matchEvidence
+            }))
+          }
+        });
+
+        // Handle fallback - archive chunks, update status, enqueue sequential
+        await handleLowConfidenceFallback(
+          conversationId,
+          error.overallConfidence,
+          chunksSnap,
+          chunkingMeta.originalStoragePath,
+          parallelDurationMs,
+          reconciliationDurationMs
+        );
+
+        // Return successfully - fallback has been initiated, merge is not needed
+        return;
       }
-      // Re-throw other errors
+
+      // Log other reconciliation errors
+      logReconciliationFailed(
+        conversationId,
+        error instanceof Error ? error.message : 'Unknown error',
+        'parallel'
+      );
+
+      // Re-throw non-low-confidence errors
       throw error;
     }
   } else {
@@ -232,8 +631,9 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     }
   }
 
-  // Sort segments by index to ensure correct order
-  mergedSegments.sort((a, b) => a.index - b.index);
+  // Sort segments by timestamp to ensure chronological order
+  // (index is chunk-local and can't be used for cross-chunk ordering)
+  mergedSegments.sort((a, b) => a.startMs - b.startMs);
 
   // Reindex segments to be sequential (since we may have dropped duplicates)
   mergedSegments.forEach((seg, idx) => {
@@ -353,6 +753,10 @@ export async function mergeChunks(conversationId: string): Promise<void> {
   if (processingMode === 'parallel' && reconciliationConfidence !== undefined) {
     updateData.reconciliationConfidence = reconciliationConfidence;
     updateData.reconciliationDetails = reconciliationDetails;
+    // Add extended observability metadata
+    if (reconciliationMetadata) {
+      updateData.reconciliationMetadata = reconciliationMetadata;
+    }
   }
 
   await conversationRef.update(updateData);
@@ -446,6 +850,292 @@ export const processMerge = onRequest(
       }
 
       // Return 500 so Cloud Tasks will retry
+      res.status(500).send(`Internal Server Error: ${errorMessage}`);
+    }
+  }
+);
+
+// =============================================================================
+// Reprocessing Handler
+// =============================================================================
+
+/**
+ * Payload for the reprocessing task.
+ */
+interface ReprocessingPayload {
+  conversationId: string;
+  userId: string;
+  filePath: string;
+  processingMode: 'sequential';
+  isReprocessing: boolean;
+  fallbackMetadata: FallbackMetadata;
+}
+
+/**
+ * Cloud Tasks HTTP handler for sequential reprocessing after parallel fallback.
+ *
+ * This function is triggered when parallel processing's speaker reconciliation
+ * confidence is too low. It re-runs the chunking and transcription pipeline
+ * in sequential mode for better speaker consistency.
+ *
+ * Flow:
+ * 1. Validate request
+ * 2. Re-trigger chunking with sequential mode
+ * 3. Let the normal chunk processing flow handle the rest
+ * 4. Merge will complete with sequential speaker IDs (no reconciliation needed)
+ */
+export const processReprocessing = onRequest(
+  {
+    memory: '512MiB',
+    timeoutSeconds: 600, // 10 minutes (mostly enqueuing, not processing)
+    region: 'us-central1',
+    invoker: 'private' // Only Cloud Tasks can call this
+  },
+  async (req, res) => {
+    // Validate Cloud Tasks header
+    const taskName = req.headers['x-cloudtasks-taskname'];
+    if (!taskName && process.env.K_SERVICE) {
+      console.error('[ProcessReprocessing] Forbidden: Direct invocation not allowed');
+      res.status(403).send('Forbidden: Direct invocation not allowed');
+      return;
+    }
+
+    console.log('[ProcessReprocessing] Task started:', {
+      taskName,
+      timestamp: new Date().toISOString()
+    });
+
+    // Parse request payload
+    let payload: ReprocessingPayload;
+    try {
+      payload = req.body as ReprocessingPayload;
+
+      if (!payload.conversationId || !payload.userId || !payload.filePath) {
+        throw new Error('Missing required fields: conversationId, userId, or filePath');
+      }
+
+      console.log('[ProcessReprocessing] Reprocessing request:', {
+        conversationId: payload.conversationId,
+        userId: payload.userId,
+        filePath: payload.filePath,
+        processingMode: payload.processingMode
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Invalid request payload';
+      console.error('[ProcessReprocessing] Invalid payload:', errorMessage);
+      res.status(400).send(`Bad Request: ${errorMessage}`);
+      return;
+    }
+
+    const { conversationId, userId, filePath, fallbackMetadata } = payload;
+
+    try {
+      // Import chunking module dynamically
+      const { chunkAudioFile, CHUNK_CONFIG } = await import('./chunking');
+      const { getStorage } = await import('firebase-admin/storage');
+
+      // Download the original audio file
+      console.log('[ProcessReprocessing] Downloading original audio:', { filePath });
+      const bucket = getStorage().bucket();
+      const tempFilePath = `/tmp/${conversationId}_reprocess.mp3`;
+      await bucket.file(filePath).download({ destination: tempFilePath });
+
+      // Get file duration and perform chunking
+      const { spawn } = await import('child_process');
+      const ffmpegInstaller = await import('@ffmpeg-installer/ffmpeg');
+
+      // Get audio duration using ffprobe
+      const getDuration = (): Promise<number> => {
+        return new Promise((resolve, reject) => {
+          const ffprobe = spawn(ffmpegInstaller.default.path.replace('ffmpeg', 'ffprobe'), [
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_format',
+            tempFilePath
+          ]);
+
+          let output = '';
+          ffprobe.stdout.on('data', (data) => { output += data.toString(); });
+          ffprobe.on('close', (code) => {
+            if (code !== 0) {
+              reject(new Error(`ffprobe exited with code ${code}`));
+              return;
+            }
+            try {
+              const metadata = JSON.parse(output);
+              resolve(parseFloat(metadata.format.duration) * 1000); // Convert to ms
+            } catch (e) {
+              reject(new Error('Failed to parse audio duration'));
+            }
+          });
+        });
+      };
+
+      const durationMs = await getDuration();
+      console.log('[ProcessReprocessing] Audio duration:', { durationMs, filePath });
+
+      // Check if chunking is needed
+      const needsChunking = durationMs > CHUNK_CONFIG.CHUNKING_THRESHOLD_SECONDS * 1000;
+
+      if (needsChunking) {
+        // Chunk the file with sequential mode
+        console.log('[ProcessReprocessing] Chunking file for sequential reprocessing...');
+        const { result: chunkingResult, localChunkPaths } = await chunkAudioFile(
+          tempFilePath,
+          filePath
+        );
+
+        // Upload chunks to Storage
+        const { getStorage } = await import('firebase-admin/storage');
+        const storageBucket = getStorage().bucket();
+
+        for (let i = 0; i < localChunkPaths.length; i++) {
+          const localPath = localChunkPaths[i];
+          const chunkStoragePath = `audio/${userId}/${conversationId}/chunks/chunk_${i}.mp3`;
+          await storageBucket.upload(localPath, {
+            destination: chunkStoragePath,
+            metadata: { contentType: 'audio/mpeg' }
+          });
+          // Update the chunk metadata with the storage path
+          chunkingResult.chunks[i].chunkStoragePath = chunkStoragePath;
+        }
+
+        // Update conversation with new chunking metadata
+        await db.collection('conversations').doc(conversationId).update({
+          'chunkingMetadata.chunkingEnabled': true,
+          'chunkingMetadata.totalChunks': chunkingResult.chunks.length,
+          'chunkingMetadata.chunkedAt': new Date().toISOString(),
+          processingMode: 'sequential',
+          updatedAt: FieldValue.serverTimestamp()
+        });
+
+        // Enqueue chunk processing tasks in sequential mode
+        const { CloudTasksClient } = await import('@google-cloud/tasks');
+        const tasksClient = new CloudTasksClient();
+
+        const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+        const location = 'us-central1';
+        const queue = 'transcription-queue';
+        const parent = tasksClient.queuePath(project!, location, queue);
+        const processTranscriptionUrl = `https://${location}-${project}.cloudfunctions.net/processTranscription`;
+
+        // Enqueue all chunks with sequential mode
+        for (const chunk of chunkingResult.chunks) {
+          const chunkPayload = {
+            conversationId,
+            userId,
+            filePath: chunk.chunkStoragePath,
+            processingMode: 'sequential',
+            chunkIndex: chunk.chunkIndex,
+            totalChunks: chunk.totalChunks,
+            chunkMetadata: chunk,
+            chunkStartMs: chunk.startMs,
+            chunkEndMs: chunk.endMs,
+            overlapBeforeMs: chunk.overlapBeforeMs,
+            overlapAfterMs: chunk.overlapAfterMs
+          };
+
+          const task = {
+            httpRequest: {
+              httpMethod: 'POST' as const,
+              url: processTranscriptionUrl,
+              headers: { 'Content-Type': 'application/json' },
+              body: Buffer.from(JSON.stringify(chunkPayload)).toString('base64'),
+              oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
+            },
+            scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 + (chunk.chunkIndex * 2) },
+            dispatchDeadline: { seconds: 3600 }
+          };
+
+          await tasksClient.createTask({ parent, task });
+          console.log('[ProcessReprocessing] Enqueued chunk task:', {
+            chunkIndex: chunk.chunkIndex,
+            totalChunks: chunk.totalChunks
+          });
+        }
+
+        // Clean up local chunk files
+        for (const localPath of localChunkPaths) {
+          try {
+            const fsModule = await import('fs');
+            fsModule.unlinkSync(localPath);
+          } catch {
+            // Ignore cleanup errors
+          }
+        }
+
+        console.log('[ProcessReprocessing] ✅ Sequential reprocessing initiated:', {
+          conversationId,
+          totalChunks: chunkingResult.chunks.length,
+          parallelConfidence: fallbackMetadata.parallelConfidence
+        });
+
+      } else {
+        // File is small enough to process without chunking
+        // Enqueue single transcription task
+        console.log('[ProcessReprocessing] File small enough for single task');
+
+        const { CloudTasksClient } = await import('@google-cloud/tasks');
+        const tasksClient = new CloudTasksClient();
+
+        const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+        const location = 'us-central1';
+        const queue = 'transcription-queue';
+        const parent = tasksClient.queuePath(project!, location, queue);
+        const processTranscriptionUrl = `https://${location}-${project}.cloudfunctions.net/processTranscription`;
+
+        const taskPayload = {
+          conversationId,
+          userId,
+          filePath,
+          processingMode: 'sequential'
+        };
+
+        const task = {
+          httpRequest: {
+            httpMethod: 'POST' as const,
+            url: processTranscriptionUrl,
+            headers: { 'Content-Type': 'application/json' },
+            body: Buffer.from(JSON.stringify(taskPayload)).toString('base64'),
+            oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
+          },
+          scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 },
+          dispatchDeadline: { seconds: 3600 }
+        };
+
+        await tasksClient.createTask({ parent, task });
+      }
+
+      // Clean up temp file
+      try {
+        const fs = await import('fs');
+        fs.unlinkSync(tempFilePath);
+      } catch {
+        // Ignore cleanup errors
+      }
+
+      res.status(200).send('OK');
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      console.error('[ProcessReprocessing] ❌ Reprocessing failed:', {
+        conversationId,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+
+      // Update Firestore to mark reprocessing failed
+      try {
+        await db.collection('conversations').doc(conversationId).update({
+          status: 'failed',
+          processingError: `Reprocessing failed: ${errorMessage}`,
+          updatedAt: FieldValue.serverTimestamp()
+        });
+      } catch (updateError) {
+        console.error('[ProcessReprocessing] Failed to update Firestore status:', updateError);
+      }
+
       res.status(500).send(`Internal Server Error: ${errorMessage}`);
     }
   }
