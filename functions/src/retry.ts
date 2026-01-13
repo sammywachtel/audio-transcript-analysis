@@ -148,11 +148,14 @@ export const retryTranscription = onCall<RetryTranscriptionRequest>(
         return chunk;
       });
 
-      // Update conversation: reset to chunking status, clear errors
+      // Update conversation: reset to chunking status, clear errors and stale progress
       // Increment taskGeneration to invalidate any stale Cloud Tasks from previous attempts
+      // Clear processingProgress and processingTimeline to avoid showing stale data from failed attempt
       await conversationRef.update({
         status: 'chunking',
         processingError: FieldValue.delete(),
+        processingProgress: FieldValue.delete(),
+        processingTimeline: FieldValue.delete(),
         abortRequested: FieldValue.delete(),
         retryCount: FieldValue.increment(1),
         taskGeneration: FieldValue.increment(1), // Invalidate stale tasks

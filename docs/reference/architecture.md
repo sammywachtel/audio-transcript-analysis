@@ -317,6 +317,19 @@ The system provides full job control capabilities allowing users to cancel activ
 - `retryCount` (number): Number of retry attempts (max 3)
 - `lastFailedAt` (ISO timestamp): When the job last failed
 - `lastRetryAt` (ISO timestamp): When retry was last initiated
+- `taskGeneration` (number): Counter incremented on each retry to invalidate stale Cloud Tasks
+
+**Stale Task Detection:**
+
+When a job fails and is retried, orphaned Cloud Tasks from the previous attempt may still be in-flight. Without mitigation, these stale tasks can corrupt the retry by updating progress or status with outdated values.
+
+The `taskGeneration` field solves this:
+1. Each new job starts with `taskGeneration: 1`
+2. Cloud Task payloads include the current `taskGeneration`
+3. On retry, `taskGeneration` is incremented in Firestore
+4. When a task runs, it compares `payload.taskGeneration` vs Firestore's `taskGeneration`
+5. If payload's generation is lower, the task is stale and returns 200 (complete, no-op)
+6. Default: missing `taskGeneration` in payload defaults to 0, so pre-feature tasks are always stale after any retry
 
 **Implementation Files:**
 - `src/services/firestoreService.ts` - `abortProcessing()` client-side abort request
