@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-01-13
+
+### Fixed
+- **CI Version Detection** - GitHub Actions workflow now fetches git tags for accurate version identification
+  - Added `fetch-depth: 0` and `fetch-tags: true` to checkout step
+  - Deployed functions now correctly report their release tag (e.g., `v2.0.0`) instead of commit hash
+- **Build Number Tracking** - Deployments now include `build/N` tag number for artifact correlation
+  - `processedByBuildNumber` field stored in conversation and chunk documents
+  - Cloud Function logs display build number alongside version
+
 ## [2.0.0] - 2026-01-13
 
 ### Added
