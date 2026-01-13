@@ -42,10 +42,28 @@ jobs:
 
     steps:
       # -----------------------------------------------------------------------
-      # Checkout code
+      # Checkout code with full history for version detection
       # -----------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # Full history for git describe
+          fetch-tags: true  # Fetch all tags for version detection
+
+      # -----------------------------------------------------------------------
+      # Get version info from git tags
+      # -----------------------------------------------------------------------
+      - name: Get version info
+        id: version
+        run: |
+          # Version from release tags (v2.0.3)
+          VERSION=$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || echo "dev")
+          # Build number from build/N tags (monotonically increasing)
+          BUILD_NUM=$(git tag -l "build/*" | sed 's|build/||' | sort -n | tail -1)
+          BUILD_NUM=${BUILD_NUM:-0}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_num=$BUILD_NUM" >> $GITHUB_OUTPUT
+          echo "📦 Version: $VERSION (Build $BUILD_NUM)"
 
       # -----------------------------------------------------------------------
       # Authenticate to Google Cloud using Workload Identity Federation
@@ -80,7 +98,7 @@ jobs:
         run: |
           gcloud builds submit \
             --config=cloudbuild.yaml \
-            --substitutions="_IMAGE_NAME=gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.FRONTEND_SERVICE }},_TAG=${{ github.sha }},_VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }},_VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }},_VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }},_VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }},_VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }},_VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}" \
+            --substitutions="_IMAGE_NAME=gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.FRONTEND_SERVICE }},_TAG=${{ github.sha }},_APP_VERSION=${{ steps.version.outputs.version }},_BUILD_NUM=${{ steps.version.outputs.build_num }},_VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }},_VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }},_VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }},_VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }},_VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }},_VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}" \
             --quiet
 
       # -----------------------------------------------------------------------

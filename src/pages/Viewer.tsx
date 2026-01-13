@@ -15,7 +15,7 @@ import { AudioPlayer } from '../components/viewer/AudioPlayer';
 import { RenameSpeakerModal } from '../components/viewer/RenameSpeakerModal';
 import { EditTitleModal } from '../components/viewer/EditTitleModal';
 import { KeyboardShortcutsModal } from '../components/viewer/KeyboardShortcutsModal';
-import { HelpCircle, X, PanelRight } from 'lucide-react';
+import { HelpCircle, X, PanelRight, AlertTriangle } from 'lucide-react';
 
 interface ViewerProps {
   onBack: () => void;
@@ -52,6 +52,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  const [warningBannerDismissed, setWarningBannerDismissed] = useState(false);
 
   // Fetch audio URL from Firebase Storage on mount
   // The URL is generated on-demand because Storage download URLs expire
@@ -317,6 +318,37 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
         alignmentStatus={conversation.alignmentStatus}
         alignmentError={conversation.alignmentError}
       />
+
+      {/* Quality Warnings Banner */}
+      {conversation.warnings && conversation.warnings.length > 0 && !warningBannerDismissed && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-3">
+          <div className="max-w-5xl mx-auto flex items-start gap-3">
+            <AlertTriangle size={18} className="text-amber-600 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-amber-800">
+                Quality Notice
+              </p>
+              <div className="text-sm text-amber-700 mt-1 space-y-1">
+                {conversation.warnings.map((warning, idx) => (
+                  <p key={warning.warningId || idx}>
+                    {warning.message}
+                    {warning.details && (
+                      <span className="text-amber-600"> {warning.details}</span>
+                    )}
+                  </p>
+                ))}
+              </div>
+            </div>
+            <button
+              onClick={() => setWarningBannerDismissed(true)}
+              className="p-1 text-amber-600 hover:text-amber-800 hover:bg-amber-100 rounded transition-colors shrink-0"
+              aria-label="Dismiss warning"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* First-time keyboard shortcuts tooltip */}
       {showFirstTimeTooltip && (

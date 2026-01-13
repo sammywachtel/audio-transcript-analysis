@@ -25,11 +25,12 @@ import {
   SpeakerSignature,
   ReconciliationDetails,
   ReconciliationMetadata,
-  FallbackMetadata
+  FallbackMetadata,
+  TranscriptWarning
 } from './types';
 import { getPreferredChunkForTimestamp, chunkToOriginalTimestamp } from './chunkBounds';
 import { ChunkMetadata } from './chunking';
-import { reconcileSpeakers, ReconciliationLowConfidenceError } from './speakerReconciliation';
+import { reconcileSpeakers } from './speakerReconciliation';
 import {
   reconcileSpeakersWithEmbeddings,
   hasValidEmbeddings,
@@ -39,11 +40,37 @@ import { ReconciliationConfig } from './config/reconciliation';
 import {
   logReconciliationStarted,
   logReconciliationCompleted,
-  logFallbackTriggered,
-  logReconciliationFailed
+  logFallbackTriggered
 } from './logging/reconciliation';
 import { BUILD_VERSION, BUILD_NUMBER } from './version';
 import { checkAbort, AbortRequestedError } from './transcribe';
+import { randomBytes } from 'crypto';
+
+/**
+ * Generate a unique warning ID
+ */
+function generateWarningId(): string {
+  return `warn_${randomBytes(6).toString('hex')}`;
+}
+
+/**
+ * Create a speaker confidence warning for low-confidence reconciliation
+ */
+function createSpeakerConfidenceWarning(
+  confidence: number,
+  threshold: number,
+  speakerCount: number,
+  details?: string
+): TranscriptWarning {
+  return {
+    warningId: generateWarningId(),
+    category: 'speaker_confidence',
+    message: `Speaker identification may be unreliable. Voice matching confidence was ${(confidence * 100).toFixed(0)}% (threshold: ${(threshold * 100).toFixed(0)}%).`,
+    details: details || `${speakerCount} speakers detected. Some speakers may be mislabeled or merged incorrectly.`,
+    severity: confidence < 0.4 ? 'warning' : 'info',
+    createdAt: new Date().toISOString()
+  };
+}
 
 // =============================================================================
 // Fallback Handling Helpers
@@ -196,7 +223,8 @@ async function enqueueSequentialReprocessing(
  * @param parallelDurationMs - How long the parallel attempt took
  * @param reconciliationDurationMs - How long the reconciliation computation took
  */
-async function handleLowConfidenceFallback(
+// Exported for potential future manual reprocessing feature
+export async function handleLowConfidenceFallback(
   conversationId: string,
   confidence: number,
   chunksSnap: FirebaseFirestore.QuerySnapshot,
@@ -313,9 +341,6 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     return;
   }
 
-  // Track merge start time for duration calculation
-  const mergeStartTime = Date.now();
-
   // Mark merge as started
   await conversationRef.update({
     'chunkingMetadata.mergeStartedAt': new Date().toISOString(),
@@ -378,79 +403,136 @@ export async function mergeChunks(conversationId: string): Promise<void> {
   let reconciliationMetadata: ReconciliationMetadata | undefined;
   const reconciliationStartTime = Date.now();
 
+  // Track warnings to add to the conversation
+  const warnings: TranscriptWarning[] = [];
+
   if (processingMode === 'parallel') {
-    // Log reconciliation start for observability
-    logReconciliationStarted(conversationId, chunkArtifacts.length, 'parallel');
+    // ==========================================================================
+    // SINGLE-CHUNK BYPASS: Skip reconciliation for single-chunk files
+    // ==========================================================================
+    // When there's only one chunk, there's nothing to reconcile - each speaker
+    // forms a singleton cluster with meaningless 0.5 confidence. Just use
+    // the speakers directly from the chunk.
+    if (chunkArtifacts.length === 1) {
+      console.log('[ChunkMerge] Single-chunk file - skipping speaker reconciliation (nothing to reconcile)');
 
-    console.log('[ChunkMerge] Running speaker reconciliation (parallel mode)...');
-
-    // Try embedding-based reconciliation first (if embeddings are available)
-    let reconciliationMethod: 'embeddings' | 'content' = 'content';
-    let reconciliationResult: any;
-
-    if (hasValidEmbeddings(chunkArtifacts)) {
-      console.log('[ChunkMerge] Using embedding-based speaker reconciliation');
-      reconciliationMethod = 'embeddings';
-
-      try {
-        reconciliationResult = reconcileSpeakersWithEmbeddings(chunkArtifacts);
-        const reconciliationDurationMs = Date.now() - reconciliationStartTime;
-
-        console.log('[ChunkMerge] Embedding reconciliation complete:', {
-          overallConfidence: reconciliationResult.overallConfidence,
-          totalClusters: reconciliationResult.clusterDetails.length,
-          durationMs: reconciliationDurationMs
-        });
-
-        // Check confidence threshold
-        if (reconciliationResult.overallConfidence < EmbeddingReconciliationConfig.CONFIDENCE_THRESHOLD) {
-          throw new ReconciliationLowConfidenceError(
-            `Embedding reconciliation confidence ${reconciliationResult.overallConfidence.toFixed(3)} below threshold ${EmbeddingReconciliationConfig.CONFIDENCE_THRESHOLD}`,
-            reconciliationResult.overallConfidence,
-            reconciliationResult.clusterDetails
-          );
-        }
-      } catch (error) {
-        // If embedding reconciliation fails, fall back to content-based
-        if (error instanceof ReconciliationLowConfidenceError) {
-          throw error; // Re-throw to trigger sequential fallback
-        }
-        console.warn('[ChunkMerge] Embedding reconciliation failed, falling back to content-based:', error);
-        reconciliationMethod = 'content';
-        reconciliationResult = null;
-      }
-    }
-
-    // Fall back to content-based reconciliation if needed
-    if (!reconciliationResult || reconciliationMethod === 'content') {
-      console.log('[ChunkMerge] Using content-based speaker reconciliation (fallback or no embeddings)');
-
-      // Collect all speaker signatures from chunks
-      const allSignatures: SpeakerSignature[] = [];
-      for (const artifact of chunkArtifacts) {
-        if (artifact.chunkSpeakerSignatures) {
-          allSignatures.push(...artifact.chunkSpeakerSignatures);
-        }
+      // Build identity mapping - speakers keep their original IDs
+      const singleChunk = chunkArtifacts[0];
+      for (const speakerId of Object.keys(singleChunk.speakers)) {
+        const canonicalId = `${speakerId}_chunk0`;
+        speakerIdRemapping.set(canonicalId, speakerId);
       }
 
-      console.log('[ChunkMerge] Collected speaker signatures:', {
-        totalSignatures: allSignatures.length,
-        chunks: new Set(allSignatures.map(s => s.chunkIndex)).size
+      // Set reconciliation metadata for observability
+      reconciliationConfidence = 1.0; // Perfect confidence - no cross-chunk matching needed
+      reconciliationDetails = {
+        clusterCount: Object.keys(singleChunk.speakers).length,
+        originalSpeakerCount: Object.keys(singleChunk.speakers).length,
+        clusters: Object.keys(singleChunk.speakers).map(speakerId => ({
+          canonicalId: speakerId,
+          originalIds: [`${speakerId}_chunk0`],
+          confidence: 1.0,
+          displayName: singleChunk.speakers[speakerId].displayName,
+          matchEvidence: { nameMatches: 0, topicOverlap: 0, termOverlap: 0 }
+        }))
+      };
+      reconciliationMetadata = {
+        signalsUsed: ['single_chunk_bypass'],
+        fallbackTriggered: false,
+        speakerMatchConfidences: Object.keys(singleChunk.speakers).map(speakerId => ({
+          canonicalId: speakerId,
+          confidence: 1.0
+        })),
+        reconciliationDurationMs: 0
+      };
+
+      console.log('[ChunkMerge] Single-chunk bypass complete:', {
+        speakerCount: Object.keys(singleChunk.speakers).length,
+        speakers: Object.keys(singleChunk.speakers)
       });
 
-      reconciliationResult = reconcileSpeakers(allSignatures);
-    }
+    } else {
+      // ==========================================================================
+      // MULTI-CHUNK RECONCILIATION: Normal flow with graceful degradation
+      // ==========================================================================
+      // Log reconciliation start for observability
+      logReconciliationStarted(conversationId, chunkArtifacts.length, 'parallel');
 
-    try {
+      console.log('[ChunkMerge] Running speaker reconciliation (parallel mode)...');
+
+      // Try embedding-based reconciliation first (if embeddings are available)
+      let reconciliationMethod: 'embeddings' | 'content' = 'content';
+      let reconciliationResult: any;
+      let lowConfidenceWarningNeeded = false;
+
+      if (hasValidEmbeddings(chunkArtifacts)) {
+        console.log('[ChunkMerge] Using embedding-based speaker reconciliation');
+        reconciliationMethod = 'embeddings';
+
+        try {
+          reconciliationResult = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+          const reconciliationDurationMs = Date.now() - reconciliationStartTime;
+
+          console.log('[ChunkMerge] Embedding reconciliation complete:', {
+            overallConfidence: reconciliationResult.overallConfidence,
+            totalClusters: reconciliationResult.clusterDetails.length,
+            durationMs: reconciliationDurationMs
+          });
+
+          // Check confidence threshold - but don't throw, just flag for warning
+          if (reconciliationResult.overallConfidence < EmbeddingReconciliationConfig.CONFIDENCE_THRESHOLD) {
+            console.warn('[ChunkMerge] ⚠️ Low embedding reconciliation confidence - proceeding with warning:', {
+              confidence: reconciliationResult.overallConfidence,
+              threshold: EmbeddingReconciliationConfig.CONFIDENCE_THRESHOLD
+            });
+            lowConfidenceWarningNeeded = true;
+          }
+        } catch (error) {
+          // If embedding reconciliation fails completely, fall back to content-based
+          console.warn('[ChunkMerge] Embedding reconciliation failed, falling back to content-based:', error);
+          reconciliationMethod = 'content';
+          reconciliationResult = null;
+        }
+      }
+
+      // Fall back to content-based reconciliation if needed
+      if (!reconciliationResult || reconciliationMethod === 'content') {
+        console.log('[ChunkMerge] Using content-based speaker reconciliation (fallback or no embeddings)');
+
+        // Collect all speaker signatures from chunks
+        const allSignatures: SpeakerSignature[] = [];
+        for (const artifact of chunkArtifacts) {
+          if (artifact.chunkSpeakerSignatures) {
+            allSignatures.push(...artifact.chunkSpeakerSignatures);
+          }
+        }
+
+        console.log('[ChunkMerge] Collected speaker signatures:', {
+          totalSignatures: allSignatures.length,
+          chunks: new Set(allSignatures.map(s => s.chunkIndex)).size
+        });
+
+        reconciliationResult = reconcileSpeakers(allSignatures);
+
+        // Check content-based confidence threshold too
+        if (reconciliationResult.overallConfidence < ReconciliationConfig.CONFIDENCE_THRESHOLD) {
+          console.warn('[ChunkMerge] ⚠️ Low content-based reconciliation confidence - proceeding with warning:', {
+            confidence: reconciliationResult.overallConfidence,
+            threshold: ReconciliationConfig.CONFIDENCE_THRESHOLD
+          });
+          lowConfidenceWarningNeeded = true;
+        }
+      }
+
       const reconciliationDurationMs = Date.now() - reconciliationStartTime;
 
       // Store reconciliation metadata
       reconciliationConfidence = reconciliationResult.overallConfidence;
 
-      // Calculate original speaker count based on method
-      const originalSpeakerCount = reconciliationMethod === 'embeddings'
-        ? reconciliationResult.clusterDetails.reduce((sum: number, c: any) => sum + c.originalIds.length, 0)
-        : reconciliationResult.clusterDetails.reduce((sum: number, c: any) => sum + c.originalIds.length, 0);
+      // Calculate original speaker count
+      const originalSpeakerCount = reconciliationResult.clusterDetails.reduce(
+        (sum: number, c: any) => sum + c.originalIds.length, 0
+      );
 
       reconciliationDetails = {
         clusterCount: reconciliationResult.clusterDetails.length,
@@ -467,8 +549,8 @@ export async function mergeChunks(conversationId: string): Promise<void> {
       // Build extended reconciliation metadata for observability
       reconciliationMetadata = {
         signalsUsed: reconciliationMethod === 'embeddings'
-          ? ['embeddings']  // Voice embeddings only
-          : ['name', 'topic', 'term'],  // Content-based signals
+          ? ['embeddings']
+          : ['name', 'topic', 'term'],
         fallbackTriggered: false,
         speakerMatchConfidences: reconciliationResult.clusterDetails.map((c: any) => ({
           canonicalId: c.canonicalId,
@@ -483,14 +565,30 @@ export async function mergeChunks(conversationId: string): Promise<void> {
         signalsUsed: reconciliationMetadata.signalsUsed
       });
 
-      // Check confidence threshold - throw exception if below threshold
-      // The catch block handles fallback to sequential processing
-      if (reconciliationConfidence !== undefined && reconciliationConfidence < ReconciliationConfig.CONFIDENCE_THRESHOLD) {
-        throw new ReconciliationLowConfidenceError(
-          `Speaker reconciliation confidence ${reconciliationConfidence.toFixed(3)} below threshold ${ReconciliationConfig.CONFIDENCE_THRESHOLD}`,
+      // ==========================================================================
+      // GRACEFUL DEGRADATION: Add warning instead of failing
+      // ==========================================================================
+      // Instead of throwing an error and triggering expensive sequential reprocessing,
+      // proceed with the low-confidence result and add a warning to the conversation.
+      // A transcript with potentially misidentified speakers is still vastly more
+      // useful than no transcript at all.
+      if (lowConfidenceWarningNeeded && reconciliationConfidence !== undefined && reconciliationDetails) {
+        const threshold = reconciliationMethod === 'embeddings'
+          ? EmbeddingReconciliationConfig.CONFIDENCE_THRESHOLD
+          : ReconciliationConfig.CONFIDENCE_THRESHOLD;
+
+        warnings.push(createSpeakerConfidenceWarning(
           reconciliationConfidence,
-          reconciliationResult.clusterDetails
-        );
+          threshold,
+          reconciliationDetails.clusterCount,
+          `Voice matching confidence was ${(reconciliationConfidence * 100).toFixed(0)}% across ${chunkArtifacts.length} audio segments. ` +
+          `Some speaker labels may be incorrect. Review speaker labels if accuracy is critical.`
+        ));
+
+        console.log('[ChunkMerge] ⚠️ Proceeding with low-confidence reconciliation (added warning):', {
+          confidence: reconciliationConfidence,
+          warningCount: warnings.length
+        });
       }
 
       // Build remapping table
@@ -498,7 +596,7 @@ export async function mergeChunks(conversationId: string): Promise<void> {
         speakerIdRemapping.set(originalId, canonicalId);
       }
 
-      // Log successful reconciliation (with type guard)
+      // Log successful reconciliation
       if (reconciliationConfidence !== undefined && reconciliationDetails && reconciliationMetadata) {
         logReconciliationCompleted(
           conversationId,
@@ -514,75 +612,9 @@ export async function mergeChunks(conversationId: string): Promise<void> {
         overallConfidence: reconciliationConfidence,
         totalClusters: reconciliationDetails.clusterCount,
         totalOriginalSpeakers: reconciliationDetails.originalSpeakerCount,
-        durationMs: reconciliationDurationMs
+        durationMs: reconciliationDurationMs,
+        hasWarnings: warnings.length > 0
       });
-
-    } catch (error) {
-      // Handle low-confidence reconciliation by triggering fallback to sequential
-      if (error instanceof ReconciliationLowConfidenceError) {
-        console.warn('[ChunkMerge] ⚠️ Speaker reconciliation confidence below threshold:', {
-          confidence: error.overallConfidence,
-          threshold: ReconciliationConfig.CONFIDENCE_THRESHOLD,
-          clusterCount: error.clusterDetails.length
-        });
-
-        // Calculate how long the parallel attempt took
-        const parallelDurationMs = Date.now() - mergeStartTime;
-        const reconciliationDurationMs = Date.now() - reconciliationStartTime;
-
-        // Build reconciliation metadata for observability
-        const fallbackReconciliationMetadata: ReconciliationMetadata = {
-          signalsUsed: ['name', 'topic', 'term'],
-          fallbackTriggered: true,
-          speakerMatchConfidences: error.clusterDetails.map(c => ({
-            canonicalId: c.canonicalId,
-            confidence: c.confidence
-          })),
-          reconciliationDurationMs
-        };
-
-        // Persist reconciliation metadata on fallback for observability
-        await db.collection('conversations').doc(conversationId).update({
-          reconciliationMetadata: fallbackReconciliationMetadata,
-          reconciliationConfidence: error.overallConfidence,
-          reconciliationDetails: {
-            clusterCount: error.clusterDetails.length,
-            originalSpeakerCount: error.clusterDetails.reduce(
-              (sum, c) => sum + c.originalIds.length, 0
-            ),
-            clusters: error.clusterDetails.map(c => ({
-              canonicalId: c.canonicalId,
-              originalIds: c.originalIds,
-              confidence: c.confidence,
-              displayName: c.displayName,
-              matchEvidence: c.matchEvidence
-            }))
-          }
-        });
-
-        // Handle fallback - archive chunks, update status, enqueue sequential
-        await handleLowConfidenceFallback(
-          conversationId,
-          error.overallConfidence,
-          chunksSnap,
-          chunkingMeta.originalStoragePath,
-          parallelDurationMs,
-          reconciliationDurationMs
-        );
-
-        // Return successfully - fallback has been initiated, merge is not needed
-        return;
-      }
-
-      // Log other reconciliation errors
-      logReconciliationFailed(
-        conversationId,
-        error instanceof Error ? error.message : 'Unknown error',
-        'parallel'
-      );
-
-      // Re-throw non-low-confidence errors
-      throw error;
     }
   } else {
     console.log('[ChunkMerge] Skipping speaker reconciliation (sequential mode)');
@@ -820,6 +852,16 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     }
   }
 
+  // Add warnings if any were generated during processing
+  if (warnings.length > 0) {
+    updateData.warnings = warnings;
+    console.log('[ChunkMerge] Adding warnings to conversation:', {
+      conversationId,
+      warningCount: warnings.length,
+      categories: [...new Set(warnings.map(w => w.category))]
+    });
+  }
+
   await conversationRef.update(updateData);
 
   console.log('[ChunkMerge] ✅ Merge complete:', {
@@ -832,7 +874,8 @@ export async function mergeChunks(conversationId: string): Promise<void> {
       topics: mergedTopics.length,
       people: mergedPeople.length
     },
-    durationMs
+    durationMs,
+    hasWarnings: warnings.length > 0
   });
 }
 

@@ -50,6 +50,39 @@ export interface Person {
   userNotes?: string;
 }
 
+/**
+ * Warning categories for transcript quality issues.
+ * Used to surface issues without blocking transcript delivery.
+ */
+export type WarningCategory =
+  | 'speaker_confidence'   // Speaker identification may be unreliable
+  | 'audio_quality'        // Audio quality issues detected
+  | 'alignment_fallback'   // Using fallback timestamps (may be inaccurate)
+  | 'processing_partial';  // Some processing steps were skipped/degraded
+
+/**
+ * Warning about transcript quality.
+ * Stored on conversation to surface issues to users.
+ */
+export interface TranscriptWarning {
+  /** Unique identifier for this warning */
+  warningId: string;
+  /** Category of warning (for filtering/display) */
+  category: WarningCategory;
+  /** User-friendly message explaining the issue */
+  message: string;
+  /** Technical details for debugging (optional) */
+  details?: string;
+  /** Severity level affects UI treatment */
+  severity: 'info' | 'warning' | 'error';
+  /** Optional: segment indices affected (for highlighting) */
+  affectedSegments?: number[];
+  /** Optional: speaker IDs affected */
+  affectedSpeakers?: string[];
+  /** When this warning was generated */
+  createdAt: string;
+}
+
 export interface Segment {
   segmentId: string;
   index: number;
@@ -90,6 +123,8 @@ export interface Conversation {
   reconciliationMetadata?: ReconciliationMetadata;
   // Fallback metadata (when parallel → sequential fallback occurred)
   fallbackMetadata?: FallbackMetadata;
+  // Quality warnings (non-blocking issues surfaced to user)
+  warnings?: TranscriptWarning[];
   // Retry tracking metadata
   retryCount?: number;
   lastFailedAt?: string;

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-01-13
+
+### Fixed
+- **Single-Chunk Audio Processing Failure** - Audio files that don't require chunking (< 30 minutes) no longer fail with false "low confidence" errors
+  - Speaker reconciliation is now skipped for single-chunk files since there's nothing to reconcile across chunks
+  - Previously, these files would get stuck in a retry loop because the confidence calculation was meaningless for single speakers
+- **Graceful Degradation for Low-Confidence Reconciliation** - Multi-chunk files with uncertain speaker matching now complete with warnings instead of failing entirely
+  - A transcript with potentially misidentified speakers is vastly more useful than no transcript at all
+  - Warning banner appears in transcript viewer explaining potential speaker identification issues
+  - Warning badge shown in Library list for affected conversations
+
+### Added
+- **Quality Warning System** - New warning infrastructure to surface processing issues without blocking delivery
+  - `TranscriptWarning` type with categories: `speaker_confidence`, `audio_quality`, `alignment_fallback`, `processing_partial`
+  - Dismissible warning banner in Viewer showing quality notices
+  - Warning count badge in Library conversation list
+
 ## [2.0.3] - 2026-01-13
 
 ### Added
