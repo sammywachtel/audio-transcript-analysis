@@ -12,3 +12,6 @@ node_modules/
 
 # OS files
 .DS_Store
+
+# Auto-generated at build time
+src/version.ts

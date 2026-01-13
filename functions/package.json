@@ -2,6 +2,7 @@
   "name": "audio-transcript-functions",
   "description": "Cloud Functions for Audio Transcript Analysis App",
   "scripts": {
+    "prebuild": "node scripts/generate-version.js",
     "build": "tsc",
     "build:watch": "tsc --watch",
     "serve": "npm run build && firebase emulators:start --only functions",

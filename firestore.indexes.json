@@ -42,6 +42,14 @@
       ]
     },
     {
+      "collectionGroup": "_metrics",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "type", "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "_userEvents",
       "queryScope": "COLLECTION",
       "fields": [

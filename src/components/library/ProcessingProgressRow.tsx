@@ -41,6 +41,8 @@ export const ProcessingProgressRow: React.FC<ProcessingProgressRowProps> = ({
     const labels: Record<ProcessingStep, string> = {
       [ProcessingStep.PENDING]: 'Queued',
       [ProcessingStep.UPLOADING]: 'Uploading',
+      [ProcessingStep.OPTIMIZING]: 'Optimizing Audio',
+      [ProcessingStep.CHUNKING]: 'Splitting Audio',
       [ProcessingStep.PRE_ANALYZING]: 'Pre-analyzing',
       [ProcessingStep.TRANSCRIBING]: 'Transcribing',
       [ProcessingStep.ANALYZING]: 'Analyzing',

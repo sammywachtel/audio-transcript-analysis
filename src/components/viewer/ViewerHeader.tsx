@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowLeft, MoreHorizontal, Download, Share2, RefreshCw, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, MoreHorizontal, Download, Share2, RefreshCw, CheckCircle2, AlertTriangle, Pencil } from 'lucide-react';
 import { Button } from '../Button';
 import { UserMenu } from '../auth/UserMenu';
 
@@ -9,9 +9,11 @@ type ServerAlignmentStatus = 'pending' | 'aligned' | 'fallback';
 interface ViewerHeaderProps {
   title: string;
   createdAt: string;
+  conversationId: string;
   isSyncing: boolean;
   onBack: () => void;
   onStatsClick?: () => void;
+  onEditTitle?: () => void;
   // Drift correction metrics (for legacy display)
   driftCorrectionApplied?: boolean;
   driftRatio?: number;
@@ -30,15 +32,21 @@ interface ViewerHeaderProps {
 export const ViewerHeader: React.FC<ViewerHeaderProps> = ({
   title,
   createdAt,
+  conversationId,
   isSyncing,
   onBack,
   onStatsClick,
+  onEditTitle,
   driftCorrectionApplied,
   driftRatio,
   driftMs,
   alignmentStatus,
   alignmentError
 }) => {
+  // Copy conversation ID to clipboard
+  const copyConversationId = () => {
+    navigator.clipboard.writeText(conversationId);
+  };
   // Format drift info for display (e.g., "+2.3s" or "-1.5s")
   const formatDrift = () => {
     if (!driftMs || !driftRatio) return '';
@@ -80,9 +88,20 @@ export const ViewerHeader: React.FC<ViewerHeaderProps> = ({
         </button>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <h1 className="font-semibold text-slate-800 text-sm md:text-base truncate max-w-[120px] sm:max-w-[200px] md:max-w-md">
-              {title}
-            </h1>
+            <div className="flex items-center gap-1 group">
+              <h1 className="font-semibold text-slate-800 text-sm md:text-base truncate max-w-[120px] sm:max-w-[200px] md:max-w-md">
+                {title}
+              </h1>
+              {onEditTitle && (
+                <button
+                  onClick={onEditTitle}
+                  className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded opacity-0 group-hover:opacity-100 transition-all"
+                  title="Edit title"
+                >
+                  <Pencil size={14} />
+                </button>
+              )}
+            </div>
             {isSyncing && (
               <span className="hidden sm:flex items-center gap-1 text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full animate-pulse">
                 <RefreshCw size={10} className="animate-spin" /> Auto-Syncing
@@ -105,6 +124,13 @@ export const ViewerHeader: React.FC<ViewerHeaderProps> = ({
           <div className="hidden sm:flex items-center gap-2 text-xs text-slate-500">
             <span className="bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full font-medium">Processed</span>
             <span>• {new Date(createdAt).toLocaleDateString()}</span>
+            <button
+              onClick={copyConversationId}
+              className="text-slate-400 hover:text-slate-600 font-mono text-[10px] hover:underline"
+              title="Click to copy conversation ID"
+            >
+              {conversationId.slice(-6)}
+            </button>
           </div>
         </div>
       </div>

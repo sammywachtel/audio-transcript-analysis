@@ -33,10 +33,16 @@ const agent = new Agent({
 
 setGlobalDispatcher(agent);
 
+// Import build version info (generated at build time from git)
+import { BUILD_VERSION, BUILD_BRANCH, IS_DIRTY_BUILD } from './version';
+
 console.log('[Undici] Global dispatcher configured:', {
   headersTimeout: `${UNDICI_HEADERS_TIMEOUT_MS / 60_000} minutes`,
   bodyTimeout: `${UNDICI_BODY_TIMEOUT_MS / 60_000} minutes`,
 });
+
+// Log build version on cold start - helps identify which deployment processed a conversation
+console.log(`[Functions] Build version: ${BUILD_VERSION} (branch: ${BUILD_BRANCH}${IS_DIRTY_BUILD ? ', DIRTY' : ''})`);
 
 // =============================================================================
 

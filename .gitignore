@@ -58,3 +58,4 @@ __pycache__
 CLAUDE.md
 /.local_docs/
 \n# Forked Replicate model (deployed separately)\ncog-whisper-diarization/
+cog-whisper-diarization/
