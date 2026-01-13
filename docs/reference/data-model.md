@@ -965,18 +965,6 @@ interface GeminiResponse {
 }
 ```
 
-### getAudioUrl (HTTPS Callable)
-
-**Request**:
-```typescript
-{ conversationId: string }
-```
-
-**Response**:
-```typescript
-{ url: string }  // Signed URL valid for 1 hour
-```
-
 ### chatWithConversation (HTTPS Callable)
 
 **Request**:

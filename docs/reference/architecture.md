@@ -5,73 +5,74 @@ Technical architecture of the Audio Transcript Analysis App.
 ## System Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         User Browser                            │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    React Application                        ││
-│  │  ┌─────────┐  ┌─────────────────┐  ┌───────────────────┐    ││
-│  │  │  Auth   │  │  Conversation   │  │       Pages       │    ││
-│  │  │ Context │  │    Context      │  │Library/Viewer/Search│   ││
-│  │  └────┬────┘  └────────┬────────┘  └─────────────────┬─┘    ││
-│  │       │                │                              │     ││
-│  │       └────────────────┼──────────────────────────────┘     ││
-│  │                        │                                    ││
-│  │  ┌─────────────────────┴─────────────────────────────────┐  ││
-│  │  │                   Firebase SDK                        │  ││
-│  │  │  Auth │ Firestore (real-time) │ Storage │ Functions   │  ││
-│  │  └───────────────────────────────────────────────────────┘  ││
-│  └─────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              │ HTTPS
-                              ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                        Firebase                                  │
-│                                                                  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐    │
-│  │  Firebase    │  │  Firestore   │  │  Firebase Storage    │    │
-│  │  Auth        │  │  Database    │  │  (Audio Blobs)       │    │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘    │
-│                                              │                   │
-│                                              │ onObjectFinalized │
-│                                              ▼                   │
-│  ┌───────────────────────────────────────────────────────────┐   │
-│  │                   Cloud Functions                         │   │
-│  │                                                           │   │
-│  │  ┌────────────────────┐  ┌────────────────────────┐       │   │
-│  │  │  transcribeAudio   │  │    getAudioUrl         │       │   │
-│  │  │  (Storage trigger) │  │  (HTTPS callable)      │       │   │
-│  │  │  - validates file  │  └────────────────────────┘       │   │
-│  │  │  - enqueues task   │  ┌────────────────────────┐       │   │
-│  │  │  - 540s timeout    │  │ chatWithConversation  │       │   │
-│  │  └─────────┬──────────┘  │  (HTTPS callable)      │       │   │
-│  │            │             └────────────────────────┘       │   │
-│  │            ▼                                              │   │
-│  │  ┌────────────────────┐                                   │   │
-│  │  │ Cloud Tasks Queue  │                                   │   │
-│  │  │ transcription-queue│                                   │   │
-│  │  └─────────┬──────────┘                                   │   │
-│  │            ▼                                              │   │
-│  │  ┌────────────────────────────────────────────────────┐   │   │
-│  │  │  processTranscription (HTTP Function, private)     │   │   │
-│  │  │  - 3600s timeout (60 min for large files)          │   │   │
-│  │  │  - 1GiB memory                                      │   │   │
-│  │  │  ┌──────────────┐                                   │   │   │
-│  │  │  │  alignment   │                                   │   │   │
-│  │  │  │  module      │                                   │   │   │
-│  │  │  └──────────────┘                                   │   │   │
-│  │  └─────────┬──────────────────────────────────────────┘   │   │
-│  │            │                                              │   │
-│  └────────────┼──────────────────────────────────────────────┘   │
-│               │                                                  │
-└───────────────┼──────────────────────────────────────────────────┘
-                │
-        ┌───────┴───────┐
-        ▼               ▼
-┌──────────────┐  ┌──────────────┐
-│  Vertex AI   │  │ Replicate    │
-│  (Gemini)    │  │ (WhisperX)   │
-└──────────────┘  └──────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                          User Browser                             │
+│  ┌──────────────────────────────────────────────────────────────┐ │
+│  │                     React Application                        │ │
+│  │  ┌───────────┐  ┌───────────────────┐  ┌───────────────────┐ │ │
+│  │  │   Auth    │  │   Conversation    │  │      Pages        │ │ │
+│  │  │  Context  │  │     Context       │  │ Library/Viewer/   │ │ │
+│  │  │           │  │                   │  │ Search            │ │ │
+│  │  └─────┬─────┘  └─────────┬─────────┘  └─────────┬─────────┘ │ │
+│  │        │                  │                      │           │ │
+│  │        └──────────────────┼──────────────────────┘           │ │
+│  │                           │                                  │ │
+│  │  ┌────────────────────────┴────────────────────────────────┐ │ │
+│  │  │                    Firebase SDK                         │ │ │
+│  │  │  Auth │ Firestore (real-time) │ Storage │ Functions     │ │ │
+│  │  └─────────────────────────────────────────────────────────┘ │ │
+│  └──────────────────────────────────────────────────────────────┘ │
+└───────────────────────────────────────────────────────────────────┘
+                               │
+                               │ HTTPS
+                               ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                          Firebase                                 │
+│                                                                   │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────────┐   │
+│  │  Firebase      │  │  Firestore     │  │  Firebase Storage  │   │
+│  │  Auth          │  │  Database      │  │  (Audio Blobs)     │   │
+│  └────────────────┘  └────────────────┘  └─────────┬──────────┘   │
+│                                                    │              │
+│                                                    │ onFinalized  │
+│                                                    ▼              │
+│  ┌──────────────────────────────────────────────────────────────┐ │
+│  │                    Cloud Functions                           │ │
+│  │                                                              │ │
+│  │  ┌──────────────────────┐  ┌──────────────────────┐          │ │
+│  │  │  transcribeAudio     │  │  chatWithConversation│          │ │
+│  │  │  (Storage trigger)   │  │  (HTTPS callable)    │          │ │
+│  │  │  - validates file    │  └──────────────────────┘          │ │
+│  │  │  - enqueues task     │  ┌──────────────────────┐          │ │
+│  │  │  - 540s timeout      │  │  retryTranscription  │          │ │
+│  │  └──────────┬───────────┘  │  (HTTPS callable)    │          │ │
+│  │             │              └──────────────────────┘          │ │
+│  │             ▼                                                │ │
+│  │  ┌──────────────────────┐                                    │ │
+│  │  │  Cloud Tasks Queue   │                                    │ │
+│  │  │  transcription-queue │                                    │ │
+│  │  └──────────┬───────────┘                                    │ │
+│  │             ▼                                                │ │
+│  │  ┌─────────────────────────────────────────────────────────┐ │ │
+│  │  │  processTranscription (HTTP Function, private)          │ │ │
+│  │  │  - 3600s timeout (60 min for large files)               │ │ │
+│  │  │  - 2GiB memory                                          │ │ │
+│  │  │  ┌────────────────┐                                     │ │ │
+│  │  │  │  alignment     │                                     │ │ │
+│  │  │  │  module        │                                     │ │ │
+│  │  │  └────────────────┘                                     │ │ │
+│  │  └──────────┬──────────────────────────────────────────────┘ │ │
+│  │             │                                                │ │
+│  └─────────────┼────────────────────────────────────────────────┘ │
+│                │                                                  │
+└────────────────┼──────────────────────────────────────────────────┘
+                 │
+         ┌───────┴───────┐
+         ▼               ▼
+┌────────────────┐  ┌────────────────┐
+│  Vertex AI     │  │  Replicate     │
+│  (Gemini)      │  │  (WhisperX)    │
+└────────────────┘  └────────────────┘
 ```
 
 ## Component Architecture
@@ -248,6 +249,81 @@ audio-transcript-analysis-app/
 - Large audio files (46MB+) need 10-15+ minutes for Gemini + WhisperX processing
 - HTTP functions can have up to 3600s (60-minute) timeout
 - Cloud Tasks handles retries automatically with exponential backoff
+
+### Job Control (Cancel & Retry)
+
+The system provides full job control capabilities allowing users to cancel active jobs and retry failed ones.
+
+**Cancel/Abort Flow:**
+
+```
+1. User clicks "Cancel" on processing job in Library
+        ↓
+2. Frontend calls firestoreService.abortProcessing(conversationId)
+   ├── Validates status is abortable: processing, chunking, merging, or reprocessing
+   └── Sets abortRequested: true flag in Firestore
+        ↓
+3. Backend functions check abort flag at strategic checkpoints:
+   ├── transcribeAudio: Before enqueueing chunk tasks
+   ├── chunkMerge: After loading artifacts, after reconciliation, before final write
+   └── processTranscription: At processing boundaries (existing)
+        ↓
+4. When abort detected, function throws AbortRequestedError
+   ├── Updates status to 'aborted'
+   ├── Sets processingError: 'Cancelled by user'
+   └── Returns 200 (success) to prevent Cloud Tasks retry
+        ↓
+5. Real-time listener updates UI to show "Cancelled" status
+```
+
+**Retry Flow:**
+
+```
+1. User clicks "Retry" on failed/aborted job in Library
+        ↓
+2. Frontend calls retryTranscription callable function
+   ├── Validates user owns conversation
+   ├── Validates status is 'failed' or 'aborted'
+   ├── Validates retryCount < 3 (max retry limit)
+   └── Validates audio file still exists in storage
+        ↓
+3. Retry strategy determination:
+   ├── Non-chunked job → Full restart
+   │   ├── Clears error state and processing metadata
+   │   ├── Sets status: 'processing', retryCount++
+   │   └── Enqueues new processTranscription task
+   │
+   └── Chunked job with partial progress → Resume incomplete chunks
+       ├── Identifies chunks with status ≠ 'complete'
+       ├── Resets incomplete chunk statuses to 'pending'
+       ├── Sets status: 'chunking', retryCount++
+       └── Enqueues tasks only for incomplete chunks
+        ↓
+4. Processing resumes with updated retry metadata:
+   ├── retryCount: incremented (enforces max 3 limit)
+   ├── lastFailedAt: timestamp of previous failure
+   └── lastRetryAt: timestamp of retry initiation
+        ↓
+5. Real-time listener updates UI to show new processing status
+```
+
+**Abortable Statuses:**
+- `processing` - Single file or initial processing
+- `chunking` - Chunked file with tasks being enqueued
+- `merging` - Chunks being merged together
+- `reprocessing` - Sequential reprocessing after parallel fallback
+
+**Retry Metadata Fields:**
+- `retryCount` (number): Number of retry attempts (max 3)
+- `lastFailedAt` (ISO timestamp): When the job last failed
+- `lastRetryAt` (ISO timestamp): When retry was last initiated
+
+**Implementation Files:**
+- `src/services/firestoreService.ts` - `abortProcessing()` client-side abort request
+- `functions/src/retry.ts` - `retryTranscription` callable function
+- `functions/src/transcribe.ts` - `checkAbort()` function and abort checkpoints
+- `functions/src/chunkMerge.ts` - Abort checkpoints in merge flow
+- `src/pages/Library.tsx` - Cancel and Retry UI controls
 
 ### Audio Chunking Module
 
@@ -1540,8 +1616,8 @@ These are automatically created and managed by Google Cloud:
 ┌─────────────────────────┐  ┌─────────────────────────┐
 │  Cloud Run (Frontend)   │  │  Firebase Functions     │
 │  - React SPA            │  │  - transcribeAudio      │
-│  - Static assets        │  │  - alignment.ts         │
-└─────────────────────────┘  │  - getAudioUrl          │
+│  - Static assets        │  │  - processTranscription │
+└─────────────────────────┘  │  - alignment.ts (HARDY) │
                              └─────────────────────────┘
 ```
 

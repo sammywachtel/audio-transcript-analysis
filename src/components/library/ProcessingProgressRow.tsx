@@ -7,6 +7,7 @@ import { Button } from '../Button';
 interface ProcessingProgressRowProps {
   progress?: ProcessingProgress;
   onAbort: () => void;
+  abortRequested?: boolean;
 }
 
 /**
@@ -17,16 +18,43 @@ interface ProcessingProgressRowProps {
  */
 export const ProcessingProgressRow: React.FC<ProcessingProgressRowProps> = ({
   progress,
-  onAbort
+  onAbort,
+  abortRequested = false
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
-  // Fallback for legacy data
+  // Fallback for legacy data or when progress is not yet available
   if (!progress) {
     return (
-      <div className="flex items-center gap-2">
-        <Loader2 size={14} className="text-blue-500 animate-spin" />
-        <span className="text-xs text-blue-600 font-medium">Processing...</span>
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <Loader2 size={14} className={cn(
+            "animate-spin",
+            abortRequested ? "text-amber-500" : "text-blue-500"
+          )} />
+          <span className={cn(
+            "text-xs font-medium",
+            abortRequested ? "text-amber-600" : "text-blue-600"
+          )}>
+            {abortRequested ? 'Cancelling...' : 'Processing...'}
+          </span>
+          {!abortRequested && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onAbort();
+              }}
+              className="ml-auto text-xs text-amber-600 hover:text-amber-700 hover:underline"
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+        {abortRequested && (
+          <p className="text-xs text-amber-500 ml-6">
+            Waiting for checkpoint...
+          </p>
+        )}
       </div>
     );
   }
@@ -93,16 +121,22 @@ export const ProcessingProgressRow: React.FC<ProcessingProgressRowProps> = ({
         <Loader2
           size={14}
           className={cn(
-            'text-blue-500',
-            isProcessing && 'animate-spin'
+            isProcessing && 'animate-spin',
+            abortRequested ? 'text-amber-500' : 'text-blue-500'
           )}
         />
 
         <div className="flex-1 min-w-0 flex items-center gap-2">
-          <span className="text-xs font-medium text-slate-700 truncate">
-            {getStepLabel()}
+          <span className={cn(
+            "text-xs font-medium truncate",
+            abortRequested ? "text-amber-700" : "text-slate-700"
+          )}>
+            {abortRequested ? 'Cancelling...' : getStepLabel()}
           </span>
-          <span className="text-xs text-blue-600 font-medium shrink-0">
+          <span className={cn(
+            "text-xs font-medium shrink-0",
+            abortRequested ? "text-amber-600" : "text-blue-600"
+          )}>
             {percentComplete}%
           </span>
         </div>
@@ -119,7 +153,10 @@ export const ProcessingProgressRow: React.FC<ProcessingProgressRowProps> = ({
       {/* Progress bar */}
       <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden ml-6">
         <div
-          className="h-full bg-blue-500 rounded-full transition-all duration-500"
+          className={cn(
+            "h-full rounded-full transition-all duration-500",
+            abortRequested ? "bg-amber-500" : "bg-blue-500"
+          )}
           style={{ width: `${percentComplete}%` }}
         />
       </div>
@@ -155,18 +192,30 @@ export const ProcessingProgressRow: React.FC<ProcessingProgressRowProps> = ({
 
           {/* Abort button */}
           <div className="pt-2 border-t border-slate-200">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={(e) => {
-                e.stopPropagation();
-                onAbort();
-              }}
-              className="w-full gap-2 text-amber-600 hover:text-amber-700 hover:bg-amber-50"
-            >
-              <StopCircle size={14} />
-              Cancel Processing
-            </Button>
+            {abortRequested ? (
+              <div className="w-full py-2 px-3 text-center text-sm text-amber-700 bg-amber-50 rounded-lg border border-amber-200">
+                <div className="flex items-center justify-center gap-2">
+                  <Loader2 size={14} className="animate-spin" />
+                  <span>Cancel requested - waiting for checkpoint...</span>
+                </div>
+                <p className="text-xs text-amber-600 mt-1">
+                  Processing will stop at the next safe point
+                </p>
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onAbort();
+                }}
+                className="w-full gap-2 text-amber-600 hover:text-amber-700 hover:bg-amber-50"
+              >
+                <StopCircle size={14} />
+                Cancel Processing
+              </Button>
+            )}
           </div>
         </div>
       )}

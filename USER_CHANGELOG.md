@@ -1,5 +1,26 @@
 # What's New
 
+## Version 2.0.3 - January 13, 2026
+
+### ✨ New Features
+
+**Job Control for Active Transcriptions**
+- You can now **cancel** a transcription while it's processing—no more waiting for a stuck job to finish
+- The cancel button works at any stage: processing, chunking, merging, or reprocessing
+- **Retry** failed or cancelled jobs with one click (up to 3 attempts per file)
+- For long files that were partially processed, retry picks up where it left off instead of starting over
+
+### 🐛 Bug Fixes
+
+**More Reliable Retries**
+- Fixed an issue where retrying a job could get confused by leftover background tasks from the previous attempt
+- Progress bars no longer jump around unexpectedly during retries
+
+**Better Memory for Large Files**
+- Processing now uses more memory (2GB), which helps with large or high-quality audio files
+
+---
+
 ## Version 2.0.2 - January 13, 2026
 
 ### 🔧 Improvements

@@ -43,6 +43,7 @@ import {
   logReconciliationFailed
 } from './logging/reconciliation';
 import { BUILD_VERSION, BUILD_NUMBER } from './version';
+import { checkAbort, AbortRequestedError } from './transcribe';
 
 // =============================================================================
 // Fallback Handling Helpers
@@ -162,7 +163,7 @@ async function enqueueSequentialReprocessing(
       oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
     },
     scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 }, // 5 second delay
-    dispatchDeadline: { seconds: 3600 } // 1 hour (sequential processing is slower)
+    dispatchDeadline: { seconds: 1800 } // 30 min (Cloud Tasks max)
   };
 
   console.log('[ChunkMerge] Creating sequential reprocessing task:', {
@@ -348,6 +349,9 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     chunkCount: chunkArtifacts.length,
     totalSegments: chunkArtifacts.reduce((sum, c) => sum + c.segments.length, 0)
   });
+
+  // Check for abort after loading chunk artifacts
+  await checkAbort(conversationId);
 
   // Build chunk metadata array for deduplication helpers
   const chunkMetadataArray: ChunkMetadata[] = chunkArtifacts.map(artifact => ({
@@ -584,6 +588,9 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     console.log('[ChunkMerge] Skipping speaker reconciliation (sequential mode)');
   }
 
+  // Check for abort after speaker reconciliation
+  await checkAbort(conversationId);
+
   // Step 4: Deduplicate segments using preferred chunk logic
   //
   // IMPORTANT: Segment timestamps from Gemini are chunk-local (start at 0 for each chunk).
@@ -782,6 +789,9 @@ export async function mergeChunks(conversationId: string): Promise<void> {
   const lastSegment = mergedSegments[mergedSegments.length - 1];
   const durationMs = lastSegment ? lastSegment.endMs : chunkingMeta.originalDurationMs;
 
+  // Check for abort before final document write
+  await checkAbort(conversationId);
+
   // Step 10: Write final merged data to conversation document
   console.log('[ChunkMerge] Writing final merged data...');
   const updateData: any = {
@@ -882,6 +892,26 @@ export const processMerge = onRequest(
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      // Handle abort requests differently from failures
+      if (error instanceof AbortRequestedError) {
+        console.log('[ProcessMerge] Abort requested during merge:', { conversationId });
+
+        // Mark as aborted instead of failed
+        try {
+          await db.collection('conversations').doc(conversationId).update({
+            status: 'aborted',
+            processingError: 'Merge cancelled by user',
+            updatedAt: FieldValue.serverTimestamp()
+          });
+        } catch (updateError) {
+          console.error('[ProcessMerge] Failed to update Firestore status:', updateError);
+        }
+
+        // Return success to prevent Cloud Tasks retry
+        res.status(200).send('Aborted');
+        return;
+      }
 
       console.error('[ProcessMerge] ❌ Task failed:', {
         conversationId,
@@ -993,12 +1023,12 @@ export const processReprocessing = onRequest(
 
       // Get file duration and perform chunking
       const { spawn } = await import('child_process');
-      const ffmpegInstaller = await import('@ffmpeg-installer/ffmpeg');
+      const ffprobeInstaller = await import('@ffprobe-installer/ffprobe');
 
       // Get audio duration using ffprobe
       const getDuration = (): Promise<number> => {
         return new Promise((resolve, reject) => {
-          const ffprobe = spawn(ffmpegInstaller.default.path.replace('ffmpeg', 'ffprobe'), [
+          const ffprobe = spawn(ffprobeInstaller.default.path, [
             '-v', 'quiet',
             '-print_format', 'json',
             '-show_format',
@@ -1095,7 +1125,7 @@ export const processReprocessing = onRequest(
               oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
             },
             scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 + (chunk.chunkIndex * 2) },
-            dispatchDeadline: { seconds: 3600 }
+            dispatchDeadline: { seconds: 1800 } // 30 min (Cloud Tasks max)
           };
 
           await tasksClient.createTask({ parent, task });
@@ -1151,7 +1181,7 @@ export const processReprocessing = onRequest(
             oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
           },
           scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 },
-          dispatchDeadline: { seconds: 3600 }
+          dispatchDeadline: { seconds: 1800 } // 30 min (Cloud Tasks max)
         };
 
         await tasksClient.createTask({ parent, task });

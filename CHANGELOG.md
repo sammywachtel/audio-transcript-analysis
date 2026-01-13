@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-01-13
+
+### Added
+- **Job Control for Long-Running Transcriptions** - Cancel active jobs and retry failed ones
+  - Cancel button now works during all active statuses (`processing`, `chunking`, `merging`, `reprocessing`)
+  - Retry button appears for `failed` and `aborted` jobs with up to 3 retry attempts
+  - Smart resume: chunked jobs resume only incomplete chunks instead of restarting entirely
+  - Task generation mechanism prevents stale Cloud Tasks from interfering with retries
+
+### Fixed
+- **Stale Task Interference** - Retried jobs no longer corrupted by orphaned Cloud Tasks from previous attempts
+  - Each retry increments a task generation counter; tasks from older generations are ignored
+  - Prevents progress thrashing and status confusion during parallel chunk processing
+- **Memory Limits for Large Files** - Increased Cloud Function memory to 2GiB for reliable large file processing
+
 ## [2.0.2] - 2026-01-13
 
 ### Changed

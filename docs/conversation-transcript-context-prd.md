@@ -139,6 +139,8 @@ The app transforms a raw recording into an interactive, navigable learning artif
 - **FR-UP-2:** Upload must be resumable for large files (preferred) or robust with retry.
 - **FR-UP-3:** After upload, create a processing job and show status: `queued → processing → needs_review (optional) → complete` or `failed`.
 - **FR-UP-4:** Store audio in GCS; store a reference in Firestore (no raw audio stored in Firestore).
+- **FR-UP-5:** User can cancel active jobs (statuses: `processing`, `chunking`, `merging`, `reprocessing`) at any point via Library UI.
+- **FR-UP-6:** User can retry `failed` or `aborted` jobs up to 3 times. For chunked jobs with partial progress, retry resumes only incomplete chunks.
 
 ### 5.3 Speaker diarization and naming
 - **FR-DIAR-1:** System estimates number of speakers and assigns speaker IDs (`spk_1`, `spk_2`, ...).

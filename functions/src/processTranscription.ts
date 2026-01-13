@@ -109,6 +109,11 @@ interface TranscriptionTaskPayload {
    * Defaults to 'parallel' if not specified.
    */
   processingMode?: ProcessingMode;
+  /**
+   * Task generation - incremented on each retry.
+   * Used to detect stale tasks from previous retry attempts.
+   */
+  taskGeneration?: number;
   // Chunk-specific fields (present for chunked audio processing)
   chunkIndex?: number;
   totalChunks?: number;
@@ -135,7 +140,7 @@ function isChunkTask(payload: TranscriptionTaskPayload): boolean {
  */
 export const processTranscription = onRequest(
   {
-    memory: '1GiB',
+    memory: '2GiB', // Increased from 1GiB - large audio files need more memory
     timeoutSeconds: 3600, // 60 minutes (enough for large files)
     region: 'us-central1',
     invoker: 'private', // Only Cloud Tasks can call this
@@ -181,6 +186,27 @@ export const processTranscription = onRequest(
     const chunkIndex = payload.chunkIndex ?? -1;
     // Default to parallel mode for new uploads (faster for users)
     const processingMode: ProcessingMode = payload.processingMode ?? 'parallel';
+
+    // Check for stale task (task from a previous generation before retry)
+    // This prevents old retrying Cloud Tasks from interfering with new retry attempts
+    // Default to 0 for tasks created before taskGeneration feature - they're always stale after a retry
+    const payloadGeneration = payload.taskGeneration ?? 0;
+    const conversationSnap = await db.collection('conversations').doc(conversationId).get();
+    if (conversationSnap.exists) {
+      const currentGeneration = conversationSnap.data()?.taskGeneration ?? 1;
+      if (payloadGeneration < currentGeneration) {
+        console.log('[ProcessTranscription] ⏭️ Stale task detected, skipping:', {
+          conversationId,
+          chunkIndex: isChunk ? chunkIndex : 'N/A',
+          payloadGeneration,
+          currentGeneration,
+          message: 'Task from older generation - a retry has started newer tasks'
+        });
+        // Return 200 to prevent Cloud Tasks from retrying this stale task
+        res.status(200).send('Stale task skipped');
+        return;
+      }
+    }
 
     // Chunk context for propagation (only used for chunk tasks)
     let chunkContext: ChunkContext | null = null;

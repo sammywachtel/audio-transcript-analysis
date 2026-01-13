@@ -164,7 +164,8 @@ export class FirestoreService {
   /**
    * Request abort for a processing conversation
    * Sets abortRequested flag which Cloud Function checks at each checkpoint.
-   * Returns true if abort was requested, false if conversation wasn't processing.
+   * If no backend is actively processing (no processingProgress), directly aborts.
+   * Returns true if abort was requested/completed, false if conversation wasn't processing.
    */
   async abortProcessing(conversationId: string): Promise<boolean> {
     const docRef = doc(db, this.conversationsCollection, conversationId);
@@ -176,14 +177,32 @@ export class FirestoreService {
     }
 
     const data = docSnap.data() as ConversationDoc;
-    if (data.status !== 'processing') {
-      console.warn('[Firestore] Cannot abort - not processing:', {
+    const abortableStatuses = ['processing', 'chunking', 'merging', 'reprocessing'];
+    if (!abortableStatuses.includes(data.status)) {
+      console.warn('[Firestore] Cannot abort - not in abortable state:', {
         conversationId,
         currentStatus: data.status
       });
       return false;
     }
 
+    // Check if there's active backend processing
+    // If no processingProgress exists, the backend likely isn't running (zombie state)
+    // In that case, directly set status to aborted instead of waiting for checkpoint
+    const hasActiveProcessing = data.processingProgress &&
+      data.processingProgress.percentComplete !== undefined;
+
+    if (!hasActiveProcessing) {
+      console.log('[Firestore] No active processing detected - directly aborting:', conversationId);
+      await setDoc(docRef, {
+        status: 'aborted',
+        abortRequested: true,
+        processingError: 'Cancelled by user (no active processing)'
+      }, { merge: true });
+      return true;
+    }
+
+    // Active processing exists - set flag and let backend handle it
     console.log('[Firestore] Requesting abort for conversation:', conversationId);
     await setDoc(docRef, { abortRequested: true }, { merge: true });
     return true;

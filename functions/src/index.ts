@@ -62,8 +62,8 @@ export const bucket = getStorage().bucket();
 export { transcribeAudio } from './transcribe';
 export { processTranscription } from './processTranscription';
 export { processMerge, processReprocessing } from './chunkMerge';
-export { getSignedAudioUrl } from './getAudioUrl';
 export { chatWithConversation } from './chat';
+export { retryTranscription } from './retry';
 
 // Export stats tracking triggers
 export { onConversationCreated, onConversationDeleted } from './statsTriggers';
