@@ -10,6 +10,7 @@ import { ProcessingProgressRow } from '../components/library/ProcessingProgressR
 import { AbortConfirmModal } from '../components/library/AbortConfirmModal';
 import { DeleteConfirmModal } from '../components/shared/DeleteConfirmModal';
 import { firestoreService } from '../services/firestoreService';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 
 interface LibraryProps {
   onOpen: (id: string) => void;
@@ -22,6 +23,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [deleteConfirmConv, setDeleteConfirmConv] = useState<Conversation | null>(null);
   const [abortConfirmConv, setAbortConfirmConv] = useState<Conversation | null>(null);
+  const [retryingConvId, setRetryingConvId] = useState<string | null>(null);
   const { conversations, addConversation, deleteConversation, syncStatus } = useConversations();
   const { isAdmin } = useAuth();
 
@@ -54,6 +56,37 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
         alert('Failed to abort processing. Please try again.');
       }
       setAbortConfirmConv(null);
+    }
+  };
+
+  const handleRetry = async (e: React.MouseEvent, conv: Conversation) => {
+    e.stopPropagation();
+
+    if (!confirm(`Retry transcription for "${conv.title}"?`)) {
+      return;
+    }
+
+    setRetryingConvId(conv.conversationId);
+
+    try {
+      const functions = getFunctions();
+      const retryTranscription = httpsCallable(functions, 'retryTranscription');
+
+      const result = await retryTranscription({ conversationId: conv.conversationId });
+      const data = result.data as { success: boolean; message: string };
+
+      if (data.success) {
+        console.log('[Library] Retry initiated:', data.message);
+        // Success - the real-time listener will update the UI
+      } else {
+        alert('Failed to retry: ' + data.message);
+      }
+    } catch (error: any) {
+      console.error('Failed to retry transcription:', error);
+      const message = error.message || 'Unknown error occurred';
+      alert(`Failed to retry transcription: ${message}`);
+    } finally {
+      setRetryingConvId(null);
     }
   };
 
@@ -171,7 +204,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                   </div>
                 ) : (
                   conversations.map(conv => {
-                    const isProcessing = conv.status === 'processing';
+                    const isProcessing = ['processing', 'chunking', 'merging', 'reprocessing'].includes(conv.status);
                     const isFailed = conv.status === 'failed';
                     const isAborted = conv.status === 'aborted';
                     const isComplete = conv.status === 'complete';
@@ -215,6 +248,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                                     <ProcessingProgressRow
                                       progress={conv.processingProgress}
                                       onAbort={() => setAbortConfirmConv(conv)}
+                                      abortRequested={conv.abortRequested}
                                     />
                                   </div>
                                 ) : isAborted ? (
@@ -260,6 +294,21 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                             </span>
                         </div>
                         <div className="hidden md:flex col-span-1 justify-end items-center gap-2">
+                             {/* Retry button for failed and aborted conversations */}
+                             {isErrorState && (
+                               <button
+                                  onClick={(e) => handleRetry(e, conv)}
+                                  disabled={retryingConvId === conv.conversationId}
+                                  className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                  title="Retry transcription"
+                               >
+                                  {retryingConvId === conv.conversationId ? (
+                                    <Loader2 size={16} className="animate-spin" />
+                                  ) : (
+                                    <RefreshCw size={16} />
+                                  )}
+                               </button>
+                             )}
                              {/* Delete button for completed, failed, and aborted conversations */}
                              {(isComplete || isErrorState) && (
                                <button

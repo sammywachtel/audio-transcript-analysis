@@ -152,6 +152,98 @@ ensure_service_identity() {
     fi
 }
 
+# Manage a secret in Secret Manager (idempotent, with version cleanup)
+# - Creates secret if it doesn't exist
+# - Only adds new version if value has changed
+# - Deletes old versions (keeps latest + previous for rollback safety)
+# Usage: manage_secret "SECRET_NAME" "secret_value"
+# Returns: 0 on success/skip, 1 on error
+manage_secret() {
+    local secret_name="$1"
+    local secret_value="$2"
+    local keep_versions=2  # Keep current + previous
+
+    # Check if secret exists
+    if ! gcloud secrets describe "$secret_name" --project="$PROJECT_ID" &>/dev/null; then
+        # Create new secret
+        echo -n "$secret_value" | gcloud secrets create "$secret_name" \
+            --data-file=- \
+            --project="$PROJECT_ID" \
+            --replication-policy="automatic" 2>/dev/null
+        log_success "Created secret: $secret_name"
+        return 0
+    fi
+
+    # Secret exists - check if value has changed
+    local current_value
+    current_value=$(gcloud secrets versions access latest \
+        --secret="$secret_name" \
+        --project="$PROJECT_ID" 2>/dev/null) || current_value=""
+
+    if [[ "$current_value" == "$secret_value" ]]; then
+        log_skip "Secret $secret_name unchanged"
+        return 0
+    fi
+
+    # Value changed - add new version
+    echo -n "$secret_value" | gcloud secrets versions add "$secret_name" \
+        --data-file=- \
+        --project="$PROJECT_ID" 2>/dev/null
+    log_success "Updated secret: $secret_name (new version)"
+
+    # Delete old versions (keep latest + previous)
+    local versions
+    versions=$(gcloud secrets versions list "$secret_name" \
+        --project="$PROJECT_ID" \
+        --filter="state:ENABLED" \
+        --format="value(name)" \
+        --sort-by="~createTime" 2>/dev/null | tail -n +$((keep_versions + 1)))  # Skip the first N
+
+    if [[ -n "$versions" ]]; then
+        local count=0
+        while IFS= read -r version; do
+            gcloud secrets versions destroy "$version" \
+                --secret="$secret_name" \
+                --project="$PROJECT_ID" \
+                --quiet 2>/dev/null && ((count++)) || true
+        done <<< "$versions"
+        if [[ $count -gt 0 ]]; then
+            log_info "Cleaned up $count old version(s) of $secret_name (keeping $keep_versions)"
+        fi
+    fi
+
+    return 0
+}
+
+# Prompt for and manage a secret interactively
+# Usage: prompt_and_manage_secret "SECRET_NAME" "Human readable name" "instructions"
+prompt_and_manage_secret() {
+    local secret_name="$1"
+    local display_name="$2"
+    local instructions="$3"
+
+    # Check if secret already has a value
+    if gcloud secrets versions access latest --secret="$secret_name" --project="$PROJECT_ID" &>/dev/null; then
+        read -p "  $display_name already set. Update it? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_skip "$display_name"
+            return 0
+        fi
+    fi
+
+    echo "  $instructions"
+    read -sp "  Enter $display_name (input hidden): " secret_value
+    echo
+
+    if [[ -z "$secret_value" ]]; then
+        log_info "Skipped $display_name (no value provided)"
+        return 0
+    fi
+
+    manage_secret "$secret_name" "$secret_value"
+}
+
 # -----------------------------------------------------------------------------
 # Preflight Checks
 # -----------------------------------------------------------------------------
@@ -696,73 +788,82 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 15: Create Gemini API Key and Secret
+# Step 15: API Keys and Secrets
 # -----------------------------------------------------------------------------
+# Uses manage_secret() helper which:
+#   - Creates secret if it doesn't exist
+#   - Only adds new version if value changed
+#   - Deletes old versions (keeps only latest)
 
 log_step "Gemini API key and secret..."
 
-# Check if secret already exists
-if gcloud secrets describe GEMINI_API_KEY --project="$PROJECT_ID" &>/dev/null; then
-    log_skip "GEMINI_API_KEY secret already exists"
+# Check if we need to create/update the Gemini API key
+GEMINI_KEY=""
+API_KEY_NAME="gemini-api-key"  # pragma: allowlist secret
+
+# Check if API key already exists in GCP
+EXISTING_KEY=$(gcloud services api-keys list \
+    --project="$PROJECT_ID" \
+    --filter="displayName='$API_KEY_NAME'" \
+    --format="value(name)" 2>/dev/null | head -1)
+
+if [[ -n "$EXISTING_KEY" ]]; then
+    GEMINI_KEY=$(gcloud services api-keys get-key-string "$EXISTING_KEY" \
+        --format="value(keyString)" 2>/dev/null)
+    log_info "Using existing Gemini API key"
 else
     read -p "  Create Gemini API key now? (y/N) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        # Create API key restricted to Generative Language API
         log_info "Creating API key for Gemini..."
-        API_KEY_NAME="gemini-api-key"  # pragma: allowlist secret
-
-        # Check if API key already exists
-        EXISTING_KEY=$(gcloud services api-keys list \
+        KEY_RESULT=$(gcloud services api-keys create \
             --project="$PROJECT_ID" \
-            --filter="displayName='$API_KEY_NAME'" \
-            --format="value(name)" 2>/dev/null | head -1)
+            --display-name="$API_KEY_NAME" \
+            --api-target=service=generativelanguage.googleapis.com \
+            --format=json 2>/dev/null)
 
-        if [[ -n "$EXISTING_KEY" ]]; then
-            log_info "API key '$API_KEY_NAME' already exists, retrieving..."
-            GEMINI_KEY=$(gcloud services api-keys get-key-string "$EXISTING_KEY" \
+        KEY_NAME=$(echo "$KEY_RESULT" | jq -r '.response.name // .name // empty')
+        if [[ -n "$KEY_NAME" ]]; then
+            GEMINI_KEY=$(gcloud services api-keys get-key-string "$KEY_NAME" \
                 --format="value(keyString)" 2>/dev/null)
-        else
-            # Create new API key restricted to Generative Language API
-            KEY_RESULT=$(gcloud services api-keys create \
-                --project="$PROJECT_ID" \
-                --display-name="$API_KEY_NAME" \
-                --api-target=service=generativelanguage.googleapis.com \
-                --format=json 2>/dev/null)
-
-            # Extract the key name from the operation result
-            KEY_NAME=$(echo "$KEY_RESULT" | jq -r '.response.name // .name // empty')
-
-            if [[ -z "$KEY_NAME" ]]; then
-                # Sometimes the create command returns the key directly
-                GEMINI_KEY=$(echo "$KEY_RESULT" | jq -r '.response.keyString // .keyString // empty')
-                if [[ -z "$GEMINI_KEY" ]]; then
-                    log_error "Failed to create API key. Create manually at:"
-                    log_info "https://console.cloud.google.com/apis/credentials?project=$PROJECT_ID"
-                    GEMINI_KEY=""
-                fi
-            else
-                # Get the key string from the created key
-                GEMINI_KEY=$(gcloud services api-keys get-key-string "$KEY_NAME" \
-                    --format="value(keyString)" 2>/dev/null)
-            fi
             log_success "Created Gemini API key"
+        else
+            GEMINI_KEY=$(echo "$KEY_RESULT" | jq -r '.response.keyString // .keyString // empty')
+            if [[ -z "$GEMINI_KEY" ]]; then
+                log_error "Failed to create API key. Create manually at:"
+                log_info "https://console.cloud.google.com/apis/credentials?project=$PROJECT_ID"
+            fi
         fi
-
-        # Store in Secret Manager
-        if [[ -n "$GEMINI_KEY" ]]; then
-            echo -n "$GEMINI_KEY" | gcloud secrets create GEMINI_API_KEY \
-                --data-file=- \
-                --project="$PROJECT_ID"
-            log_success "Stored GEMINI_API_KEY in Secret Manager"
-        fi
-    else
-        log_info "Skipped - create manually:"
-        log_info "1. Enable API: gcloud services enable generativelanguage.googleapis.com --project=$PROJECT_ID"
-        log_info "2. Create key: https://console.cloud.google.com/apis/credentials?project=$PROJECT_ID"
-        log_info "3. Store secret: npx firebase functions:secrets:set GEMINI_API_KEY"
     fi
 fi
+
+# Store in Secret Manager (idempotent - only updates if changed)
+if [[ -n "$GEMINI_KEY" ]]; then
+    manage_secret "GEMINI_API_KEY" "$GEMINI_KEY"
+else
+    log_info "Skipped GEMINI_API_KEY - create manually:"
+    log_info "  npx firebase functions:secrets:set GEMINI_API_KEY"
+fi
+
+# -----------------------------------------------------------------------------
+# Step 15b: Replicate API Token (for WhisperX transcription)
+# -----------------------------------------------------------------------------
+
+log_step "Replicate API token (for WhisperX)..."
+log_info "Get your token from: https://replicate.com/account/api-tokens"
+prompt_and_manage_secret "REPLICATE_API_TOKEN" "Replicate API Token" \
+    "Required for WhisperX transcription service"
+
+# -----------------------------------------------------------------------------
+# Step 15c: HuggingFace Access Token (for speaker diarization)
+# -----------------------------------------------------------------------------
+
+log_step "HuggingFace access token (for speaker diarization)..."
+log_info "Get your token from: https://huggingface.co/settings/tokens"
+log_info "Requires accepting pyannote model terms at:"
+log_info "  https://huggingface.co/pyannote/speaker-diarization-3.1"
+prompt_and_manage_secret "HUGGINGFACE_ACCESS_TOKEN" "HuggingFace Access Token" \
+    "Required for speaker diarization (pyannote)"
 
 # -----------------------------------------------------------------------------
 # Step 16: Enable Firebase Authentication

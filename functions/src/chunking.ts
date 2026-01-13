@@ -17,9 +17,13 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
-
 const execFileAsync = promisify(execFile);
+
+// Dynamic import helper to avoid build-time binary resolution
+async function getFfmpegPath(): Promise<string> {
+  const ffmpegInstaller = await import('@ffmpeg-installer/ffmpeg');
+  return ffmpegInstaller.default.path;
+}
 
 // =============================================================================
 // Types
@@ -120,7 +124,7 @@ export const CHUNK_CONFIG = {
 export async function detectSilenceGaps(audioFilePath: string): Promise<SilenceGap[]> {
   console.log('[Chunking] Detecting silence gaps...', { audioFilePath });
 
-  const ffmpegPath = ffmpegInstaller.path;
+  const ffmpegPath = await getFfmpegPath();
   const filterArg = `silencedetect=n=${CHUNK_CONFIG.SILENCE_THRESHOLD_DB}dB:d=${CHUNK_CONFIG.SILENCE_MIN_DURATION}`;
 
   try {
@@ -222,7 +226,7 @@ function parseSilenceDetectOutput(stderr: string): SilenceGap[] {
  * @returns Duration in seconds
  */
 export async function getAudioDuration(audioFilePath: string): Promise<number> {
-  const ffmpegPath = ffmpegInstaller.path;
+  const ffmpegPath = await getFfmpegPath();
   const ffprobePath = ffmpegPath.replace(/ffmpeg$/, 'ffprobe');
 
   try {
@@ -449,7 +453,7 @@ export async function extractChunk(
   startSeconds: number,
   endSeconds: number
 ): Promise<void> {
-  const ffmpegPath = ffmpegInstaller.path;
+  const ffmpegPath = await getFfmpegPath();
 
   console.log('[Chunking] Extracting chunk:', {
     source: audioFilePath,
@@ -521,7 +525,7 @@ export async function reencodeForPlayback(
   inputPath: string,
   outputPath: string
 ): Promise<{ originalSizeBytes: number; outputSizeBytes: number; durationMs: number; reencodeTimeMs: number }> {
-  const ffmpegPath = ffmpegInstaller.path;
+  const ffmpegPath = await getFfmpegPath();
   const startTime = Date.now();
 
   const originalStats = fs.statSync(inputPath);

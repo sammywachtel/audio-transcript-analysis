@@ -85,6 +85,13 @@ export interface Conversation {
   // Fallback metadata (when parallel → sequential fallback occurred)
   fallbackMetadata?: FallbackMetadata;
 
+  // Retry tracking metadata
+  retryCount?: number;
+  lastFailedAt?: string;
+  lastRetryAt?: string;
+  // Task generation - incremented on retry to invalidate stale Cloud Tasks
+  taskGeneration?: number;
+
   // Progressive processing status (all optional for backward compatibility)
   processingProgress?: ProcessingProgress;
   processingTimeline?: ProcessingTimeline[];

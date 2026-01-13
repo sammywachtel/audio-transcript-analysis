@@ -24,6 +24,7 @@ Practical guides for solving specific problems.
 Technical descriptions and specifications.
 
 - **[Architecture](reference/architecture.md)** - System architecture and data flow
+- **[Cloud Functions Flow](reference/cloud-functions-flow.md)** - Complete flow diagram of all Cloud Functions
 - **[Data Model](reference/data-model.md)** - Firestore schema and TypeScript types
 - **[Alignment Algorithm](reference/alignment-algorithm.md)** - HARDY timestamp alignment algorithm
 - **[Alignment Architecture](reference/alignment-architecture.md)** - Timestamp alignment design decisions

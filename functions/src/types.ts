@@ -90,6 +90,12 @@ export interface Conversation {
   reconciliationMetadata?: ReconciliationMetadata;
   // Fallback metadata (when parallel → sequential fallback occurred)
   fallbackMetadata?: FallbackMetadata;
+  // Retry tracking metadata
+  retryCount?: number;
+  lastFailedAt?: string;
+  lastRetryAt?: string;
+  // Task generation - incremented on retry to invalidate stale Cloud Tasks
+  taskGeneration?: number;
 }
 
 export enum ProcessingStep {

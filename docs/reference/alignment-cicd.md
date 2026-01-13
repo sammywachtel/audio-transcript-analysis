@@ -11,8 +11,8 @@ Push to main
     └─► Build & Deploy Functions (~2-3 min)       [Firebase]
                                                       │
                                                       ├─ transcribeAudio
-                                                      ├─ alignment.ts (HARDY)
-                                                      └─ getAudioUrl
+                                                      ├─ processTranscription
+                                                      └─ alignment.ts (HARDY)
 Total: ~3-4 minutes (parallel execution)
 ```
 

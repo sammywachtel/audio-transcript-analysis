@@ -156,26 +156,49 @@ jobs:
           REPLICATE_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
           HF_TOKEN: ${{ secrets.HUGGINGFACE_ACCESS_TOKEN }}
         run: |  # pragma: allowlist secret
-          echo "Setting Firebase Function secrets..."
-          if [ -n "$GEMINI_KEY" ]; then
-            printf '%s' "$GEMINI_KEY" | firebase functions:secrets:set GEMINI_API_KEY --force
-            echo "  ✓ GEMINI_API_KEY set"
-          else
-            echo "  ⚠ GEMINI_API_KEY not configured in GitHub secrets"
-          fi
-          if [ -n "$REPLICATE_TOKEN" ]; then
-            printf '%s' "$REPLICATE_TOKEN" | firebase functions:secrets:set REPLICATE_API_TOKEN --force
-            echo "  ✓ REPLICATE_API_TOKEN set"
-          else
-            echo "  ⚠ REPLICATE_API_TOKEN not configured in GitHub secrets"
-          fi
-          if [ -n "$HF_TOKEN" ]; then
-            printf '%s' "$HF_TOKEN" | firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN --force
-            echo "  ✓ HUGGINGFACE_ACCESS_TOKEN set"
-          else
-            echo "  ⚠ HUGGINGFACE_ACCESS_TOKEN not configured in GitHub secrets (speaker diarization may be disabled)"
-          fi
-          echo "✅ Firebase secrets configured"
+          echo "Checking Firebase Function secrets..."
+          KEEP_VERSIONS=2  # Keep current + previous for rollback safety
+
+          # Helper: cleanup old versions of a secret (keep N most recent)
+          cleanup_old_versions() {
+            local name="$1"
+            local keep="$2"
+            versions=$(gcloud secrets versions list "$name" \
+              --filter="state:ENABLED" \
+              --format="value(name)" \
+              --sort-by="~createTime" 2>/dev/null | tail -n +$((keep + 1)))
+            if [ -n "$versions" ]; then
+              count=0
+              echo "$versions" | while read -r version; do
+                gcloud secrets versions destroy "$version" --secret="$name" --quiet 2>/dev/null && count=$((count + 1))
+              done
+              echo "    Cleaned up old versions (keeping $keep)"
+            fi
+          }
+
+          # Helper: only update secret if value changed (avoids version bloat)
+          update_secret_if_changed() {
+            local name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "  ⚠ $name not configured in GitHub secrets"
+              return
+            fi
+            # Get current value from Secret Manager
+            current=$(gcloud secrets versions access latest --secret="$name" 2>/dev/null || echo "")
+            if [ "$current" = "$value" ]; then
+              echo "  ⊘ $name unchanged (skipped)"
+            else
+              printf '%s' "$value" | firebase functions:secrets:set "$name" --force
+              echo "  ✓ $name updated"
+              cleanup_old_versions "$name" "$KEEP_VERSIONS"
+            fi
+          }
+
+          update_secret_if_changed "GEMINI_API_KEY" "$GEMINI_KEY"
+          update_secret_if_changed "REPLICATE_API_TOKEN" "$REPLICATE_TOKEN"
+          update_secret_if_changed "HUGGINGFACE_ACCESS_TOKEN" "$HF_TOKEN"
+          echo "✅ Firebase secrets checked"
 
       # Deploy based on target
       - name: Deploy All (rules + functions)

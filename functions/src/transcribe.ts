@@ -83,7 +83,7 @@ function getVertexAIClient(): VertexAI {
 /**
  * Custom error for abort requests - allows clean exit from processing
  */
-class AbortRequestedError extends Error {
+export class AbortRequestedError extends Error {
   constructor(conversationId: string) {
     super(`Processing aborted by user for conversation ${conversationId}`);
     this.name = 'AbortRequestedError';
@@ -94,7 +94,7 @@ class AbortRequestedError extends Error {
  * Check if abort has been requested for this conversation.
  * Throws AbortRequestedError if abort flag is set.
  */
-async function checkAbort(conversationId: string): Promise<void> {
+export async function checkAbort(conversationId: string): Promise<void> {
   const doc = await db.collection('conversations').doc(conversationId).get();
   if (doc.exists && doc.data()?.abortRequested === true) {
     console.log('[Transcribe] Abort requested, stopping processing:', { conversationId });
@@ -1516,7 +1516,7 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
 export const transcribeAudio = onObjectFinalized(
   {
     secrets: [replicateApiToken, huggingfaceAccessToken],
-    memory: '1GiB', // Audio processing needs more memory
+    memory: '2GiB', // Large audio files need more memory for chunking
     timeoutSeconds: 540, // 9 minutes (max for event-driven triggers, even 2nd gen)
     region: 'us-central1'
   },
@@ -1628,6 +1628,7 @@ export const transcribeAudio = onObjectFinalized(
         userId,
         status: 'queued',
         processingMode, // 'parallel' or 'sequential' - controls chunk execution strategy
+        taskGeneration: 1, // First generation - incremented on retry to invalidate stale tasks
         queuedAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp()
       }, { merge: true });
@@ -1662,7 +1663,14 @@ export const transcribeAudio = onObjectFinalized(
         // Production: Download audio to check if chunking is needed
         // For long files, we split into chunks before enqueuing Cloud Tasks
 
-        // Update status to show chunking step
+        // Update status to 'chunking' so UI shows progress (not stuck on 'queued')
+        await db.collection('conversations').doc(conversationId).update({
+          status: 'chunking',
+          processingStartedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp()
+        });
+
+        // Update progress manager to show chunking step
         await progressManager.setStep(ProcessingStep.CHUNKING);
 
         // Download audio to temp file for duration check and potential chunking
@@ -1752,7 +1760,8 @@ export const transcribeAudio = onObjectFinalized(
             conversationId,
             userId,
             filePath,
-            processingMode
+            processingMode,
+            taskGeneration: 1 // Allows stale task detection on retry
           };
 
           const task = {
@@ -1881,6 +1890,9 @@ export const transcribeAudio = onObjectFinalized(
             initialStatuses: initialStatuses.map(s => ({ index: s.chunkIndex, status: s.status }))
           });
 
+          // Check for abort before enqueueing chunk tasks
+          await checkAbort(conversationId);
+
           // Create one Cloud Task per chunk
           // Stagger scheduling to avoid thundering herd
           // Note: For sequential mode, chunks wait for predecessors
@@ -1894,6 +1906,7 @@ export const transcribeAudio = onObjectFinalized(
               totalChunks: chunk.totalChunks,
               chunkMetadata: chunk,
               processingMode, // Controls whether chunk waits for predecessor context
+              taskGeneration: 1, // Allows stale task detection on retry
               // Include timing metadata for offset calculations
               chunkStartMs: chunk.startMs,
               chunkEndMs: chunk.endMs,
@@ -1938,6 +1951,19 @@ export const transcribeAudio = onObjectFinalized(
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      // Check if this was an abort request (not a real failure)
+      if (error instanceof AbortRequestedError) {
+        console.log('[Transcribe] Processing was aborted by user:', { conversationId });
+        // Status already set to 'aborted' by executeTranscriptionPipeline, just ensure it's correct
+        await db.collection('conversations').doc(conversationId).update({
+          status: 'aborted',
+          processingError: 'Processing cancelled by user',
+          updatedAt: FieldValue.serverTimestamp()
+        });
+        // Don't record as failure - abort event already recorded by pipeline
+        return;
+      }
 
       console.error('[Transcribe] ❌ Failed to enqueue task:', {
         conversationId,
