@@ -324,6 +324,10 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
 
 // --- Upload Modal Component ---
 
+// 500MB - must match storage.rules limit
+const MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024;
+const MAX_FILE_SIZE_MB = 500;
+
 const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation, audioFile?: File) => Promise<void> }> = ({ onClose, onUpload }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'saving' | 'done' | 'error'>('idle');
@@ -347,18 +351,26 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
     setIsDragging(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const file = e.dataTransfer.files[0];
-      if (file.type.startsWith('audio/') || file.type.startsWith('video/')) {
-        setSelectedFile(file);
-        setErrorMessage(null);
-      } else {
+      if (!(file.type.startsWith('audio/') || file.type.startsWith('video/'))) {
         setErrorMessage("Please upload a valid audio or video file.");
+        return;
       }
+      if (file.size > MAX_FILE_SIZE_BYTES) {
+        setErrorMessage(`File too large. Maximum size is ${MAX_FILE_SIZE_MB}MB (yours is ${(file.size / (1024 * 1024)).toFixed(0)}MB).`);
+        return;
+      }
+      setSelectedFile(file);
+      setErrorMessage(null);
     }
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
        const file = e.target.files[0];
+       if (file.size > MAX_FILE_SIZE_BYTES) {
+         setErrorMessage(`File too large. Maximum size is ${MAX_FILE_SIZE_MB}MB (yours is ${(file.size / (1024 * 1024)).toFixed(0)}MB).`);
+         return;
+       }
        setSelectedFile(file);
        setErrorMessage(null);
     }
@@ -441,7 +453,7 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
                     <UploadCloud size={24} />
                   </div>
                   <p className="font-medium text-slate-900">Click to upload or drag and drop</p>
-                  <p className="text-sm mt-1">MP3, M4A, WAV (Max 100MB)</p>
+                  <p className="text-sm mt-1">MP3, M4A, WAV (Max {MAX_FILE_SIZE_MB}MB)</p>
                 </div>
               )}
             </div>

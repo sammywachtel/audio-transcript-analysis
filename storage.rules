@@ -17,10 +17,10 @@ service firebase.storage {
       allow read: if isAuthenticated() && request.auth.uid == userId;
 
       // Users can upload audio to their own directory
-      // Limit file size to 100MB and only allow audio types
+      // Limit file size to 500MB and only allow audio types
       allow create: if isAuthenticated()
         && request.auth.uid == userId
-        && request.resource.size < 100 * 1024 * 1024
+        && request.resource.size < 500 * 1024 * 1024
         && request.resource.contentType.matches('audio/.*');
 
       // Users can delete their own audio files
