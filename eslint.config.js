@@ -19,6 +19,8 @@ export default [
         ...globals.node,
         // Vite build-time constants
         __BUILD_TIME__: 'readonly',
+        __APP_VERSION__: 'readonly',
+        __BUILD_NUM__: 'readonly',
       },
     },
     plugins: {

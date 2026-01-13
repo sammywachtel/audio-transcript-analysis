@@ -3,7 +3,7 @@ import { Conversation, ProcessingMode } from '@/config/types';
 import { formatTime, cn, createMockConversation } from '@/utils';
 import { useConversations } from '../contexts/ConversationContext';
 import { useAuth } from '../contexts/AuthContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, Settings, BarChart3, Search, Zap, Clock4 } from 'lucide-react';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, AlertTriangle, Trash2, Cloud, CloudOff, RefreshCw, Settings, BarChart3, Search, Zap, Clock4 } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
 import { ProcessingProgressRow } from '../components/library/ProcessingProgressRow';
@@ -262,6 +262,11 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                                 ) : (
                                   <p className="text-xs text-slate-500 truncate">
                                     {Object.values(conv.speakers).length} speakers • {conv.topics.length} topics
+                                    {conv.warnings && conv.warnings.length > 0 && (
+                                      <span className="ml-2 text-amber-600">
+                                        • {conv.warnings.length} {conv.warnings.length === 1 ? 'issue' : 'issues'}
+                                      </span>
+                                    )}
                                   </p>
                                 )}
                             </div>
@@ -282,7 +287,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                                <span className="text-slate-400 text-xs">--</span>
                              )}
                         </div>
-                        <div className="hidden md:flex col-span-2 items-center">
+                        <div className="hidden md:flex col-span-2 items-center gap-2">
                             <span className={cn(
                               "px-2.5 py-0.5 rounded-full text-xs font-medium",
                               isComplete ? "bg-emerald-100 text-emerald-700" :
@@ -292,6 +297,15 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                             )}>
                                 {isProcessing ? 'Processing...' : isAborted ? 'Cancelled' : conv.status}
                             </span>
+                            {isComplete && conv.warnings && conv.warnings.length > 0 && (
+                              <span
+                                className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700"
+                                title={conv.warnings.map(w => w.message).join('\n')}
+                              >
+                                <AlertTriangle size={12} />
+                                {conv.warnings.length}
+                              </span>
+                            )}
                         </div>
                         <div className="hidden md:flex col-span-1 justify-end items-center gap-2">
                              {/* Retry button for failed and aborted conversations */}
@@ -337,8 +351,12 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
         </div>
 
         {/* Build Info Footer */}
-        <div className="mt-6 text-center text-xs text-slate-400">
-          Built {new Date(__BUILD_TIME__).toLocaleString()}
+        <div className="mt-6 text-center text-xs text-slate-400 font-mono">
+          <span className="text-slate-300">{__APP_VERSION__}</span>
+          <span className="mx-2 text-slate-500">•</span>
+          <span className="text-slate-500">Build {__BUILD_NUM__}</span>
+          <span className="mx-2 text-slate-500">•</span>
+          <span>{new Date(__BUILD_TIME__).toISOString().split('T')[0]}</span>
         </div>
       </div>
 

@@ -22,6 +22,11 @@ steps:
       # Other services
       - '--build-arg'
       - 'VITE_ALIGNMENT_SERVICE_URL=${_VITE_ALIGNMENT_SERVICE_URL}'
+      # Build metadata (version from git tag, build number from build/N tags)
+      - '--build-arg'
+      - 'APP_VERSION=${_APP_VERSION}'
+      - '--build-arg'
+      - 'BUILD_NUM=${_BUILD_NUM}'
       - '-t'
       - '${_IMAGE_NAME}:${_TAG}'
       - '-t'
@@ -59,6 +64,8 @@ substitutions:
   # Build metadata
   _IMAGE_NAME: ''
   _TAG: 'latest'
+  _APP_VERSION: 'dev'
+  _BUILD_NUM: '0'
 
 # Build options
 options:
