@@ -13,6 +13,7 @@ import { TranscriptView } from '../components/viewer/TranscriptView';
 import { Sidebar } from '../components/viewer/Sidebar';
 import { AudioPlayer } from '../components/viewer/AudioPlayer';
 import { RenameSpeakerModal } from '../components/viewer/RenameSpeakerModal';
+import { EditTitleModal } from '../components/viewer/EditTitleModal';
 import { KeyboardShortcutsModal } from '../components/viewer/KeyboardShortcutsModal';
 import { HelpCircle, X, PanelRight } from 'lucide-react';
 
@@ -47,6 +48,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
 
   const [conversation, setConversation] = useState(activeConversation);
   const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
@@ -233,6 +235,22 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
   }, [editingSpeakerId, conversation, updateConversation]);
 
   /**
+   * Handle title edit - update local state and persist to Firestore
+   */
+  const saveTitle = useCallback((newTitle: string) => {
+    if (newTitle.trim() && newTitle !== conversation.title) {
+      const updatedConversation = {
+        ...conversation,
+        title: newTitle.trim()
+      };
+
+      setConversation(updatedConversation);
+      updateConversation(updatedConversation);
+    }
+    setEditingTitle(false);
+  }, [conversation, updateConversation]);
+
+  /**
    * Handle person note updates
    */
   const handleUpdatePerson = useCallback((updatedPerson: Person) => {
@@ -288,9 +306,11 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
       <ViewerHeader
         title={conversation.title}
         createdAt={conversation.createdAt}
+        conversationId={conversation.conversationId}
         isSyncing={isSyncing}
         onBack={onBack}
         onStatsClick={onStatsClick}
+        onEditTitle={() => setEditingTitle(true)}
         driftCorrectionApplied={driftCorrectionApplied}
         driftRatio={driftRatio}
         driftMs={driftMs}
@@ -492,6 +512,15 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
           initialName={conversation.speakers[editingSpeakerId].displayName}
           onClose={() => setEditingSpeakerId(null)}
           onSave={saveSpeakerName}
+        />
+      )}
+
+      {/* Edit Title Modal */}
+      {editingTitle && (
+        <EditTitleModal
+          initialTitle={conversation.title}
+          onClose={() => setEditingTitle(false)}
+          onSave={saveTitle}
         />
       )}
 

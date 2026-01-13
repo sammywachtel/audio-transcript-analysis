@@ -459,46 +459,136 @@ export async function extractChunk(
     durationSeconds: endSeconds - startSeconds,
   });
 
+  // ALWAYS re-encode to ensure clean timestamps starting at 0.
+  // Stream copy (-c copy) preserves original container timestamps which can cause
+  // playback position to differ from byte-offset position, especially for YouTube
+  // downloads and VBR MP3 files. Re-encoding is slower but guarantees accurate timestamps.
+  //
+  // Technical background: MP3 container timestamps are based on frame positions,
+  // not sample counts. VBR files can have timestamp drift where the container says
+  // "frame at 10.5s" but byte-position-based playback puts it at 10.7s. Browsers
+  // typically use byte-position seeking, while WhisperX may use container timestamps.
+  console.log('[Chunking] Re-encoding chunk for accurate timestamps...');
+
+  await execFileAsync(ffmpegPath, [
+    '-y',
+    '-i', audioFilePath,
+    '-ss', startSeconds.toString(), // Seek AFTER input = precise seeking
+    '-t', (endSeconds - startSeconds).toString(),
+    '-acodec', 'libmp3lame',        // Re-encode to MP3
+    '-ar', '16000',                  // 16kHz sample rate (optimal for speech/WhisperX)
+    '-ac', '1',                      // Mono (reduces size, fine for speech)
+    '-ab', '64k',                    // 64kbps (sufficient for speech)
+    outputPath
+  ], {
+    timeout: 300000, // 5 minute timeout for re-encoding
+  });
+
+  // Verify output exists and has content
+  const stats = fs.statSync(outputPath);
+  if (stats.size === 0) {
+    throw new Error('Extracted chunk is empty');
+  }
+
+  console.log('[Chunking] Chunk extracted successfully:', {
+    outputPath,
+    sizeBytes: stats.size,
+    sizeMB: (stats.size / (1024 * 1024)).toFixed(2),
+  });
+}
+
+// =============================================================================
+// Playback Re-encoding (Seeking Fix)
+// =============================================================================
+
+/**
+ * Re-encode audio file for clean playback seeking.
+ *
+ * MP3 files (especially VBR or downloaded from YouTube) often have imprecise
+ * seeking because browsers estimate byte position from time using average
+ * bitrate. Re-encoding creates fresh timestamps that start at exactly 0 and
+ * increment predictably, which fixes seeking accuracy.
+ *
+ * Trade-offs:
+ * - Adds ~10-30 seconds to upload processing time
+ * - Creates consistent seeking behavior across all audio sources
+ * - Uses CBR encoding for predictable byte-to-time mapping
+ *
+ * @param inputPath - Path to the original audio file
+ * @param outputPath - Path for the re-encoded output (can be same as input to overwrite)
+ */
+export async function reencodeForPlayback(
+  inputPath: string,
+  outputPath: string
+): Promise<{ originalSizeBytes: number; outputSizeBytes: number; durationMs: number; reencodeTimeMs: number }> {
+  const ffmpegPath = ffmpegInstaller.path;
+  const startTime = Date.now();
+
+  const originalStats = fs.statSync(inputPath);
+  const originalSizeBytes = originalStats.size;
+
+  console.log('[Chunking] Re-encoding audio for playback (seeking fix)...', {
+    inputPath,
+    outputPath,
+    originalSizeBytes,
+    originalSizeMB: (originalSizeBytes / (1024 * 1024)).toFixed(2)
+  });
+
+  // Use a temp file if outputPath === inputPath (can't overwrite while reading)
+  const needsTempFile = inputPath === outputPath;
+  const actualOutputPath = needsTempFile
+    ? outputPath.replace(/(\.[^.]+)$/, '-reencoded$1')
+    : outputPath;
+
   try {
-    await execFileAsync(ffmpegPath, [
-      '-y',                           // Overwrite output file
-      '-ss', startSeconds.toString(), // Seek to start (before -i for fast seeking)
-      '-i', audioFilePath,
-      '-to', (endSeconds - startSeconds).toString(), // Duration from seek point
-      '-c', 'copy',                   // Copy without re-encoding (fast)
-      '-avoid_negative_ts', 'make_zero', // Fix timestamp issues from seeking
-      outputPath
-    ], {
-      timeout: 60000, // 1 minute timeout per chunk
-    });
-
-    // Verify output exists and has content
-    const stats = fs.statSync(outputPath);
-    if (stats.size === 0) {
-      throw new Error('Extracted chunk is empty');
-    }
-
-    console.log('[Chunking] Chunk extracted successfully:', {
-      outputPath,
-      sizeBytes: stats.size,
-      sizeMB: (stats.size / (1024 * 1024)).toFixed(2),
-    });
-
-  } catch (error) {
-    // If -c copy fails (codec issues), try with re-encoding
-    console.warn('[Chunking] Fast extraction failed, trying with re-encode...', error);
-
+    // Re-encode with settings optimized for speech playback:
+    // - CBR (constant bitrate) for predictable seeking
+    // - Preserve original sample rate if higher than 16kHz for quality
+    // - Stereo if original is stereo (some users may have stereo recordings)
     await execFileAsync(ffmpegPath, [
       '-y',
-      '-ss', startSeconds.toString(),
-      '-i', audioFilePath,
-      '-to', (endSeconds - startSeconds).toString(),
-      '-acodec', 'libmp3lame',        // Re-encode to MP3
-      '-ab', '128k',                   // 128kbps bitrate
-      outputPath
+      '-i', inputPath,
+      '-acodec', 'libmp3lame',    // Re-encode to MP3
+      '-ab', '128k',               // 128kbps CBR - good quality for speech, predictable seeking
+      '-ar', '44100',              // Standard sample rate for broad compatibility
+      actualOutputPath
     ], {
-      timeout: 300000, // 5 minute timeout for re-encoding
+      timeout: 600000, // 10 minute timeout for long files
     });
+
+    // If we used a temp file, replace the original
+    if (needsTempFile) {
+      fs.renameSync(actualOutputPath, outputPath);
+    }
+
+    const outputStats = fs.statSync(outputPath);
+    const outputSizeBytes = outputStats.size;
+
+    // Get duration for logging
+    const durationSeconds = await getAudioDuration(outputPath);
+    const durationMs = Math.floor(durationSeconds * 1000);
+
+    const reencodeTimeMs = Date.now() - startTime;
+
+    console.log('[Chunking] Re-encoding complete:', {
+      outputPath,
+      originalSizeBytes,
+      outputSizeBytes,
+      sizeChange: `${((outputSizeBytes - originalSizeBytes) / originalSizeBytes * 100).toFixed(1)}%`,
+      audioDurationMs: durationMs,
+      audioDurationFormatted: `${Math.floor(durationMs / 60000)}:${((durationMs % 60000) / 1000).toFixed(0).padStart(2, '0')}`,
+      reencodeTimeMs,
+      reencodeTimeSec: (reencodeTimeMs / 1000).toFixed(1),
+      realtimeRatio: (durationMs / reencodeTimeMs).toFixed(1) + 'x' // e.g., "45x" means 45min audio encoded in 1min
+    });
+
+    return { originalSizeBytes, outputSizeBytes, durationMs, reencodeTimeMs };
+  } catch (error) {
+    // Clean up temp file on error
+    if (needsTempFile && fs.existsSync(actualOutputPath)) {
+      fs.unlinkSync(actualOutputPath);
+    }
+    throw error;
   }
 }
 

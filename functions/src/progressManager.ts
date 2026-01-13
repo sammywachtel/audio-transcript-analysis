@@ -5,6 +5,7 @@ import { db } from './index';
 export enum ProcessingStep {
   PENDING = 'pending',
   UPLOADING = 'uploading',
+  OPTIMIZING = 'optimizing',  // Re-encoding audio for clean playback seeking
   CHUNKING = 'chunking',
   PRE_ANALYZING = 'pre_analyzing',
   TRANSCRIBING = 'transcribing',
@@ -19,7 +20,8 @@ export enum ProcessingStep {
 // Progress percentages per step
 const STEP_PERCENTAGES: Record<ProcessingStep, number> = {
   [ProcessingStep.PENDING]: 0,
-  [ProcessingStep.UPLOADING]: 10,
+  [ProcessingStep.UPLOADING]: 5,
+  [ProcessingStep.OPTIMIZING]: 10,  // Re-encoding takes ~2 min for 45 min file
   [ProcessingStep.CHUNKING]: 15,
   [ProcessingStep.PRE_ANALYZING]: 25,
   [ProcessingStep.TRANSCRIBING]: 40,
@@ -48,6 +50,11 @@ const STEP_META: Record<ProcessingStep, StepMeta> = {
   [ProcessingStep.UPLOADING]: {
     label: 'Uploading',
     description: 'Uploading audio file to storage',
+    category: 'active'
+  },
+  [ProcessingStep.OPTIMIZING]: {
+    label: 'Optimizing Audio',
+    description: 'Re-encoding audio for accurate playback seeking',
     category: 'active'
   },
   [ProcessingStep.CHUNKING]: {

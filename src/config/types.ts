@@ -116,6 +116,8 @@ export interface UserProfile {
 export enum ProcessingStep {
   PENDING = 'pending',
   UPLOADING = 'uploading',
+  OPTIMIZING = 'optimizing',    // Re-encoding audio for clean playback seeking
+  CHUNKING = 'chunking',        // Splitting large audio into chunks
   PRE_ANALYZING = 'pre_analyzing',
   TRANSCRIBING = 'transcribing',
   ANALYZING = 'analyzing',

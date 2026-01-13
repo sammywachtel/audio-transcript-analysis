@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-01-13
+
 ### Added
+- **Audio Playback Optimization** - Re-encoding ensures accurate seeking when clicking transcript segments
+  - Original audio files re-encoded to CBR (constant bitrate) MP3 for predictable byte-to-time mapping
+  - Fixes 3-10 second seeking drift in VBR files (especially YouTube downloads)
+  - New "Optimizing Audio" progress step shows re-encoding status during upload
+  - Processing time: ~2 minutes for 45-minute files (22x realtime)
+- **Build Version Tracking** - Function deployments now tagged with git version for debugging
+  - `processedByVersion` field stored in conversation documents
+  - Version logged on Cloud Function cold start
+  - Format: `{commit}` or `{commit}-dirty-{timestamp}` for uncommitted changes
+- **Conversation ID Display** - Click-to-copy conversation ID in viewer header for debugging
 - **Voice Embedding Speaker Reconciliation** - Acoustic-based speaker matching across chunks using 256-dimensional voice embeddings
   - Replaces content-based reconciliation (which produced 23 speakers from 2-speaker audio) with voice-signature matching
   - Uses forked Replicate model `sammywachtel/whisper-diarization-embeddings-01` with pyannote/wespeaker-voxceleb-resnet34-LM
@@ -56,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Breaking:** Requires one-time Cloud Tasks queue setup (`transcription-queue`) - see `docs/how-to/deploy.md`
 
 ### Fixed
+- **Audio Playback Seeking Drift** - Clicking transcript segments now plays correct audio position
+  - Root cause: MP3 VBR container timestamps differ from byte-position playback
+  - Chunk extraction changed from stream copy to re-encoding for clean timestamps
+  - Playback file re-encoded separately to preserve original quality for transcription
 - **Large File Upload Timeouts** - Root cause addressed via queue architecture (above)
   - Node.js undici `headersTimeout` extended to 25 minutes (fixes `HeadersTimeoutError`)
   - Gemini API calls configured with 20-minute SDK-level timeout

@@ -38,6 +38,7 @@ import {
 } from './chunkContext';
 import { ChunkContext, ProcessingMode, SpeakerSignature } from './types';
 import { ChunkMetadata } from './chunking';
+import { BUILD_VERSION } from './version';
 
 /**
  * Enqueue a merge task to Cloud Tasks.
@@ -261,7 +262,7 @@ export const processTranscription = onRequest(
         });
       }
 
-      console.log('[ProcessTranscription] Starting transcription pipeline...');
+      console.log('[ProcessTranscription] Starting transcription pipeline...', { version: BUILD_VERSION });
 
       // Execute the full transcription pipeline (shared with transcribeAudio)
       // Pass chunk context and metadata for chunk-aware processing
@@ -305,8 +306,9 @@ export const processTranscription = onRequest(
 
         // Build chunk artifact update
         // For parallel mode, include speaker signatures for merge reconciliation
-        const chunkArtifactUpdate: { emittedContext: ChunkContext; chunkSpeakerSignatures?: SpeakerSignature[] } = {
-          emittedContext: sanitizedContext
+        const chunkArtifactUpdate: { emittedContext: ChunkContext; chunkSpeakerSignatures?: SpeakerSignature[]; processedByVersion: string } = {
+          emittedContext: sanitizedContext,
+          processedByVersion: BUILD_VERSION // Track which function version processed this chunk
         };
 
         // Store speaker signatures for merge-time reconciliation (useful in both modes)

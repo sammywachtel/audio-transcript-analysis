@@ -42,6 +42,7 @@ import {
   logFallbackTriggered,
   logReconciliationFailed
 } from './logging/reconciliation';
+import { BUILD_VERSION } from './version';
 
 // =============================================================================
 // Fallback Handling Helpers
@@ -597,6 +598,35 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     // Get the chunk metadata for timestamp conversion
     const chunkMeta = chunkMetadataArray[artifact.chunkIndex];
 
+    // Diagnostic: Log first few segments for each chunk to debug timestamp drift
+    if (artifact.segments.length > 0) {
+      const firstSeg = artifact.segments[0];
+      const lastSeg = artifact.segments[artifact.segments.length - 1];
+      const firstOriginal = chunkToOriginalTimestamp(firstSeg.startMs, chunkMeta);
+      const lastOriginal = chunkToOriginalTimestamp(lastSeg.endMs, chunkMeta);
+
+      console.log('[ChunkMerge] DIAGNOSTIC - Chunk timestamp conversion:', {
+        chunkIndex: artifact.chunkIndex,
+        chunkBounds: {
+          startMs: chunkMeta.startMs,
+          endMs: chunkMeta.endMs,
+          overlapBeforeMs: chunkMeta.overlapBeforeMs,
+          overlapAfterMs: chunkMeta.overlapAfterMs,
+          chunkAudioStartMs: chunkMeta.startMs - chunkMeta.overlapBeforeMs
+        },
+        firstSegment: {
+          chunkLocal: { startMs: firstSeg.startMs, endMs: firstSeg.endMs },
+          converted: { startMs: firstOriginal },
+          text: firstSeg.text.substring(0, 50) + '...'
+        },
+        lastSegment: {
+          chunkLocal: { startMs: lastSeg.startMs, endMs: lastSeg.endMs },
+          converted: { endMs: lastOriginal }
+        },
+        segmentCount: artifact.segments.length
+      });
+    }
+
     for (const segment of artifact.segments) {
       // Convert chunk-local timestamp to original audio timeline
       const originalStartMs = chunkToOriginalTimestamp(segment.startMs, chunkMeta);
@@ -645,6 +675,25 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     totalAfterDedup: mergedSegments.length,
     duplicatesRemoved: chunkArtifacts.reduce((sum, c) => sum + c.segments.length, 0) - mergedSegments.length
   });
+
+  // Diagnostic: Log sample merged segments to verify timestamps
+  // Look for segments around common test points: 1:55, 28:25, 30:58
+  const sampleTimesMs = [115000, 1705000, 1858000]; // Test timestamps from user
+  console.log('[ChunkMerge] DIAGNOSTIC - Sample merged segments:');
+  for (const targetMs of sampleTimesMs) {
+    const nearestSeg = mergedSegments.find(seg =>
+      seg.startMs <= targetMs && seg.endMs > targetMs
+    ) || mergedSegments.find(seg =>
+      Math.abs(seg.startMs - targetMs) < 10000
+    );
+    if (nearestSeg) {
+      console.log(`  Near ${Math.floor(targetMs / 60000)}:${Math.floor((targetMs % 60000) / 1000).toString().padStart(2, '0')}:`, {
+        startMs: nearestSeg.startMs,
+        endMs: nearestSeg.endMs,
+        text: nearestSeg.text.substring(0, 60) + '...'
+      });
+    }
+  }
 
   // Step 5: Merge speakers
   console.log('[ChunkMerge] Merging speakers...');
@@ -746,6 +795,7 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     status: 'complete',
     'chunkingMetadata.mergedAt': new Date().toISOString(),
     alignmentStatus: 'aligned', // Chunks use WhisperX alignment
+    processedByVersion: BUILD_VERSION, // Track which function version processed this
     updatedAt: FieldValue.serverTimestamp()
   };
 

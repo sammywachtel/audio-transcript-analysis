@@ -53,6 +53,8 @@ function _inferCategory(step: ProcessingStep): StepMeta['category'] {
     case ProcessingStep.PENDING:
       return 'pending';
     case ProcessingStep.UPLOADING:
+    case ProcessingStep.OPTIMIZING:
+    case ProcessingStep.CHUNKING:
     case ProcessingStep.TRANSCRIBING:
     case ProcessingStep.ANALYZING:
     case ProcessingStep.ALIGNING:
@@ -118,6 +120,20 @@ export const ProcessingProgress: React.FC<ProcessingProgressProps> = ({ progress
       textClass: 'text-blue-600',
       bgClass: 'bg-blue-100',
       progressClass: 'bg-blue-500'
+    },
+    [ProcessingStep.OPTIMIZING]: {
+      icon: Activity,
+      label: 'Optimizing Audio',
+      textClass: 'text-teal-600',
+      bgClass: 'bg-teal-100',
+      progressClass: 'bg-teal-500'
+    },
+    [ProcessingStep.CHUNKING]: {
+      icon: Activity,
+      label: 'Chunking',
+      textClass: 'text-orange-600',
+      bgClass: 'bg-orange-100',
+      progressClass: 'bg-orange-500'
     },
     [ProcessingStep.PRE_ANALYZING]: {
       icon: Search,

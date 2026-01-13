@@ -1,5 +1,38 @@
 # What's New
 
+## Version 2.0.0 - January 13, 2026
+
+### ✨ New Features
+
+**Smarter Speaker Identification**
+- Speakers are now identified by their **voice signature**, not just what they say
+- This dramatically improves accuracy for conversations with multiple speakers—you'll see 2-3 speakers instead of 20+ duplicates
+- Works automatically for new uploads; older transcripts use the previous method
+
+**Faster Processing for Long Audio**
+- Large files (30+ minutes) now process in **parallel** for faster results
+- New "Fast mode" is the default; you can switch to "Legacy mode" if you prefer sequential processing
+- Upload modal explains the trade-offs between speed and accuracy
+
+**Accurate Audio Seeking**
+- Clicking on a transcript segment now plays the **exact** audio position
+- Fixes the 3-10 second drift that occurred with some audio files (especially YouTube downloads)
+- You'll see an "Optimizing Audio" step during upload as we prepare your file
+
+### 🔧 Improvements
+
+**Debugging Made Easier**
+- Conversation ID now visible in the viewer header (click to copy)
+- Processing version tracked for each transcript to help diagnose issues
+
+### 🐛 Bug Fixes
+- Progress bar no longer jumps backwards during parallel processing
+- Fixed errors when retrying failed chunks
+- Fixed random single-character highlights in term detection
+- Large high-quality audio files (46MB+) now chunk properly before processing
+
+---
+
 ## Version 1.8.0-beta - January 5, 2026
 
 ### ✨ New Features
