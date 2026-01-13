@@ -42,7 +42,7 @@ import {
   logFallbackTriggered,
   logReconciliationFailed
 } from './logging/reconciliation';
-import { BUILD_VERSION } from './version';
+import { BUILD_VERSION, BUILD_NUMBER } from './version';
 
 // =============================================================================
 // Fallback Handling Helpers
@@ -796,6 +796,7 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     'chunkingMetadata.mergedAt': new Date().toISOString(),
     alignmentStatus: 'aligned', // Chunks use WhisperX alignment
     processedByVersion: BUILD_VERSION, // Track which function version processed this
+    ...(BUILD_NUMBER !== null && { processedByBuildNumber: BUILD_NUMBER }), // Build tag number if present
     updatedAt: FieldValue.serverTimestamp()
   };
 

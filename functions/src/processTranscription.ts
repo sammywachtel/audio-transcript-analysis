@@ -38,7 +38,7 @@ import {
 } from './chunkContext';
 import { ChunkContext, ProcessingMode, SpeakerSignature } from './types';
 import { ChunkMetadata } from './chunking';
-import { BUILD_VERSION } from './version';
+import { BUILD_VERSION, BUILD_NUMBER } from './version';
 
 /**
  * Enqueue a merge task to Cloud Tasks.
@@ -306,9 +306,10 @@ export const processTranscription = onRequest(
 
         // Build chunk artifact update
         // For parallel mode, include speaker signatures for merge reconciliation
-        const chunkArtifactUpdate: { emittedContext: ChunkContext; chunkSpeakerSignatures?: SpeakerSignature[]; processedByVersion: string } = {
+        const chunkArtifactUpdate: { emittedContext: ChunkContext; chunkSpeakerSignatures?: SpeakerSignature[]; processedByVersion: string; processedByBuildNumber?: number } = {
           emittedContext: sanitizedContext,
-          processedByVersion: BUILD_VERSION // Track which function version processed this chunk
+          processedByVersion: BUILD_VERSION, // Track which function version processed this chunk
+          ...(BUILD_NUMBER !== null && { processedByBuildNumber: BUILD_NUMBER }) // Build tag number if present
         };
 
         // Store speaker signatures for merge-time reconciliation (useful in both modes)
