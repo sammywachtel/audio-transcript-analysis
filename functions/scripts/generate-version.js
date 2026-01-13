@@ -41,14 +41,19 @@ function getGitInfo() {
       // No build tag, that's fine
     }
 
-    // Check for uncommitted changes
-    const status = execSync('git status --porcelain', { encoding: 'utf8' }).trim();
-    const isDirty = status.length > 0;
+    // Check for uncommitted changes (skip in CI - CI checkouts are clean by definition)
+    const isCI = process.env.CI === 'true';
+    let isDirty = false;
 
-    if (isDirty) {
-      // Add dirty marker with timestamp for manual deploys
-      const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, '');
-      version = `${version}-dirty-${timestamp}`;
+    if (!isCI) {
+      const status = execSync('git status --porcelain', { encoding: 'utf8' }).trim();
+      isDirty = status.length > 0;
+
+      if (isDirty) {
+        // Add dirty marker with timestamp for local deploys
+        const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, '');
+        version = `${version}-dirty-${timestamp}`;
+      }
     }
 
     // Get branch name for context
