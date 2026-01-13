@@ -1,5 +1,16 @@
 # What's New
 
+## Version 2.0.2 - January 13, 2026
+
+### 🔧 Improvements
+
+**Larger File Uploads**
+- You can now upload audio files up to **500MB** (previously 100MB)
+- Handles longer uncompressed WAV recordings
+- If you try to upload a file that's too large, you'll see a clear error message before the upload even starts
+
+---
+
 ## Version 2.0.0 - January 13, 2026
 
 ### ✨ New Features

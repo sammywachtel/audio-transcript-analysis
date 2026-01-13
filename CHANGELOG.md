@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-01-13
+
+### Changed
+- **File Upload Limit** - Increased maximum audio file size from 100MB to 500MB
+  - Handles ~45 minute stereo WAV files at 44.1kHz
+  - Client-side validation now prevents upload attempts before hitting server limit
+  - Clear error message shows file size vs limit when exceeded
+
 ## [2.0.1] - 2026-01-13
 
 ### Fixed
