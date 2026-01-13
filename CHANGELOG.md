@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-01-13
+
+### Fixed
+- **Stale Progress Display on Retry** - Retrying a failed chunked job now clears previous progress indicators
+  - UI no longer shows stale progress percentages and timeline from the failed attempt
+  - Progress starts fresh from 0% when resuming incomplete chunks
+- **Cancel Timing Window for Small Files** - Cancel requests are now respected even during the brief window between upload completion and task creation
+  - Added abort checkpoint before enqueueing Cloud Tasks for non-chunked files
+  - Previously, a cancel request during this window would be ignored
+
+### Added
+- **taskGeneration Documentation** - Architecture reference now explains the stale task detection mechanism
+  - Documents how `taskGeneration` counter invalidates orphaned Cloud Tasks from previous attempts
+  - Helps developers understand retry safety guarantees
+
 ## [2.0.4] - 2026-01-13
 
 ### Fixed

@@ -1783,6 +1783,9 @@ export const transcribeAudio = onObjectFinalized(
             scheduleDelaySeconds: 5
           });
 
+          // Check for abort before enqueuing task (allows fast cancellation)
+          await checkAbort(conversationId);
+
           const [createdTask] = await tasksClient.createTask({ parent, task });
 
           console.log('[Transcribe] ✅ Task enqueued successfully:', {
