@@ -4,7 +4,7 @@ Comprehensive flow diagram showing all Google Cloud Functions, their triggers, i
 
 ## Overview
 
-The application uses **7 Cloud Functions** to handle audio processing, chat, and analytics:
+The application uses **10 Cloud Functions** to handle audio processing, chat, analytics, and billing:
 
 | Function | Trigger | Memory | Timeout | Purpose |
 |----------|---------|--------|---------|---------|
@@ -14,7 +14,10 @@ The application uses **7 Cloud Functions** to handle audio processing, chat, and
 | `processReprocessing` | Cloud Tasks HTTP | 512MiB | 10 min | Fallback: re-chunk in sequential mode |
 | `chatWithConversation` | HTTPS Callable | 512MiB | 10 min | LLM chat with timestamp citations |
 | `retryTranscription` | HTTPS Callable | 512MiB | 60 sec | Resume or restart failed jobs |
-| `computeDailyStats` | Scheduler (2 AM) | - | - | Aggregate usage statistics |
+| `computeDailyStats` | Scheduler (2 AM) | 256MiB | 9 min | Aggregate usage statistics |
+| `syncBillingCosts` | Scheduler (4 AM) | 512MiB | 9 min | Sync actual costs from BigQuery |
+| `triggerBillingSync` | HTTPS Callable | 512MiB | 9 min | Manual billing sync trigger (admin) |
+| `diagnoseBillingLabels` | HTTPS Callable | 512MiB | 60 sec | Diagnostic for billing label issues |
 
 ## Complete Flow Diagram
 
@@ -304,6 +307,40 @@ Allows users to retry failed or aborted jobs.
 - `onConversationDeleted`: Records user event on conversation deletion
 - `computeDailyStats`: Scheduled (2 AM UTC) aggregation of global and daily stats
 - `triggerStatsComputation`: Admin manual trigger for stats computation
+
+## Billing Sync Functions (v2.2.0+)
+
+**Files:** `functions/src/billingSync.ts`
+
+These functions sync actual Gemini costs from BigQuery billing exports to enable cost reconciliation:
+
+- `syncBillingCosts`: Scheduled (4 AM UTC) to fetch actual costs from BigQuery and update `_metrics` documents with `actualCost` field
+- `triggerBillingSync`: Admin-only manual trigger for on-demand billing sync
+- `diagnoseBillingLabels`: Admin-only diagnostic function to debug billing label propagation
+
+**Data Flow:**
+```
+Vertex AI API Calls → Billing Labels (conversation_id, user_id, call_type)
+        │
+        ▼
+BigQuery Billing Export (24-48 hour delay)
+        │
+        ▼ (4 AM UTC daily)
+syncBillingCosts queries BigQuery
+        │
+        ▼
+_metrics documents updated with actualCost
+        │
+        ▼
+Admin dashboard shows estimated vs actual costs
+```
+
+**Prerequisites:**
+- BigQuery billing export enabled in `wachtel-ops` project
+- Service account has `roles/bigquery.dataViewer` on billing dataset
+- `_pricing` collection configured (no fallback defaults as of v2.2.0)
+
+**Note:** Billing data has a 24-48 hour delay. The sync queries a 7-day window to catch late-arriving data.
 
 ## Key Architectural Decisions
 
