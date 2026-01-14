@@ -129,6 +129,71 @@ firebase apps:sdkconfig WEB --project=your-project-id
 |--------|-------------|
 | `FIREBASE_SERVICE_ACCOUNT` | Firebase service account JSON |
 
+## Pricing Configuration (Required)
+
+As of v2.2.0, pricing configuration in the `_pricing` Firestore collection is **required** for cost calculation. Without it, costs will show as $0 with warnings.
+
+### Required Pricing Records
+
+Create these documents in the `_pricing` collection:
+
+1. **`gemini-2.5-flash`** (audio input pricing):
+   ```json
+   {
+     "model": "gemini-2.5-flash",
+     "service": "gemini",
+     "inputPricePerMillion": 1.00,
+     "outputPricePerMillion": 2.50,
+     "effectiveFrom": "2026-01-01T00:00:00Z"
+   }
+   ```
+
+2. **`gemini-2.5-flash-text`** (text input pricing):
+   ```json
+   {
+     "model": "gemini-2.5-flash-text",
+     "service": "gemini",
+     "inputPricePerMillion": 0.30,
+     "effectiveFrom": "2026-01-01T00:00:00Z"
+   }
+   ```
+
+3. **`whisperx`** (transcription + diarization):
+   ```json
+   {
+     "model": "whisperx",
+     "service": "replicate",
+     "pricePerSecond": 0.0023,
+     "effectiveFrom": "2026-01-01T00:00:00Z"
+   }
+   ```
+
+You can add these via the Admin Dashboard → Pricing Manager or directly in Firebase Console.
+
+## BigQuery Billing Sync Setup (Optional)
+
+The `syncBillingCosts` function syncs actual Gemini costs from BigQuery billing exports for cost reconciliation. This requires:
+
+1. **BigQuery billing export** enabled in your billing project
+2. **IAM permissions** for the Cloud Functions service account
+
+### Grant BigQuery Access
+
+```bash
+PROJECT_ID="your-project-id"
+BILLING_PROJECT="wachtel-ops"  # or your billing export project
+
+# Get the Cloud Functions service account
+CF_SA="${PROJECT_ID}@appspot.gserviceaccount.com"
+
+# Grant BigQuery Data Viewer on the billing project
+gcloud projects add-iam-policy-binding $BILLING_PROJECT \
+  --member="serviceAccount:$CF_SA" \
+  --role="roles/bigquery.dataViewer"
+```
+
+The `gcp-setup.sh` script handles this automatically when run with the billing project configured.
+
 ## Cloud Tasks Queue Setup (One-Time)
 
 The app uses Cloud Tasks to handle long-running audio transcription jobs. The `transcribeAudio` storage trigger enqueues tasks, and the `processTranscription` HTTP function processes them with a 60-minute timeout.

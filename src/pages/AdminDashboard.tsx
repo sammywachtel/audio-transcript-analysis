@@ -38,7 +38,7 @@ import {
   MetricsTable,
   MetricsTableSkeleton
 } from '../components/metrics';
-import { formatDuration, formatUsd } from '../services/metricsService';
+import { formatDuration, formatUsd, calculateCostSummary, ProcessingMetric } from '../services/metricsService';
 import { PricingManager } from '../components/admin/PricingManager';
 import { ChatMetricsTable } from '../components/admin/ChatMetricsTable';
 
@@ -110,6 +110,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, onJobCli
           <OverviewTab
             globalStats={globalStats}
             dailyStats={dailyStats}
+            recentMetrics={recentMetrics}
             dateRange={dateRange}
             onDateRangeChange={setDateRange}
           />
@@ -146,6 +147,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, onJobCli
 interface OverviewTabProps {
   globalStats: ReturnType<typeof useGlobalStats>;
   dailyStats: ReturnType<typeof useDailyStats>;
+  recentMetrics: ReturnType<typeof useRecentMetrics>;
   dateRange: number;
   onDateRangeChange: (days: number) => void;
 }
@@ -153,13 +155,24 @@ interface OverviewTabProps {
 const OverviewTab: React.FC<OverviewTabProps> = ({
   globalStats,
   dailyStats,
+  recentMetrics,
   dateRange,
   onDateRangeChange
 }) => {
   const { data: stats, loading: statsLoading, error: statsError, refetch: refetchStats } = globalStats;
   const { data: daily, loading: dailyLoading, refetch: refetchDaily } = dailyStats;
+  const { data: metricsData } = recentMetrics;
+
+  // Calculate actual cost summary from recent metrics
+  const processingMetrics = (metricsData || []).filter((m): m is ProcessingMetric => !('type' in m) || m.type !== 'chat');
+  const costSummary = calculateCostSummary(processingMetrics);
+
   const [computingStats, setComputingStats] = useState(false);
   const [computeResult, setComputeResult] = useState<string | null>(null);
+  const [syncingBilling, setSyncingBilling] = useState(false);
+  const [billingResult, setBillingResult] = useState<string | null>(null);
+  const [diagnosingLabels, setDiagnosingLabels] = useState(false);
+  const [diagnoseResult, setDiagnoseResult] = useState<string | null>(null);
 
   const handleRefresh = () => {
     refetchStats();
@@ -186,6 +199,81 @@ const OverviewTab: React.FC<OverviewTabProps> = ({
       setComputeResult(`Error: ${error instanceof Error ? error.message : 'Failed to compute stats'}`);
     } finally {
       setComputingStats(false);
+    }
+  };
+
+  const handleSyncBilling = async () => {
+    setSyncingBilling(true);
+    setBillingResult(null);
+    try {
+      const functions = getFunctions();
+      const triggerSync = httpsCallable(functions, 'triggerBillingSync');
+      const result = await triggerSync() as {
+        data: {
+          success: boolean;
+          conversationsQueried: number;
+          metricsUpdated: number;
+          metricsAlreadySynced: number;
+          totalActualCostUsd: number;
+          errors: string[];
+        }
+      };
+
+      if (result.data.success) {
+        const { conversationsQueried, metricsUpdated, metricsAlreadySynced, totalActualCostUsd } = result.data;
+        if (conversationsQueried === 0) {
+          setBillingResult('No billing data found in BigQuery for the last 7 days. Labels may not be appearing in billing exports yet.');
+        } else {
+          setBillingResult(
+            `Synced! Found ${conversationsQueried} conversations in BigQuery. ` +
+            `Updated ${metricsUpdated} metrics, ${metricsAlreadySynced} already synced. ` +
+            `Total actual cost: $${totalActualCostUsd.toFixed(4)}`
+          );
+        }
+      }
+    } catch (error) {
+      setBillingResult(`Error: ${error instanceof Error ? error.message : 'Failed to sync billing'}`);
+    } finally {
+      setSyncingBilling(false);
+    }
+  };
+
+  const handleDiagnoseLabels = async () => {
+    setDiagnosingLabels(true);
+    setDiagnoseResult(null);
+    try {
+      const functions = getFunctions();
+      const diagnose = httpsCallable(functions, 'diagnoseBillingLabels');
+      const result = await diagnose() as {
+        data: {
+          success: boolean;
+          diagnosis: {
+            vertexAiUsage: { row_count: number; total_cost_usd: number; earliest_usage?: string; latest_usage?: string };
+            labelsOverview: { rows_with_labels: number; unique_label_keys: number };
+            labelKeys: Array<{ key: string; occurrences: number; sampleValues: string[] }>;
+          };
+          hint: string;
+        }
+      };
+
+      if (result.data.success) {
+        const { diagnosis, hint } = result.data;
+        const usage = diagnosis.vertexAiUsage;
+        const labels = diagnosis.labelsOverview;
+
+        let msg = `Vertex AI: ${usage.row_count} rows, $${Number(usage.total_cost_usd).toFixed(4)} total cost.\n`;
+        msg += `Labels: ${labels.rows_with_labels} rows with labels, ${labels.unique_label_keys} unique keys.\n`;
+
+        if (diagnosis.labelKeys.length > 0) {
+          msg += `Keys found: ${diagnosis.labelKeys.map(k => `${k.key} (${k.occurrences})`).join(', ')}\n`;
+        }
+        msg += hint;
+        setDiagnoseResult(msg);
+      }
+    } catch (error) {
+      setDiagnoseResult(`Error: ${error instanceof Error ? error.message : 'Failed to diagnose labels'}`);
+    } finally {
+      setDiagnosingLabels(false);
     }
   };
 
@@ -249,11 +337,80 @@ const OverviewTab: React.FC<OverviewTabProps> = ({
             <option value={90}>Last 90 days</option>
           </select>
         </div>
-        <Button variant="ghost" size="sm" onClick={handleRefresh} className="gap-2">
-          <RefreshCw size={14} />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={handleRefresh} className="gap-2">
+            <RefreshCw size={14} />
+            Refresh
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleComputeStats}
+            disabled={computingStats}
+            className="gap-2"
+          >
+            {computingStats ? <Loader2 className="animate-spin" size={14} /> : <Zap size={14} />}
+            {computingStats ? 'Computing...' : 'Recompute Stats'}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleSyncBilling}
+            disabled={syncingBilling}
+            className="gap-2"
+          >
+            {syncingBilling ? <Loader2 className="animate-spin" size={14} /> : <DollarSign size={14} />}
+            {syncingBilling ? 'Syncing...' : 'Sync Billing'}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleDiagnoseLabels}
+            disabled={diagnosingLabels}
+            className="gap-2"
+          >
+            {diagnosingLabels ? <Loader2 className="animate-spin" size={14} /> : <Activity size={14} />}
+            {diagnosingLabels ? 'Diagnosing...' : 'Diagnose Labels'}
+          </Button>
+        </div>
       </div>
+
+      {/* Compute stats result message */}
+      {computeResult && (
+        <div className={`p-3 rounded-lg text-sm ${
+          computeResult.startsWith('Error')
+            ? 'bg-red-50 text-red-700 border border-red-200'
+            : 'bg-green-50 text-green-700 border border-green-200'
+        }`}>
+          {computeResult}
+        </div>
+      )}
+
+      {/* Billing sync result message */}
+      {billingResult && (
+        <div className={`p-3 rounded-lg text-sm ${
+          billingResult.startsWith('Error')
+            ? 'bg-red-50 text-red-700 border border-red-200'
+            : billingResult.includes('No billing data')
+            ? 'bg-amber-50 text-amber-700 border border-amber-200'
+            : 'bg-green-50 text-green-700 border border-green-200'
+        }`}>
+          {billingResult}
+        </div>
+      )}
+
+      {/* Diagnose labels result message */}
+      {diagnoseResult && (
+        <div className={`p-3 rounded-lg text-sm whitespace-pre-wrap ${
+          diagnoseResult.startsWith('Error')
+            ? 'bg-red-50 text-red-700 border border-red-200'
+            : diagnoseResult.includes('No labels found')
+            ? 'bg-amber-50 text-amber-700 border border-amber-200'
+            : 'bg-blue-50 text-blue-700 border border-blue-200'
+        }`}>
+          {diagnoseResult}
+        </div>
+      )}
 
       {/* Global Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -284,12 +441,33 @@ const OverviewTab: React.FC<OverviewTabProps> = ({
               sublabel={`${stats.conversations.totalConversationsExisting} conversations`}
               icon={<FileAudio size={20} className="text-purple-500" />}
             />
-            <StatCard
-              label="Total Cost"
-              value={formatUsd(stats.llmUsage.estimatedTotalCostUsd)}
-              sublabel="Estimated LLM costs"
-              icon={<DollarSign size={20} className="text-amber-500" />}
-            />
+            <div className="bg-white rounded-xl border border-slate-200 p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <DollarSign size={20} className="text-amber-500" />
+                <span className="text-xs text-slate-500 font-medium">Total Cost</span>
+              </div>
+              <div className="space-y-2">
+                <div>
+                  <p className="text-2xl font-bold text-slate-900">
+                    {formatUsd(stats.llmUsage.estimatedTotalCostUsd)}
+                  </p>
+                  <p className="text-xs text-slate-500">Estimated (all time)</p>
+                </div>
+                {costSummary.jobsWithActual > 0 && (
+                  <div className="pt-2 border-t border-slate-100">
+                    <div className="flex items-baseline gap-2">
+                      <p className="text-lg font-semibold text-emerald-600">
+                        {formatUsd(costSummary.actual)}
+                      </p>
+                      <span className="text-xs text-emerald-600">actual</span>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      {costSummary.jobsWithActual} of {costSummary.totalJobs} jobs synced ({costSummary.actualCoverage.toFixed(0)}%)
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
           </>
         ) : (
           <div className="col-span-4 text-center text-slate-500 py-8">

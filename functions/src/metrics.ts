@@ -19,20 +19,26 @@ import { log } from './logger';
 
 /**
  * Gemini API usage metrics (token-based pricing)
+ * Audio and text inputs have different rates (see _pricing collection):
+ * - Audio input tokens: used when sending raw audio to Gemini (pre-analysis)
+ * - Text input tokens: used when sending transcript text to Gemini (analysis)
  */
 export interface GeminiUsage {
-  inputTokens: number;
+  inputTokens: number;           // Total input tokens (backward compat, = audioInputTokens + textInputTokens)
+  audioInputTokens?: number;     // Tokens from audio input (pre-analysis)
+  textInputTokens?: number;      // Tokens from text input (transcript analysis)
   outputTokens: number;
   model: string;  // e.g., 'gemini-2.5-flash'
 }
 
 /**
  * Replicate API usage metrics (compute-time pricing)
+ * The whisper-diarization model handles both transcription AND speaker diarization in one call.
  */
 export interface ReplicateUsage {
   predictionId?: string;  // Replicate prediction ID for audit trail
   computeTimeSeconds: number;
-  model: string;  // e.g., 'whisperx', 'pyannote-diarization'
+  model: string;  // e.g., 'whisperx' (includes diarization)
 }
 
 /**
@@ -43,10 +49,8 @@ export interface LLMUsage {
   geminiAnalysis: GeminiUsage;
   // Gemini Speaker Reassignment Call
   geminiSpeakerCorrection: GeminiUsage;
-  // WhisperX via Replicate (transcription + timestamps)
+  // WhisperX via Replicate (transcription + timestamps + speaker diarization)
   whisperx: ReplicateUsage;
-  // Speaker Diarization (pyannote via Replicate) - optional
-  diarization?: ReplicateUsage;
 }
 
 /**
@@ -54,10 +58,12 @@ export interface LLMUsage {
  * Calculated using pricing from _pricing collection
  */
 export interface EstimatedCost {
-  geminiUsd: number;      // Combined Gemini costs
-  whisperxUsd: number;    // WhisperX compute cost
-  diarizationUsd: number; // Diarization compute cost
-  totalUsd: number;       // Grand total
+  geminiUsd: number;              // Combined Gemini costs (backward compat)
+  geminiAudioInputUsd?: number;   // Gemini audio input cost ($1/1M tokens)
+  geminiTextInputUsd?: number;    // Gemini text input cost ($0.30/1M tokens)
+  geminiOutputUsd?: number;       // Gemini output cost ($2.50/1M tokens)
+  whisperxUsd: number;            // WhisperX compute cost (includes diarization)
+  totalUsd: number;               // Grand total
 }
 
 /**
@@ -69,12 +75,12 @@ export interface PricingSnapshot {
   capturedAt: Timestamp;
   geminiPricingId: string | null;      // _pricing doc ID used, or null if default
   whisperxPricingId: string | null;
-  diarizationPricingId: string | null;
   rates: {
-    geminiInputPerMillion: number;
+    geminiInputPerMillion: number;           // Backward compat (text input rate)
+    geminiAudioInputPerMillion?: number;     // Audio input rate ($1/1M)
+    geminiTextInputPerMillion?: number;      // Text input rate ($0.30/1M)
     geminiOutputPerMillion: number;
     whisperxPerSecond: number;
-    diarizationPerSecond: number;
   };
 }
 
@@ -85,6 +91,16 @@ export interface PricingSnapshot {
 export interface CostResult {
   estimatedCost: EstimatedCost;
   pricingSnapshot: PricingSnapshot;
+}
+
+/**
+ * Actual cost from BigQuery billing exports.
+ * Fetched nightly by billingSync function.
+ */
+export interface ActualCost {
+  geminiUsd: number;          // Actual Gemini/Vertex AI cost from BigQuery
+  fetchedAt: Timestamp;       // When this data was fetched
+  source: 'bigquery_billing_export';
 }
 
 // =============================================================================
@@ -139,6 +155,10 @@ export interface ProcessingMetrics {
   // Captures the exact rates used so costs can be audited even after price changes
   pricingSnapshot?: PricingSnapshot;
 
+  // NEW: Actual cost from BigQuery billing exports (added by billingSync function)
+  // This is the real cost from GCP billing, not an estimate
+  actualCost?: ActualCost;
+
   // Timestamp
   timestamp: FieldValue;
 }
@@ -153,7 +173,7 @@ export interface ProcessingMetrics {
  */
 export interface PricingConfig {
   pricingId: string;
-  model: string;              // 'gemini-2.5-flash', 'whisperx', 'pyannote-diarization'
+  model: string;              // 'gemini-2.5-flash', 'gemini-2.5-flash-text', 'whisperx'
   service: 'gemini' | 'replicate';
 
   // Token-based pricing (for Gemini)
@@ -178,20 +198,14 @@ export interface PricingConfig {
 // =============================================================================
 
 /**
- * Default pricing (used if _pricing collection is empty)
- * Updated as of January 2026 - will be superseded by DB values
- * Source: https://cloud.google.com/vertex-ai/generative-ai/pricing
+ * Pricing must be configured in the _pricing collection.
+ * If pricing is missing, costs will be calculated as $0 with a warning.
+ *
+ * Required pricing records:
+ * - 'gemini-2.5-flash': audio input pricing (inputPricePerMillion, outputPricePerMillion)
+ * - 'gemini-2.5-flash-text': text input pricing (inputPricePerMillion)
+ * - 'whisperx': compute time pricing (pricePerSecond) - includes diarization
  */
-const DEFAULT_PRICING = {
-  gemini: {
-    inputPerMillion: 0.15,   // $0.15 per 1M input tokens (< 200K context)
-    outputPerMillion: 0.60,   // $0.60 per 1M output tokens (no reasoning)
-  },
-  replicate: {
-    whisperxPerSecond: 0.0023,      // ~$0.14/min
-    diarizationPerSecond: 0.0015,   // ~$0.09/min
-  }
-};
 
 /**
  * Get pricing for a specific model at a given timestamp.
@@ -255,50 +269,87 @@ export async function calculateCost(llmUsage: LLMUsage): Promise<CostResult> {
 
   // Get pricing for each service (fall back to defaults if not in DB)
   const geminiPricing = await getPricingForModel('gemini-2.5-flash', now);
+  const geminiTextPricing = await getPricingForModel('gemini-2.5-flash-text', now);
   const whisperxPricing = await getPricingForModel('whisperx', now);
-  const diarizationPricing = await getPricingForModel('pyannote-diarization', now);
 
-  // Calculate Gemini cost (both analysis and speaker correction calls)
-  const geminiInputTokens =
-    llmUsage.geminiAnalysis.inputTokens + llmUsage.geminiSpeakerCorrection.inputTokens;
+  // Get audio and text input token counts
+  // Audio tokens come from pre-analysis (raw audio sent to Gemini)
+  // Text tokens come from transcript analysis (text sent to Gemini)
+  const geminiAudioInputTokens =
+    (llmUsage.geminiAnalysis.audioInputTokens ?? 0) +
+    (llmUsage.geminiSpeakerCorrection.audioInputTokens ?? 0);
+  const geminiTextInputTokens =
+    (llmUsage.geminiAnalysis.textInputTokens ?? 0) +
+    (llmUsage.geminiSpeakerCorrection.textInputTokens ?? 0);
   const geminiOutputTokens =
     llmUsage.geminiAnalysis.outputTokens + llmUsage.geminiSpeakerCorrection.outputTokens;
 
-  const inputPricePerMillion = geminiPricing?.inputPricePerMillion ?? DEFAULT_PRICING.gemini.inputPerMillion;
-  const outputPricePerMillion = geminiPricing?.outputPricePerMillion ?? DEFAULT_PRICING.gemini.outputPerMillion;
+  // Fall back to total inputTokens if audio/text not specified (backward compat)
+  const totalInputTokens = llmUsage.geminiAnalysis.inputTokens + llmUsage.geminiSpeakerCorrection.inputTokens;
+  const hasDetailedBreakdown = geminiAudioInputTokens > 0 || geminiTextInputTokens > 0;
 
-  const geminiUsd =
-    (geminiInputTokens / 1_000_000) * inputPricePerMillion +
-    (geminiOutputTokens / 1_000_000) * outputPricePerMillion;
+  // Get pricing rates from database (0 if not configured)
+  // geminiPricing is for audio input (from 'gemini-2.5-flash')
+  // geminiTextPricing is for text input (from 'gemini-2.5-flash-text')
+  const audioInputPricePerMillion = geminiPricing?.inputPricePerMillion ?? 0;
+  const textInputPricePerMillion = geminiTextPricing?.inputPricePerMillion ?? 0;
+  const outputPricePerMillion = geminiPricing?.outputPricePerMillion ?? 0;
+  const whisperxPerSecond = whisperxPricing?.pricePerSecond ?? 0;
 
-  // Calculate WhisperX cost
-  const whisperxPerSecond = whisperxPricing?.pricePerSecond ?? DEFAULT_PRICING.replicate.whisperxPerSecond;
+  // Log warnings for missing pricing
+  const missingPricing: string[] = [];
+  if (!geminiPricing) missingPricing.push('gemini-2.5-flash');
+  if (!geminiTextPricing) missingPricing.push('gemini-2.5-flash-text');
+  if (!whisperxPricing) missingPricing.push('whisperx');
+
+  if (missingPricing.length > 0) {
+    log.warn('Missing pricing configuration - costs will be $0 for these services', {
+      missingModels: missingPricing,
+      stage: 'cost-calculation'
+    });
+  }
+
+  // Calculate Gemini costs with separate audio/text rates
+  let geminiAudioInputUsd = 0;
+  let geminiTextInputUsd = 0;
+  let geminiOutputUsd = (geminiOutputTokens / 1_000_000) * outputPricePerMillion;
+
+  if (hasDetailedBreakdown) {
+    // Use detailed breakdown
+    geminiAudioInputUsd = (geminiAudioInputTokens / 1_000_000) * audioInputPricePerMillion;
+    geminiTextInputUsd = (geminiTextInputTokens / 1_000_000) * textInputPricePerMillion;
+  } else {
+    // Backward compat: treat all input as text
+    geminiTextInputUsd = (totalInputTokens / 1_000_000) * textInputPricePerMillion;
+  }
+
+  const geminiUsd = geminiAudioInputUsd + geminiTextInputUsd + geminiOutputUsd;
+
+  // Calculate WhisperX cost (includes diarization - single Replicate model)
   const whisperxUsd = llmUsage.whisperx.computeTimeSeconds * whisperxPerSecond;
 
-  // Calculate diarization cost (if used)
-  const diarizationPerSecond = diarizationPricing?.pricePerSecond ?? DEFAULT_PRICING.replicate.diarizationPerSecond;
-  const diarizationUsd = (llmUsage.diarization?.computeTimeSeconds ?? 0) * diarizationPerSecond;
-
-  const totalUsd = geminiUsd + whisperxUsd + diarizationUsd;
+  const totalUsd = geminiUsd + whisperxUsd;
 
   // Build pricing snapshot for audit trail
   const pricingSnapshot: PricingSnapshot = {
     capturedAt: Timestamp.now(),
     geminiPricingId: geminiPricing?.pricingId ?? null,
     whisperxPricingId: whisperxPricing?.pricingId ?? null,
-    diarizationPricingId: diarizationPricing?.pricingId ?? null,
     rates: {
-      geminiInputPerMillion: inputPricePerMillion,
+      geminiInputPerMillion: textInputPricePerMillion,  // Backward compat
+      geminiAudioInputPerMillion: audioInputPricePerMillion,
+      geminiTextInputPerMillion: textInputPricePerMillion,
       geminiOutputPerMillion: outputPricePerMillion,
-      whisperxPerSecond,
-      diarizationPerSecond
+      whisperxPerSecond
     }
   };
 
   const estimatedCost: EstimatedCost = {
     geminiUsd: Math.round(geminiUsd * 1000000) / 1000000,  // 6 decimal precision
+    geminiAudioInputUsd: Math.round(geminiAudioInputUsd * 1000000) / 1000000,
+    geminiTextInputUsd: Math.round(geminiTextInputUsd * 1000000) / 1000000,
+    geminiOutputUsd: Math.round(geminiOutputUsd * 1000000) / 1000000,
     whisperxUsd: Math.round(whisperxUsd * 1000000) / 1000000,
-    diarizationUsd: Math.round(diarizationUsd * 1000000) / 1000000,
     totalUsd: Math.round(totalUsd * 1000000) / 1000000
   };
 

@@ -7,7 +7,7 @@
 
 import React, { useState } from 'react';
 import { cn } from '@/utils';
-import { ProcessingMetric, formatDuration, formatUsd } from '../../services/metricsService';
+import { ProcessingMetric, formatDuration, formatUsd, getBestCost } from '../../services/metricsService';
 import { CostVerificationBadge } from './CostVerificationBadge';
 
 interface MetricsTableProps {
@@ -119,8 +119,8 @@ export const MetricsTable: React.FC<MetricsTableProps> = ({
                   <td className="px-4 py-3 text-right text-slate-600">
                     {formatDuration(metric.timingMs?.total || 0)}
                   </td>
-                  <td className="px-4 py-3 text-right font-medium text-slate-900">
-                    {metric.estimatedCost ? formatUsd(metric.estimatedCost.totalUsd) : '-'}
+                  <td className="px-4 py-3 text-right">
+                    <CostCell metric={metric} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     <AlignmentBadge status={metric.alignmentStatus} />
@@ -177,6 +177,41 @@ const AlignmentBadge: React.FC<{ status?: 'aligned' | 'fallback' }> = ({ status 
 };
 
 /**
+ * Cost cell - shows actual cost when available, estimated as fallback
+ * Actual cost only covers Gemini (from BigQuery billing)
+ * Estimated cost covers both Gemini + WhisperX
+ */
+const CostCell: React.FC<{ metric: ProcessingMetric }> = ({ metric }) => {
+  const bestCost = getBestCost(metric);
+
+  if (bestCost.type === 'none') {
+    return <span className="text-slate-300">-</span>;
+  }
+
+  // Show actual cost prominently when available
+  if (bestCost.type === 'actual') {
+    return (
+      <div className="flex flex-col items-end">
+        <span className="font-medium text-emerald-600" title="Actual cost from GCP billing">
+          {formatUsd(bestCost.value)}
+        </span>
+        <span className="text-[10px] text-slate-400">actual</span>
+      </div>
+    );
+  }
+
+  // Estimated cost (covers both services)
+  return (
+    <div className="flex flex-col items-end">
+      <span className="font-medium text-slate-900">
+        {formatUsd(bestCost.value)}
+      </span>
+      <span className="text-[10px] text-slate-400">est.</span>
+    </div>
+  );
+};
+
+/**
  * Expanded metric details
  */
 const MetricDetails: React.FC<{ metric: ProcessingMetric }> = ({ metric }) => (
@@ -198,13 +233,40 @@ const MetricDetails: React.FC<{ metric: ProcessingMetric }> = ({ metric }) => (
       <p className="font-medium text-slate-900">{metric.termCount}</p>
     </div>
 
-    {/* Cost Verification Badge */}
-    {metric.estimatedCost && (
+    {/* Cost Breakdown */}
+    {(metric.estimatedCost || metric.actualCost) && (
       <div className="col-span-2 md:col-span-4 mt-2 pt-2 border-t border-slate-200">
-        <div className="flex items-center gap-2">
-          <p className="text-slate-500">Cost Verification:</p>
-          <CostVerificationBadge metric={metric} />
+        <p className="text-slate-500 mb-2">Cost Breakdown</p>
+        <div className="flex flex-wrap gap-x-6 gap-y-2">
+          {metric.actualCost && (
+            <div>
+              <span className="text-slate-400">Actual (Gemini): </span>
+              <span className="font-medium text-emerald-600">{formatUsd(metric.actualCost.geminiUsd)}</span>
+            </div>
+          )}
+          {metric.estimatedCost && (
+            <>
+              <div>
+                <span className="text-slate-400">Est. Gemini: </span>
+                <span className="font-medium">{formatUsd(metric.estimatedCost.geminiUsd)}</span>
+              </div>
+              <div>
+                <span className="text-slate-400">Est. WhisperX: </span>
+                <span className="font-medium">{formatUsd(metric.estimatedCost.whisperxUsd)}</span>
+              </div>
+              <div>
+                <span className="text-slate-400">Est. Total: </span>
+                <span className="font-medium">{formatUsd(metric.estimatedCost.totalUsd)}</span>
+              </div>
+            </>
+          )}
         </div>
+        {metric.estimatedCost && (
+          <div className="flex items-center gap-2 mt-2">
+            <span className="text-slate-400 text-[11px]">Rate variance:</span>
+            <CostVerificationBadge metric={metric} />
+          </div>
+        )}
       </div>
     )}
 

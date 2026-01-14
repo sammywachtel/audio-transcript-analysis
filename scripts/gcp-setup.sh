@@ -137,19 +137,36 @@ add_service_agent_binding() {
     fi
 }
 
-# Create a service identity to ensure the service agent exists (idempotent-ish)
+# Create a service identity to ensure the service agent exists
+# Wrapped to handle set -e properly
 ensure_service_identity() {
     local service="$1"
     local description="$2"
+    local output=""
+    local exit_code=0
 
-    if gcloud services identity create \
+    # Run gcloud command, capturing output and exit code without triggering set -e
+    # The '|| true' prevents set -e from killing the script on failure
+    output=$(gcloud services identity create \
         --service="$service" \
         --project="$PROJECT_ID" \
-        --quiet > /dev/null 2>&1; then
+        --quiet 2>&1) || exit_code=$?
+
+    # Success
+    if [[ $exit_code -eq 0 ]]; then
         log_success "$description"
-    else
-        log_info "$description - skipped (may already exist or insufficient perms)"
+        return 0
     fi
+
+    # Check if it's just "already exists" (not a real error)
+    if echo "$output" | grep -qi "already exists\|already created\|Service identity already exists"; then
+        log_skip "$description"
+        return 0
+    fi
+
+    # Other error - just log and continue (non-fatal for service identities)
+    log_info "$description - skipped: $output"
+    return 0
 }
 
 # Manage a secret in Secret Manager (idempotent, with version cleanup)
@@ -558,6 +575,71 @@ if sa_exists "$RUNTIME_SA"; then
     add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/cloudtasks.enqueuer" "$RUNTIME_SA → Cloud Tasks Enqueuer"
 else
     log_info "Cloud Tasks Enqueuer binding - skipped (runtime SA not yet created)"
+fi
+
+# -----------------------------------------------------------------------------
+# Step 10b: Grant BigQuery Access for Billing Sync (Cross-Project)
+# -----------------------------------------------------------------------------
+
+log_step "BigQuery billing sync access (cross-project)..."
+
+# The billingSync Cloud Function needs to read from BigQuery billing exports
+# which are stored in a separate ops project (wachtel-ops).
+# This requires cross-project IAM bindings on the ops project:
+#   - roles/bigquery.dataViewer: Read billing export tables
+#   - roles/bigquery.jobUser: Run queries (create BigQuery jobs)
+#
+# Cloud Functions v2 uses the Compute Engine default service account by default,
+# so we grant permissions to both App Engine and Compute Engine service accounts.
+
+BILLING_OPS_PROJECT="wachtel-ops"
+COMPUTE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+
+log_info "Granting BigQuery access on $BILLING_OPS_PROJECT for billing sync..."
+log_info "This allows Cloud Functions to read actual costs from billing exports."
+
+BQ_ERRORS=""
+
+# Grant to Compute Engine default SA (used by Cloud Functions v2)
+for role in "roles/bigquery.dataViewer" "roles/bigquery.jobUser"; do
+    log_info "Running: gcloud projects add-iam-policy-binding $BILLING_OPS_PROJECT --member=serviceAccount:$COMPUTE_SA --role=$role"
+    if OUTPUT=$(gcloud projects add-iam-policy-binding "$BILLING_OPS_PROJECT" \
+        --member="serviceAccount:$COMPUTE_SA" \
+        --role="$role" 2>&1); then
+        log_success "$COMPUTE_SA → $role on $BILLING_OPS_PROJECT"
+    else
+        log_error "$COMPUTE_SA → $role on $BILLING_OPS_PROJECT - FAILED"
+        log_info "  Error: $OUTPUT"
+        BQ_ERRORS="yes"
+    fi
+done
+
+# Also grant to App Engine default SA (for completeness)
+if sa_exists "$RUNTIME_SA"; then
+    for role in "roles/bigquery.dataViewer" "roles/bigquery.jobUser"; do
+        log_info "Running: gcloud projects add-iam-policy-binding $BILLING_OPS_PROJECT --member=serviceAccount:$RUNTIME_SA --role=$role"
+        if OUTPUT=$(gcloud projects add-iam-policy-binding "$BILLING_OPS_PROJECT" \
+            --member="serviceAccount:$RUNTIME_SA" \
+            --role="$role" 2>&1); then
+            log_success "$RUNTIME_SA → $role on $BILLING_OPS_PROJECT"
+        else
+            log_error "$RUNTIME_SA → $role on $BILLING_OPS_PROJECT - FAILED"
+            log_info "  Error: $OUTPUT"
+            BQ_ERRORS="yes"
+        fi
+    done
+fi
+
+# If any failed, show manual commands
+if [[ -n "$BQ_ERRORS" ]]; then
+    log_info ""
+    log_info "To fix manually, run these commands (requires admin access to $BILLING_OPS_PROJECT):"
+    log_info "  gcloud projects add-iam-policy-binding $BILLING_OPS_PROJECT \\"
+    log_info "    --member=\"serviceAccount:$COMPUTE_SA\" \\"
+    log_info "    --role=\"roles/bigquery.dataViewer\""
+    log_info "  gcloud projects add-iam-policy-binding $BILLING_OPS_PROJECT \\"
+    log_info "    --member=\"serviceAccount:$COMPUTE_SA\" \\"
+    log_info "    --role=\"roles/bigquery.jobUser\""
 fi
 
 # -----------------------------------------------------------------------------

@@ -1122,25 +1122,25 @@ Each processing job captures LLM usage from both Gemini and Replicate:
 ```typescript
 llmUsage: {
   geminiAnalysis: {
-    inputTokens: number;
+    inputTokens: number;           // Total input tokens (backward compat)
+    audioInputTokens?: number;     // Tokens from audio input (pre-analysis)
+    textInputTokens?: number;      // Tokens from text input (transcript analysis)
     outputTokens: number;
     model: string;  // e.g., 'gemini-2.5-flash'
   };
   geminiSpeakerCorrection: {
-    inputTokens: number;
+    inputTokens: number;           // Total input tokens (backward compat)
+    audioInputTokens?: number;     // Always 0 for corrections (text-only)
+    textInputTokens?: number;      // Tokens from text input
     outputTokens: number;
     model: string;
   };
   whisperx: {
     predictionId?: string;  // Replicate prediction ID for billing traceability
-    computeTimeSeconds: number;
-    model: string;  // 'whisperx'
+    computeTimeSeconds: number;  // Includes speaker diarization (bundled model)
+    model: string;  // 'whisperx-diarization'
   };
-  diarization?: {
-    predictionId?: string;  // Same as whisperx (runs in same prediction)
-    computeTimeSeconds: number;
-    model: string;
-  };
+  // Note: diarization field removed in v2.2.0 - now bundled with whisperx
 }
 ```
 
@@ -1148,13 +1148,24 @@ llmUsage: {
 
 The cost tracking system supports billing reconciliation through several mechanisms:
 
+**BigQuery Billing Sync (v2.2.0+)**: Actual Gemini costs are synced from BigQuery billing exports:
+
+- `syncBillingCosts` Cloud Function runs daily at 4 AM UTC
+- Queries BigQuery billing exports using `conversation_id` labels
+- Updates `_metrics` documents with `actualCost` field for comparison
+- Enables true estimated vs. actual cost reconciliation
+- Admin dashboard shows variance between estimated and actual costs
+
 **Pricing Snapshots**: Each `_metrics` document includes a `pricingSnapshot` capturing:
 
 - The exact rates used for cost calculation
-- The `_pricing` document IDs (or null when falling back to defaults)
+- The `_pricing` document IDs (or null if not configured)
+- Audio vs. text input rate breakdown (v2.2.0+)
 - The timestamp when pricing was looked up
 
 This enables historical cost recalculation even after prices change.
+
+**Important (v2.2.0+)**: Pricing configuration is now **required**. The `_pricing` collection must have records for `gemini-2.5-flash`, `gemini-2.5-flash-text`, and `whisperx`. Missing pricing results in $0 costs with warnings.
 
 **Replicate Prediction IDs**: WhisperX metrics include the actual `predictionId` from Replicate, enabling:
 
@@ -1176,16 +1187,18 @@ These labels appear in BigQuery billing exports for automatic cost attribution a
 Costs are calculated using database-driven pricing configuration:
 
 ```typescript
-// Gemini (token-based)
+// Gemini (token-based, with audio/text separation as of v2.2.0)
+// Audio tokens (pre-analysis): $1/1M, Text tokens (transcript analysis): $0.30/1M
 geminiCost =
-  (inputTokens * inputPricePerMillion) / 1_000_000 +
+  (audioInputTokens * audioInputPricePerMillion) / 1_000_000 +
+  (textInputTokens * textInputPricePerMillion) / 1_000_000 +
   (outputTokens * outputPricePerMillion) / 1_000_000;
 
-// Replicate (time-based)
-replicateCost = computeTimeSeconds * pricePerSecond;
+// Replicate (time-based, includes diarization)
+whisperxCost = computeTimeSeconds * pricePerSecond;
 ```
 
-Pricing is looked up by model and timestamp, supporting historical accuracy as prices change.
+Pricing is looked up by model and timestamp, supporting historical accuracy as prices change. As of v2.2.0, audio and text input tokens are tracked separately for more accurate cost calculation.
 
 **Important**: For Replicate services (WhisperX), we use **actual GPU compute time** from `metrics.predict_time` in the prediction response, not wall-clock duration. Wall-clock time includes queue time (1-2s) and network latency (~10-15s overhead), which would inflate cost estimates by ~3-4x. The actual compute time accurately reflects what Replicate bills for.
 

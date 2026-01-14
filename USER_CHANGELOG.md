@@ -1,5 +1,33 @@
 # What's New
 
+## Version 2.2.0 - January 14, 2026
+
+### ✨ New Features
+
+**Real Cost Tracking (Admin)**
+- Cost reports now show **actual** GCP billing data alongside estimates
+- Billing data syncs daily from BigQuery, so you can verify if estimates match reality
+- New diagnostic tools help debug billing label propagation
+
+### 🔧 Improvements
+
+**More Accurate Cost Estimates**
+- Audio input tokens (from voice analysis) and text input tokens (from transcript analysis) are now tracked separately
+- This gives more accurate cost breakdowns since audio and text have different rates
+
+**Cleaner Cost Tracking**
+- Removed obsolete separate diarization costs—speaker identification is now bundled with transcription
+- Cost calculations now use actual compute times from Replicate instead of local timing
+
+### ⚠️ Admin Notice
+
+**Pricing Configuration Required**
+- Cost calculation now requires pricing to be configured in the `_pricing` collection
+- If pricing isn't set up, costs will show as $0 with a warning (previously used hardcoded defaults)
+- This prevents silent underestimation when rates change
+
+---
+
 ## Version 2.0.3 - January 13, 2026
 
 ### ✨ New Features
