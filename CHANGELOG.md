@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-01-14
+
+### Added
+- **BigQuery Billing Sync** - Actual Gemini costs from GCP billing exports now sync to `_metrics` documents
+  - Scheduled Cloud Function (`syncBillingCosts`) runs daily at 4 AM UTC
+  - Manual trigger via `triggerBillingSync` callable function for admins
+  - Diagnostic function (`diagnoseBillingLabels`) to debug billing label propagation
+  - Actual costs stored in `actualCost` field for reconciliation against estimates
+- **Audio/Text Token Cost Separation** - Accurate cost calculation for different Gemini input types
+  - Audio input tokens (from pre-analysis) tracked separately from text input tokens (from transcript analysis)
+  - Audio input rate: $1/1M tokens, Text input rate: $0.30/1M tokens
+  - Backward compatible: existing metrics without breakdown use text rate
+- **Cost Aggregation Utilities** - New helpers for admin cost reporting
+  - `calculateCostSummary()` - Aggregate estimated vs actual costs with coverage stats
+  - `getBestCost()` - Get actual cost if available, otherwise estimated
+  - `calculateCostVariance()` - Calculate variance between actual and estimated costs
+  - `recalculateCostBreakdownSync()` - Batch recalculation using pre-loaded pricing configs
+
+### Changed
+- **Removed Default Pricing Fallbacks** - Cost calculation now requires explicit pricing configuration
+  - Pricing must be configured in `_pricing` collection; missing pricing results in $0 costs with warnings
+  - Prevents silent cost underestimation when rates aren't configured
+- **Simplified LLM Usage Tracking** - Removed separate diarization tracking (now included in WhisperX)
+  - WhisperX model handles both transcription and speaker diarization in a single call
+  - Removed `diarization` field from `LLMUsage` and `diarizationUsd` from `EstimatedCost`
+- **Updated Pricing Snapshot Schema** - Now includes audio/text rate breakdown
+  - `geminiAudioInputPerMillion` and `geminiTextInputPerMillion` fields added
+  - Removed `diarizationPricingId` and `diarizationPerSecond` fields
+
+### Fixed
+- **WhisperX Compute Time Accuracy** - Cost calculations now use actual Replicate compute time from API response instead of local timing
+
 ## [2.1.0] - 2026-01-13
 
 ### Fixed

@@ -21,21 +21,25 @@ import {
   MetricsTableSkeleton
 } from '../components/metrics';
 import { CostIndicator } from '../components/shared/CostIndicator';
-import { PricingAccuracyIndicator } from '../components/shared/PricingAccuracyIndicator';
+import { calculateCostSummary, ProcessingMetric, formatUsd } from '../services/metricsService';
 
 interface UserStatsProps {
   onBack: () => void;
   onAdminClick?: () => void;
 }
 
-export const UserStats: React.FC<UserStatsProps> = ({ onBack, onAdminClick }) => {
-  const { user, isAdmin } = useAuth();
+export const UserStats: React.FC<UserStatsProps> = ({ onBack, onAdminClick: _onAdminClick }) => {
+  const { user, isAdmin: _isAdmin } = useAuth();
   const { data: stats, loading: statsLoading, error: statsError } = useMyStats();
   // Always pass user ID - even for admins, "My Usage Stats" shows their own stats
   const { data: recentMetrics, loading: metricsLoading } = useRecentMetrics({
     userId: user?.uid,
     maxResults: 20
   });
+
+  // Calculate actual cost summary from user's recent metrics
+  const processingMetrics = (recentMetrics || []).filter((m): m is ProcessingMetric => !('type' in m) || m.type !== 'chat');
+  const costSummary = calculateCostSummary(processingMetrics);
 
   return (
     <div className="min-h-screen bg-slate-50 p-6 md:p-12">
@@ -67,13 +71,6 @@ export const UserStats: React.FC<UserStatsProps> = ({ onBack, onAdminClick }) =>
 
         {!statsError && (
           <div className="space-y-8">
-            {/* Pricing Accuracy Indicator */}
-            <PricingAccuracyIndicator
-              metrics={recentMetrics}
-              isAdmin={isAdmin}
-              onAdminClick={onAdminClick}
-            />
-
             {/* Lifetime Stats */}
             <section>
               <h2 className="text-lg font-semibold text-slate-900 mb-4">Lifetime Totals</h2>
@@ -112,18 +109,44 @@ export const UserStats: React.FC<UserStatsProps> = ({ onBack, onAdminClick }) =>
                       <div className="flex items-center gap-3 mb-3">
                         <DollarSign size={20} className="text-amber-500" />
                         <div className="flex-1">
-                          <p className="text-xs text-slate-500 font-medium">Estimated Cost</p>
+                          <p className="text-xs text-slate-500 font-medium">
+                            {costSummary.jobsWithActual > 0 ? 'Total Cost' : 'Estimated Cost'}
+                          </p>
                         </div>
                       </div>
-                      <div className="flex items-baseline gap-2">
-                        <CostIndicator
-                          cost={stats.lifetime.estimatedCostUsd}
-                          size="lg"
-                          showIcon={false}
-                          showBreakdown={false}
-                        />
-                      </div>
-                      <p className="text-xs text-slate-500 mt-2">LLM processing costs</p>
+                      {costSummary.jobsWithActual > 0 ? (
+                        <>
+                          <div className="space-y-2">
+                            <div className="flex items-baseline justify-between">
+                              <span className="text-xs text-slate-500">Actual (Gemini)</span>
+                              <span className="text-2xl font-bold text-emerald-600">
+                                {formatUsd(costSummary.actual)}
+                              </span>
+                            </div>
+                            <div className="flex items-baseline justify-between">
+                              <span className="text-xs text-slate-500">Estimated</span>
+                              <span className="text-lg text-slate-600">
+                                {formatUsd(costSummary.estimated)}
+                              </span>
+                            </div>
+                          </div>
+                          <p className="text-xs text-slate-400 mt-2">
+                            {costSummary.jobsWithActual}/{costSummary.totalJobs} jobs have billing data
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <div className="flex items-baseline gap-2">
+                            <CostIndicator
+                              cost={stats.lifetime.estimatedCostUsd}
+                              size="lg"
+                              showIcon={false}
+                              showBreakdown={false}
+                            />
+                          </div>
+                          <p className="text-xs text-slate-500 mt-2">LLM processing costs</p>
+                        </>
+                      )}
                     </div>
                   </>
                 ) : (

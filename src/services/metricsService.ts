@@ -28,9 +28,12 @@ import { db } from '@/config/firebase-config';
 
 /**
  * LLM usage metrics
+ * Audio and text inputs tracked separately for accurate cost calculation
  */
 export interface GeminiUsage {
-  inputTokens: number;
+  inputTokens: number;           // Total input tokens (backward compat)
+  audioInputTokens?: number;     // Tokens from audio input (pre-analysis)
+  textInputTokens?: number;      // Tokens from text input (transcript analysis)
   outputTokens: number;
   model: string;
 }
@@ -44,15 +47,26 @@ export interface ReplicateUsage {
 export interface LLMUsage {
   geminiAnalysis: GeminiUsage;
   geminiSpeakerCorrection: GeminiUsage;
-  whisperx: ReplicateUsage;
-  diarization?: ReplicateUsage;
+  whisperx: ReplicateUsage;  // Includes diarization (single Replicate model)
 }
 
 export interface EstimatedCost {
-  geminiUsd: number;
-  whisperxUsd: number;
-  diarizationUsd: number;
+  geminiUsd: number;              // Combined Gemini costs (backward compat)
+  geminiAudioInputUsd?: number;   // Gemini audio input cost
+  geminiTextInputUsd?: number;    // Gemini text input cost
+  geminiOutputUsd?: number;       // Gemini output cost
+  whisperxUsd: number;            // Includes diarization
   totalUsd: number;
+}
+
+/**
+ * Actual cost from BigQuery billing exports
+ * This represents real billing data synced from GCP
+ */
+export interface ActualCost {
+  geminiUsd: number;          // Actual Gemini/Vertex AI cost from BigQuery
+  fetchedAt: Timestamp;       // When this data was fetched
+  source: 'bigquery_billing_export';
 }
 
 /**
@@ -85,6 +99,7 @@ export interface ProcessingMetric {
   durationMs: number;
   llmUsage?: LLMUsage;
   estimatedCost?: EstimatedCost;
+  actualCost?: ActualCost;    // Real cost from BigQuery billing (synced by billingSync)
   pricingSnapshot?: PricingSnapshot;  // Captured pricing rates used for cost calculation
   timestamp: Timestamp;
 }
@@ -120,9 +135,15 @@ export interface ChatMetric {
  */
 export interface PricingSnapshot {
   capturedAt: Timestamp;
-  inputPricePerMillion?: number;
-  outputPricePerMillion?: number;
-  pricePerSecond?: number;
+  geminiPricingId: string | null;
+  whisperxPricingId: string | null;
+  rates: {
+    geminiInputPerMillion: number;           // Backward compat (text input rate)
+    geminiAudioInputPerMillion?: number;     // Audio input rate
+    geminiTextInputPerMillion?: number;      // Text input rate
+    geminiOutputPerMillion: number;
+    whisperxPerSecond: number;
+  };
 }
 
 /**
@@ -490,6 +511,105 @@ export function formatUsd(amount: number): string {
   return `$${amount.toFixed(2)}`;
 }
 
+// =============================================================================
+// Cost Aggregation Helpers
+// =============================================================================
+
+/**
+ * Cost summary with both actual and estimated values
+ */
+export interface CostSummary {
+  estimated: number;           // Sum of estimatedCost.totalUsd
+  actual: number;              // Sum of actualCost.geminiUsd (only covers Gemini, not WhisperX)
+  actualCoverage: number;      // Percentage of jobs with actual cost data (0-100)
+  jobsWithActual: number;      // Number of jobs with actual cost synced
+  totalJobs: number;           // Total number of jobs
+}
+
+/**
+ * Calculate cost summary from an array of processing metrics
+ * Actual cost only covers Gemini (from BigQuery), estimated covers all services
+ */
+export function calculateCostSummary(metrics: ProcessingMetric[]): CostSummary {
+  let estimated = 0;
+  let actual = 0;
+  let jobsWithActual = 0;
+
+  for (const m of metrics) {
+    if (m.estimatedCost?.totalUsd) {
+      estimated += m.estimatedCost.totalUsd;
+    }
+    if (m.actualCost?.geminiUsd) {
+      actual += m.actualCost.geminiUsd;
+      jobsWithActual++;
+    }
+  }
+
+  return {
+    estimated,
+    actual,
+    actualCoverage: metrics.length > 0 ? (jobsWithActual / metrics.length) * 100 : 0,
+    jobsWithActual,
+    totalJobs: metrics.length
+  };
+}
+
+/**
+ * Get the best available cost for a metric
+ * Returns actual if available, otherwise estimated
+ */
+export function getBestCost(metric: ProcessingMetric): {
+  value: number;
+  type: 'actual' | 'estimated' | 'none';
+  geminiActual?: number;
+  geminiEstimated?: number;
+} {
+  const hasActual = !!metric.actualCost?.geminiUsd;
+  const hasEstimated = !!metric.estimatedCost?.totalUsd;
+
+  if (hasActual) {
+    return {
+      value: metric.actualCost!.geminiUsd,
+      type: 'actual',
+      geminiActual: metric.actualCost!.geminiUsd,
+      geminiEstimated: metric.estimatedCost?.geminiUsd
+    };
+  }
+  if (hasEstimated) {
+    return {
+      value: metric.estimatedCost!.totalUsd,
+      type: 'estimated',
+      geminiEstimated: metric.estimatedCost?.geminiUsd
+    };
+  }
+  return { value: 0, type: 'none' };
+}
+
+/**
+ * Calculate variance between actual and estimated costs
+ * Positive variance = actual > estimated (costs more than expected)
+ * Negative variance = actual < estimated (costs less than expected)
+ */
+export function calculateCostVariance(actual: number, estimated: number): {
+  absolute: number;
+  percentage: number;
+  status: 'over' | 'under' | 'match';
+} {
+  const absolute = actual - estimated;
+  const percentage = estimated > 0 ? (absolute / estimated) * 100 : 0;
+
+  let status: 'over' | 'under' | 'match';
+  if (Math.abs(percentage) < 5) {
+    status = 'match';
+  } else if (absolute > 0) {
+    status = 'over';
+  } else {
+    status = 'under';
+  }
+
+  return { absolute, percentage, status };
+}
+
 /**
  * Get date range for last N days
  */
@@ -711,33 +831,42 @@ export async function recalculateCostWithCurrentPricing(
         };
       }
 
-      // Recalculate Gemini costs
-      const geminiAnalysisPricing = await getCurrentPricing(processingMetric.llmUsage.geminiAnalysis.model);
+      // Recalculate Gemini costs with audio/text breakdown if available
+      // Audio input pricing from 'gemini-2.5-flash', text input from 'gemini-2.5-flash-text'
+      const geminiAudioPricing = await getCurrentPricing('gemini-2.5-flash');
+      const geminiTextPricing = await getCurrentPricing('gemini-2.5-flash-text');
       let geminiUsd = 0;
 
-      if (geminiAnalysisPricing) {
-        foundAnyPricing = true;
-        const inputCost = (processingMetric.llmUsage.geminiAnalysis.inputTokens / 1_000_000) *
-          (geminiAnalysisPricing.inputPricePerMillion || 0);
-        const outputCost = (processingMetric.llmUsage.geminiAnalysis.outputTokens / 1_000_000) *
-          (geminiAnalysisPricing.outputPricePerMillion || 0);
-        geminiUsd += inputCost + outputCost;
+      // Calculate geminiAnalysis costs
+      const analysis = processingMetric.llmUsage.geminiAnalysis;
+      if (analysis) {
+        if (geminiAudioPricing || geminiTextPricing) foundAnyPricing = true;
+
+        // Use detailed breakdown if available, else fall back to inputTokens with text rate
+        const audioTokens = analysis.audioInputTokens ?? 0;
+        const textTokens = analysis.textInputTokens ?? (audioTokens === 0 ? analysis.inputTokens : 0);
+
+        const audioCost = (audioTokens / 1_000_000) * (geminiAudioPricing?.inputPricePerMillion || 0);
+        const textCost = (textTokens / 1_000_000) * (geminiTextPricing?.inputPricePerMillion || 0);
+        const outputCost = (analysis.outputTokens / 1_000_000) * (geminiAudioPricing?.outputPricePerMillion || 0);
+
+        geminiUsd += audioCost + textCost + outputCost;
       }
 
       // Add speaker correction if exists
       if (processingMetric.llmUsage.geminiSpeakerCorrection) {
-        const speakerPricing = await getCurrentPricing(processingMetric.llmUsage.geminiSpeakerCorrection.model);
-        if (speakerPricing) {
-          foundAnyPricing = true;
-          const inputCost = (processingMetric.llmUsage.geminiSpeakerCorrection.inputTokens / 1_000_000) *
-            (speakerPricing.inputPricePerMillion || 0);
-          const outputCost = (processingMetric.llmUsage.geminiSpeakerCorrection.outputTokens / 1_000_000) *
-            (speakerPricing.outputPricePerMillion || 0);
-          geminiUsd += inputCost + outputCost;
-        }
+        const correction = processingMetric.llmUsage.geminiSpeakerCorrection;
+
+        // Speaker correction is always text input (no audio)
+        const textTokens = correction.textInputTokens ?? correction.inputTokens;
+
+        const textCost = (textTokens / 1_000_000) * (geminiTextPricing?.inputPricePerMillion || 0);
+        const outputCost = (correction.outputTokens / 1_000_000) * (geminiAudioPricing?.outputPricePerMillion || 0);
+
+        geminiUsd += textCost + outputCost;
       }
 
-      // Recalculate WhisperX cost
+      // Recalculate WhisperX cost (includes diarization - single Replicate model)
       let whisperxUsd = 0;
       if (processingMetric.llmUsage.whisperx) {
         const whisperxPricing = await getCurrentPricing(processingMetric.llmUsage.whisperx.model);
@@ -747,17 +876,7 @@ export async function recalculateCostWithCurrentPricing(
         }
       }
 
-      // Recalculate diarization cost if exists
-      let diarizationUsd = 0;
-      if (processingMetric.llmUsage.diarization) {
-        const diarizationPricing = await getCurrentPricing(processingMetric.llmUsage.diarization.model);
-        if (diarizationPricing && diarizationPricing.pricePerSecond) {
-          foundAnyPricing = true;
-          diarizationUsd = processingMetric.llmUsage.diarization.computeTimeSeconds * diarizationPricing.pricePerSecond;
-        }
-      }
-
-      recalculatedUsd = geminiUsd + whisperxUsd + diarizationUsd;
+      recalculatedUsd = geminiUsd + whisperxUsd;
     }
 
     // Calculate variance
@@ -796,4 +915,184 @@ export async function recalculateCostWithCurrentPricing(
       foundCurrentPricing: false
     };
   }
+}
+
+/**
+ * Result of per-service cost recalculation
+ */
+export interface CostBreakdown {
+  geminiUsd: number;
+  whisperxUsd: number;  // Includes diarization
+  chatUsd: number;
+  totalUsd: number;
+  foundPricing: boolean;
+  // Per-service pricing status for granular "no pricing" detection
+  foundGeminiPricing: boolean;
+  foundWhisperxPricing: boolean;
+  foundChatPricing: boolean;
+}
+
+/**
+ * Find the best matching pricing config for a model from pre-loaded configs.
+ * Matches configs where effectiveFrom <= metric timestamp and no effectiveUntil or effectiveUntil > timestamp.
+ */
+function findPricingForModel(
+  model: string,
+  pricingConfigs: PricingConfig[],
+  atTime: Date
+): PricingConfig | null {
+  // Filter to configs for this model that are effective at the given time
+  const candidates = pricingConfigs.filter(config => {
+    if (config.model !== model) return false;
+    const effectiveFrom = config.effectiveFrom.toDate();
+    if (effectiveFrom > atTime) return false;
+    if (config.effectiveUntil) {
+      const effectiveUntil = config.effectiveUntil.toDate();
+      if (effectiveUntil <= atTime) return false;
+    }
+    return true;
+  });
+
+  if (candidates.length === 0) return null;
+
+  // Return the most recent one (highest effectiveFrom)
+  return candidates.reduce((best, current) => {
+    const bestDate = best.effectiveFrom.toDate();
+    const currentDate = current.effectiveFrom.toDate();
+    return currentDate > bestDate ? current : best;
+  });
+}
+
+/**
+ * Recalculate cost breakdown synchronously using pre-loaded pricing configs.
+ *
+ * Unlike recalculateCostWithCurrentPricing, this doesn't query Firestore.
+ * Useful for batch processing in reports where pricing is already loaded.
+ */
+export function recalculateCostBreakdownSync(
+  metric: ProcessingMetric | ChatMetric,
+  pricingConfigs: PricingConfig[]
+): CostBreakdown {
+  const timestamp = metric.timestamp.toDate?.() || new Date(metric.timestamp as unknown as string);
+  let foundPricing = false;
+
+  // Handle chat metrics
+  if ('type' in metric && metric.type === 'chat') {
+    const chatMetric = metric as ChatMetric;
+    const pricing = findPricingForModel(chatMetric.tokenUsage.model, pricingConfigs, timestamp);
+
+    if (pricing) {
+      const inputCost = (chatMetric.tokenUsage.inputTokens / 1_000_000) *
+        (pricing.inputPricePerMillion || 0);
+      const outputCost = (chatMetric.tokenUsage.outputTokens / 1_000_000) *
+        (pricing.outputPricePerMillion || 0);
+      const chatUsd = inputCost + outputCost;
+
+      return {
+        geminiUsd: 0,
+        whisperxUsd: 0,
+        chatUsd,
+        totalUsd: chatUsd,
+        foundPricing: true,
+        foundGeminiPricing: false,
+        foundWhisperxPricing: false,
+        foundChatPricing: true
+      };
+    }
+
+    // No pricing found, use original
+    return {
+      geminiUsd: 0,
+      whisperxUsd: 0,
+      chatUsd: chatMetric.costUsd,
+      totalUsd: chatMetric.costUsd,
+      foundPricing: false,
+      foundGeminiPricing: false,
+      foundWhisperxPricing: false,
+      foundChatPricing: false
+    };
+  }
+
+  // Handle processing metrics
+  const processingMetric = metric as ProcessingMetric;
+
+  if (!processingMetric.llmUsage) {
+    return {
+      geminiUsd: processingMetric.estimatedCost?.geminiUsd || 0,
+      whisperxUsd: processingMetric.estimatedCost?.whisperxUsd || 0,
+      chatUsd: 0,
+      totalUsd: processingMetric.estimatedCost?.totalUsd || 0,
+      foundPricing: false,
+      foundGeminiPricing: false,
+      foundWhisperxPricing: false,
+      foundChatPricing: false
+    };
+  }
+
+  // Recalculate Gemini costs (or fall back to estimate if no pricing found)
+  let geminiUsd = processingMetric.estimatedCost?.geminiUsd || 0;
+  let foundGeminiPricing = false;
+
+  const geminiPricing = findPricingForModel(
+    processingMetric.llmUsage.geminiAnalysis.model,
+    pricingConfigs,
+    timestamp
+  );
+
+  if (geminiPricing) {
+    foundPricing = true;
+    foundGeminiPricing = true;
+    const inputCost = (processingMetric.llmUsage.geminiAnalysis.inputTokens / 1_000_000) *
+      (geminiPricing.inputPricePerMillion || 0);
+    const outputCost = (processingMetric.llmUsage.geminiAnalysis.outputTokens / 1_000_000) *
+      (geminiPricing.outputPricePerMillion || 0);
+    geminiUsd = inputCost + outputCost;
+  }
+
+  // Add speaker correction if exists
+  if (processingMetric.llmUsage.geminiSpeakerCorrection) {
+    const speakerPricing = findPricingForModel(
+      processingMetric.llmUsage.geminiSpeakerCorrection.model,
+      pricingConfigs,
+      timestamp
+    );
+    if (speakerPricing) {
+      foundPricing = true;
+      // Only add to recalculated if we're recalculating Gemini
+      if (foundGeminiPricing) {
+        const inputCost = (processingMetric.llmUsage.geminiSpeakerCorrection.inputTokens / 1_000_000) *
+          (speakerPricing.inputPricePerMillion || 0);
+        const outputCost = (processingMetric.llmUsage.geminiSpeakerCorrection.outputTokens / 1_000_000) *
+          (speakerPricing.outputPricePerMillion || 0);
+        geminiUsd += inputCost + outputCost;
+      }
+    }
+  }
+
+  // Recalculate WhisperX cost (includes diarization - single Replicate model)
+  let whisperxUsd = processingMetric.estimatedCost?.whisperxUsd || 0;
+  let foundWhisperxPricing = false;
+  if (processingMetric.llmUsage.whisperx) {
+    const whisperxPricing = findPricingForModel(
+      processingMetric.llmUsage.whisperx.model,
+      pricingConfigs,
+      timestamp
+    );
+    if (whisperxPricing && whisperxPricing.pricePerSecond) {
+      foundPricing = true;
+      foundWhisperxPricing = true;
+      whisperxUsd = processingMetric.llmUsage.whisperx.computeTimeSeconds * whisperxPricing.pricePerSecond;
+    }
+  }
+
+  return {
+    geminiUsd,
+    whisperxUsd,
+    chatUsd: 0,
+    totalUsd: geminiUsd + whisperxUsd,
+    foundPricing,
+    foundGeminiPricing,
+    foundWhisperxPricing,
+    foundChatPricing: false
+  };
 }

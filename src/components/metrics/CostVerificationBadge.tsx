@@ -98,24 +98,21 @@ export const CostVerificationBadge: React.FC<CostVerificationBadgeProps> = ({
           icon: CheckCircle2,
           color: 'text-green-600',
           bg: 'bg-green-50',
-          border: 'border-green-200',
-          label: '✓'
+          border: 'border-green-200'
         };
       case 'minor':
         return {
           icon: AlertTriangle,
           color: 'text-amber-600',
           bg: 'bg-amber-50',
-          border: 'border-amber-200',
-          label: '⚠️'
+          border: 'border-amber-200'
         };
       case 'significant':
         return {
           icon: XCircle,
           color: 'text-red-600',
           bg: 'bg-red-50',
-          border: 'border-red-200',
-          label: '❌'
+          border: 'border-red-200'
         };
     }
   };
@@ -128,6 +125,11 @@ export const CostVerificationBadge: React.FC<CostVerificationBadgeProps> = ({
     ? `+${formatUsd(verification.variance)}`
     : formatUsd(verification.variance);
 
+  // Show percentage with sign
+  const percentDisplay = verification.variancePercent >= 0
+    ? `+${verification.variancePercent.toFixed(1)}%`
+    : `${verification.variancePercent.toFixed(1)}%`;
+
   return (
     <div className={cn('inline-flex items-center gap-1.5 group relative', className)}>
       <span className={cn(
@@ -137,7 +139,7 @@ export const CostVerificationBadge: React.FC<CostVerificationBadgeProps> = ({
         config.border
       )}>
         <Icon size={12} className="mr-1" />
-        {config.label}
+        {percentDisplay}
       </span>
 
       {/* Hover details tooltip */}

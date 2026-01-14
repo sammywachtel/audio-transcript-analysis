@@ -10,13 +10,38 @@
  */
 
 import React, { useState } from 'react';
-import { collection, addDoc, Timestamp } from 'firebase/firestore';
+import { collection, addDoc, doc, updateDoc, Timestamp } from 'firebase/firestore';
 import { db } from '@/config/firebase-config';
 import { Button } from '../Button';
 import { usePricingConfigs } from '../../hooks/useMetrics';
 import { PricingConfig } from '../../services/metricsService';
-import { Plus, X, Loader2, DollarSign, RefreshCw, AlertCircle } from 'lucide-react';
+import { Plus, X, Loader2, DollarSign, RefreshCw, AlertCircle, Pencil, Zap } from 'lucide-react';
 import { cn } from '@/utils';
+
+// Quick-add presets for common models
+const PRICING_PRESETS = [
+  {
+    label: 'Gemini Audio Input',
+    model: 'gemini-2.5-flash',
+    service: 'gemini' as const,
+    description: 'Audio input pricing (pre-analysis)',
+    defaults: { inputPricePerMillion: '1.00', outputPricePerMillion: '2.50' }
+  },
+  {
+    label: 'Gemini Text Input',
+    model: 'gemini-2.5-flash-text',
+    service: 'gemini' as const,
+    description: 'Text input pricing (transcript analysis)',
+    defaults: { inputPricePerMillion: '0.30', outputPricePerMillion: '' }
+  },
+  {
+    label: 'WhisperX',
+    model: 'whisperx',
+    service: 'replicate' as const,
+    description: 'Transcription + diarization compute time',
+    defaults: { pricePerSecond: '0.000975' }
+  }
+];
 
 interface PricingManagerProps {
   className?: string;
@@ -27,6 +52,8 @@ export const PricingManager: React.FC<PricingManagerProps> = ({ className }) => 
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [editingConfig, setEditingConfig] = useState<PricingConfig | null>(null);
+  const [showPresets, setShowPresets] = useState(false);
 
   // Form state
   const [formData, setFormData] = useState({
@@ -38,6 +65,50 @@ export const PricingManager: React.FC<PricingManagerProps> = ({ className }) => 
     effectiveFrom: new Date().toISOString().split('T')[0],
     notes: ''
   });
+
+  const resetForm = () => {
+    setFormData({
+      model: '',
+      service: 'gemini',
+      inputPricePerMillion: '',
+      outputPricePerMillion: '',
+      pricePerSecond: '',
+      effectiveFrom: new Date().toISOString().split('T')[0],
+      notes: ''
+    });
+    setEditingConfig(null);
+    setSaveError(null);
+  };
+
+  const openEditForm = (config: PricingConfig) => {
+    setFormData({
+      model: config.model,
+      service: config.service,
+      inputPricePerMillion: config.inputPricePerMillion?.toString() || '',
+      outputPricePerMillion: config.outputPricePerMillion?.toString() || '',
+      pricePerSecond: config.pricePerSecond?.toString() || '',
+      effectiveFrom: config.effectiveFrom?.toDate?.()
+        ? config.effectiveFrom.toDate().toISOString().split('T')[0]
+        : new Date().toISOString().split('T')[0],
+      notes: config.notes || ''
+    });
+    setEditingConfig(config);
+    setIsFormOpen(true);
+    setShowPresets(false);
+  };
+
+  const applyPreset = (preset: typeof PRICING_PRESETS[0]) => {
+    setFormData({
+      model: preset.model,
+      service: preset.service,
+      inputPricePerMillion: preset.defaults.inputPricePerMillion || '',
+      outputPricePerMillion: preset.defaults.outputPricePerMillion || '',
+      pricePerSecond: preset.defaults.pricePerSecond || '',
+      effectiveFrom: new Date().toISOString().split('T')[0],
+      notes: ''
+    });
+    setShowPresets(false);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -64,39 +135,60 @@ export const PricingManager: React.FC<PricingManagerProps> = ({ className }) => 
     try {
       setIsSaving(true);
 
-      const pricingDoc: Omit<PricingConfig, 'pricingId'> = {
-        model: formData.model.trim(),
-        service: formData.service,
-        effectiveFrom: Timestamp.fromDate(new Date(formData.effectiveFrom)),
-        notes: formData.notes.trim() || undefined,
-        createdAt: Timestamp.now(),
-        updatedAt: Timestamp.now()
-      };
+      if (editingConfig) {
+        // Update existing record
+        const updateData: Record<string, unknown> = {
+          model: formData.model.trim(),
+          service: formData.service,
+          effectiveFrom: Timestamp.fromDate(new Date(formData.effectiveFrom)),
+          notes: formData.notes.trim() || null,
+          updatedAt: Timestamp.now()
+        };
 
-      // Add pricing fields based on service type
-      if (formData.service === 'gemini') {
-        if (formData.inputPricePerMillion) {
-          pricingDoc.inputPricePerMillion = parseFloat(formData.inputPricePerMillion);
+        // Add pricing fields based on service type
+        if (formData.service === 'gemini') {
+          updateData.inputPricePerMillion = formData.inputPricePerMillion
+            ? parseFloat(formData.inputPricePerMillion)
+            : null;
+          updateData.outputPricePerMillion = formData.outputPricePerMillion
+            ? parseFloat(formData.outputPricePerMillion)
+            : null;
+          updateData.pricePerSecond = null;
+        } else {
+          updateData.pricePerSecond = parseFloat(formData.pricePerSecond);
+          updateData.inputPricePerMillion = null;
+          updateData.outputPricePerMillion = null;
         }
-        if (formData.outputPricePerMillion) {
-          pricingDoc.outputPricePerMillion = parseFloat(formData.outputPricePerMillion);
-        }
+
+        await updateDoc(doc(db, '_pricing', editingConfig.pricingId), updateData);
       } else {
-        pricingDoc.pricePerSecond = parseFloat(formData.pricePerSecond);
+        // Create new record
+        const pricingDoc: Omit<PricingConfig, 'pricingId'> = {
+          model: formData.model.trim(),
+          service: formData.service,
+          effectiveFrom: Timestamp.fromDate(new Date(formData.effectiveFrom)),
+          notes: formData.notes.trim() || undefined,
+          createdAt: Timestamp.now(),
+          updatedAt: Timestamp.now()
+        };
+
+        // Add pricing fields based on service type
+        if (formData.service === 'gemini') {
+          if (formData.inputPricePerMillion) {
+            pricingDoc.inputPricePerMillion = parseFloat(formData.inputPricePerMillion);
+          }
+          if (formData.outputPricePerMillion) {
+            pricingDoc.outputPricePerMillion = parseFloat(formData.outputPricePerMillion);
+          }
+        } else {
+          pricingDoc.pricePerSecond = parseFloat(formData.pricePerSecond);
+        }
+
+        await addDoc(collection(db, '_pricing'), pricingDoc);
       }
 
-      await addDoc(collection(db, '_pricing'), pricingDoc);
-
       // Reset form and refetch
-      setFormData({
-        model: '',
-        service: 'gemini',
-        inputPricePerMillion: '',
-        outputPricePerMillion: '',
-        pricePerSecond: '',
-        effectiveFrom: new Date().toISOString().split('T')[0],
-        notes: ''
-      });
+      resetForm();
       setIsFormOpen(false);
       refetch();
 
@@ -123,16 +215,53 @@ export const PricingManager: React.FC<PricingManagerProps> = ({ className }) => 
         <div>
           <h2 className="text-lg font-semibold text-slate-900">Pricing Configuration</h2>
           <p className="text-sm text-slate-500 mt-1">
-            Manage LLM pricing for cost estimation. Add new records to update pricing - records cannot be deleted (audit trail).
+            Manage LLM pricing for cost estimation. Click a row to edit, or add new pricing records.
           </p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={refetch}>
             <RefreshCw size={14} />
           </Button>
-          <Button size="sm" onClick={() => setIsFormOpen(true)} className="gap-2">
+          <div className="relative">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setShowPresets(!showPresets)}
+              className="gap-2"
+            >
+              <Zap size={14} />
+              Quick Add
+            </Button>
+            {showPresets && (
+              <div className="absolute right-0 mt-2 w-64 bg-white rounded-lg shadow-lg border border-slate-200 py-2 z-10">
+                {PRICING_PRESETS.map((preset) => {
+                  const exists = configs.some(c => c.model === preset.model);
+                  return (
+                    <button
+                      key={preset.model}
+                      onClick={() => {
+                        applyPreset(preset);
+                        setIsFormOpen(true);
+                      }}
+                      className={cn(
+                        'w-full px-4 py-2 text-left hover:bg-slate-50 flex flex-col',
+                        exists && 'opacity-50'
+                      )}
+                    >
+                      <span className="text-sm font-medium text-slate-900">
+                        {preset.label}
+                        {exists && <span className="ml-2 text-xs text-green-600">(exists)</span>}
+                      </span>
+                      <span className="text-xs text-slate-500">{preset.description}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <Button size="sm" onClick={() => { resetForm(); setIsFormOpen(true); }} className="gap-2">
             <Plus size={14} />
-            Add Pricing
+            Add Custom
           </Button>
         </div>
       </div>
@@ -143,12 +272,14 @@ export const PricingManager: React.FC<PricingManagerProps> = ({ className }) => 
         </div>
       )}
 
-      {/* Add Pricing Form */}
+      {/* Add/Edit Pricing Form */}
       {isFormOpen && (
         <div className="bg-white rounded-xl border border-slate-200 p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="font-medium text-slate-900">Add New Pricing</h3>
-            <button onClick={() => setIsFormOpen(false)} className="text-slate-400 hover:text-slate-600">
+            <h3 className="font-medium text-slate-900">
+              {editingConfig ? 'Edit Pricing' : 'Add New Pricing'}
+            </h3>
+            <button onClick={() => { setIsFormOpen(false); resetForm(); }} className="text-slate-400 hover:text-slate-600">
               <X size={20} />
             </button>
           </div>
@@ -262,7 +393,7 @@ export const PricingManager: React.FC<PricingManagerProps> = ({ className }) => 
             )}
 
             <div className="flex justify-end gap-2">
-              <Button type="button" variant="ghost" onClick={() => setIsFormOpen(false)}>
+              <Button type="button" variant="ghost" onClick={() => { setIsFormOpen(false); resetForm(); }}>
                 Cancel
               </Button>
               <Button type="submit" disabled={isSaving}>
@@ -272,7 +403,7 @@ export const PricingManager: React.FC<PricingManagerProps> = ({ className }) => 
                     Saving...
                   </>
                 ) : (
-                  'Save Pricing'
+                  editingConfig ? 'Update Pricing' : 'Save Pricing'
                 )}
               </Button>
             </div>
@@ -319,11 +450,19 @@ export const PricingManager: React.FC<PricingManagerProps> = ({ className }) => 
                       <th className="px-4 py-2 text-right text-xs font-medium text-slate-500">$/second</th>
                     )}
                     <th className="px-4 py-2 text-left text-xs font-medium text-slate-500">Notes</th>
+                    <th className="px-4 py-2 text-right text-xs font-medium text-slate-500 w-16">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {modelConfigs.map((config, idx) => (
-                    <tr key={config.pricingId} className={idx === 0 ? 'bg-green-50/50' : ''}>
+                    <tr
+                      key={config.pricingId}
+                      className={cn(
+                        'cursor-pointer transition-colors',
+                        idx === 0 ? 'bg-green-50/50 hover:bg-green-100/50' : 'hover:bg-slate-50'
+                      )}
+                      onClick={() => openEditForm(config)}
+                    >
                       <td className="px-4 py-2 text-slate-600">
                         {config.effectiveFrom?.toDate?.()
                           ? config.effectiveFrom.toDate().toLocaleDateString()
@@ -348,6 +487,18 @@ export const PricingManager: React.FC<PricingManagerProps> = ({ className }) => 
                       )}
                       <td className="px-4 py-2 text-slate-500 text-xs">
                         {config.notes || '-'}
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openEditForm(config);
+                          }}
+                          className="p-1.5 rounded-lg hover:bg-slate-200 text-slate-400 hover:text-slate-600 transition-colors"
+                          title="Edit pricing"
+                        >
+                          <Pencil size={14} />
+                        </button>
                       </td>
                     </tr>
                   ))}

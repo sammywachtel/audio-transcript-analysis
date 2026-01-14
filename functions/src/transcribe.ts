@@ -825,10 +825,9 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
       total: 0
     },
     llmUsage: {
-      geminiAnalysis: { inputTokens: 0, outputTokens: 0, model: 'gemini-2.5-flash' as const },
-      geminiSpeakerCorrection: { inputTokens: 0, outputTokens: 0, model: 'gemini-2.5-flash' as const },
-      whisperx: { predictionId: '', computeTimeSeconds: 0, model: 'whisperx-diarization' as const },
-      diarization: { predictionId: '', computeTimeSeconds: 0, model: 'pyannote-diarization' as const }
+      geminiAnalysis: { inputTokens: 0, audioInputTokens: 0, textInputTokens: 0, outputTokens: 0, model: 'gemini-2.5-flash' as const },
+      geminiSpeakerCorrection: { inputTokens: 0, audioInputTokens: 0, textInputTokens: 0, outputTokens: 0, model: 'gemini-2.5-flash' as const },
+      whisperx: { predictionId: '', computeTimeSeconds: 0, model: 'whisperx-diarization' as const }
     },
     geminiLabels: [] as Record<string, string>[],
     segmentCount: 0,
@@ -893,6 +892,11 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
       });
 
       partialMetrics.geminiLabels.push(preAnalysisResult.labels);
+
+      // Track pre-analysis tokens as audio input (sends raw audio to Gemini)
+      partialMetrics.llmUsage.geminiAnalysis.audioInputTokens += preAnalysisResult.tokenUsage.inputTokens;
+      partialMetrics.llmUsage.geminiAnalysis.inputTokens += preAnalysisResult.tokenUsage.inputTokens;
+      partialMetrics.llmUsage.geminiAnalysis.outputTokens += preAnalysisResult.tokenUsage.outputTokens;
     } catch (error) {
       console.warn('[Pipeline] Pre-analysis failed, continuing without hints:', error);
     }
@@ -971,12 +975,10 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     }
 
     partialMetrics.llmUsage.whisperx.computeTimeSeconds = computeSeconds;
-    partialMetrics.llmUsage.diarization.computeTimeSeconds = computeSeconds * 0.3;
 
     const whisperxPredictionId = whisperxResult.predictionId;
     if (whisperxPredictionId) {
       partialMetrics.llmUsage.whisperx.predictionId = whisperxPredictionId;
-      partialMetrics.llmUsage.diarization.predictionId = whisperxPredictionId;
     }
 
     // Check for abort after WhisperX
@@ -1037,11 +1039,10 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     });
 
     partialMetrics.timingMs.gemini = geminiDurationMs;
-    partialMetrics.llmUsage.geminiAnalysis = {
-      inputTokens: geminiAnalysisTokens.inputTokens,
-      outputTokens: geminiAnalysisTokens.outputTokens,
-      model: 'gemini-2.5-flash'
-    };
+    // Content analysis sends transcript TEXT to Gemini (not audio)
+    partialMetrics.llmUsage.geminiAnalysis.textInputTokens += geminiAnalysisTokens.inputTokens;
+    partialMetrics.llmUsage.geminiAnalysis.inputTokens += geminiAnalysisTokens.inputTokens;
+    partialMetrics.llmUsage.geminiAnalysis.outputTokens += geminiAnalysisTokens.outputTokens;
     partialMetrics.segmentCount = whisperxSegments.segments.length;
     partialMetrics.speakerCount = whisperxSegments.speakers.length;
     partialMetrics.termCount = analysis.terms?.length ?? 0;
@@ -1078,6 +1079,8 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
       console.warn('[Pipeline] Content-based identification returned no speaker notes, using pre-analysis fallback');
     }
 
+    // Speaker identification sends transcript TEXT to Gemini
+    partialMetrics.llmUsage.geminiAnalysis.textInputTokens += speakerIdentificationResult.tokenUsage.inputTokens;
     partialMetrics.llmUsage.geminiAnalysis.inputTokens += speakerIdentificationResult.tokenUsage.inputTokens;
     partialMetrics.llmUsage.geminiAnalysis.outputTokens += speakerIdentificationResult.tokenUsage.outputTokens;
 
@@ -1104,8 +1107,11 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     });
 
     partialMetrics.timingMs.speakerCorrection = speakerCorrectionDurationMs;
+    // Speaker reassignment sends transcript TEXT to Gemini
     partialMetrics.llmUsage.geminiSpeakerCorrection = {
       inputTokens: geminiCorrectionTokens.inputTokens,
+      textInputTokens: geminiCorrectionTokens.inputTokens,  // All input is text
+      audioInputTokens: 0,
       outputTokens: geminiCorrectionTokens.outputTokens,
       model: 'gemini-2.5-flash'
     };
@@ -1261,14 +1267,11 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     });
 
     // Build LLM usage breakdown for cost tracking
+    // Use the compute times from partialMetrics (which has actual Replicate compute time if available)
     const llmUsage: LLMUsage = {
       geminiAnalysis: geminiAnalysisTokens,
       geminiSpeakerCorrection: geminiCorrectionTokens,
-      whisperx: {
-        computeTimeSeconds: whisperxDurationMs / 1000,
-        model: 'whisperx',
-        predictionId: whisperxPredictionId
-      }
+      whisperx: partialMetrics.llmUsage.whisperx
     };
 
     // Calculate estimated costs

@@ -70,3 +70,6 @@ export { onConversationCreated, onConversationDeleted } from './statsTriggers';
 
 // Export scheduled stats aggregation and manual trigger
 export { computeDailyStats, triggerStatsComputation } from './statsAggregator';
+
+// Export billing sync functions (query actual costs from BigQuery)
+export { syncBillingCosts, triggerBillingSync, diagnoseBillingLabels } from './billingSync';
