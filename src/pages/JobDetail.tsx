@@ -227,35 +227,7 @@ export const JobDetail: React.FC<JobDetailProps> = ({ metric, onBack }) => {
                 </div>
               )}
 
-              {/* Diarization (if present) */}
-              {metric.llmUsage.diarization && (
-                <div className="border-b border-slate-100 pb-4 last:border-0 last:pb-0">
-                  <h3 className="text-sm font-medium text-slate-700 mb-2">
-                    Diarization ({metric.llmUsage.diarization.model})
-                  </h3>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <span className="text-slate-500">Compute Time:</span>
-                      <span className="ml-2 font-mono text-slate-900">
-                        {metric.llmUsage.diarization.computeTimeSeconds.toFixed(2)}s
-                      </span>
-                    </div>
-                    {metric.llmUsage.diarization.predictionId && (
-                      <div>
-                        <a
-                          href={`https://replicate.com/p/${metric.llmUsage.diarization.predictionId}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 transition-colors"
-                        >
-                          View on Replicate
-                          <ExternalLink size={12} />
-                        </a>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
+              {/* Note: Diarization is now included in WhisperX (single Replicate model) */}
             </div>
           </div>
         )}
@@ -271,27 +243,27 @@ export const JobDetail: React.FC<JobDetailProps> = ({ metric, onBack }) => {
                   {formatTimestamp(metric.pricingSnapshot.capturedAt)}
                 </span>
               </div>
-              {metric.pricingSnapshot.inputPricePerMillion !== undefined && (
+              {metric.pricingSnapshot.rates?.geminiInputPerMillion !== undefined && (
                 <div>
-                  <span className="text-slate-500">Input Price:</span>
+                  <span className="text-slate-500">Gemini Input:</span>
                   <span className="ml-2 font-mono text-slate-900">
-                    ${metric.pricingSnapshot.inputPricePerMillion}/M tokens
+                    ${metric.pricingSnapshot.rates.geminiInputPerMillion}/M tokens
                   </span>
                 </div>
               )}
-              {metric.pricingSnapshot.outputPricePerMillion !== undefined && (
+              {metric.pricingSnapshot.rates?.geminiOutputPerMillion !== undefined && (
                 <div>
-                  <span className="text-slate-500">Output Price:</span>
+                  <span className="text-slate-500">Gemini Output:</span>
                   <span className="ml-2 font-mono text-slate-900">
-                    ${metric.pricingSnapshot.outputPricePerMillion}/M tokens
+                    ${metric.pricingSnapshot.rates.geminiOutputPerMillion}/M tokens
                   </span>
                 </div>
               )}
-              {metric.pricingSnapshot.pricePerSecond !== undefined && (
+              {metric.pricingSnapshot.rates?.whisperxPerSecond !== undefined && (
                 <div>
-                  <span className="text-slate-500">Compute Price:</span>
+                  <span className="text-slate-500">WhisperX:</span>
                   <span className="ml-2 font-mono text-slate-900">
-                    ${metric.pricingSnapshot.pricePerSecond}/second
+                    ${metric.pricingSnapshot.rates.whisperxPerSecond}/second
                   </span>
                 </div>
               )}

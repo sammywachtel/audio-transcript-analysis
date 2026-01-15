@@ -32,6 +32,9 @@ CRITICAL REQUIREMENTS:
 4. Do NOT make assumptions or provide information not explicitly stated in the transcript
 5. When multiple segments support your answer, cite all relevant ones
 6. Format citations like: [Segment 5: 1:23-1:45]
+7. INLINE SOURCE MARKERS: After each statement that cites a segment, add {{SOURCE_n}} where n is the 0-indexed position of that citation in your response (order of first appearance). For example, if you cite [Segment 5] first and [Segment 12] second:
+   "The speaker mentioned X {{SOURCE_0}}. Later they discussed Y {{SOURCE_1}}."
+   If you cite the same segment multiple times, use the same source index each time.
 
 TRANSCRIPT CONTEXT:
 ${transcriptContext}

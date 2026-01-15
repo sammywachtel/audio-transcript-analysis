@@ -1,5 +1,28 @@
 # What's New
 
+## Version 2.3.0 - January 14, 2026
+
+### ✨ New Features
+
+**Richer AI Responses**
+- Chat responses now display **formatted text** including bold, italic, bullet lists, numbered lists, and code snippets
+- Technical code blocks scroll horizontally so they don't break the chat layout
+- Risky content (images, iframes) is automatically filtered for security
+
+**Inline Source Citations**
+- When the AI references a part of your transcript, you'll now see a clickable **timestamp button right in the text**
+- Click any timestamp to jump to that moment in the audio and highlight the segment
+- No more scrolling to find which source matches which statement—it's all inline now
+- Any extra sources still appear at the bottom in an "Additional sources" section
+
+### 🐛 Bug Fixes
+
+**Speaker Names Now Show Correctly**
+- Source citations now properly display the speaker's name instead of "Unknown"
+- Previously, a data mismatch caused speaker information to get lost between the server and app
+
+---
+
 ## Version 2.2.0 - January 14, 2026
 
 ### ✨ New Features

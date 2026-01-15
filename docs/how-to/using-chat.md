@@ -7,6 +7,8 @@ This guide explains how to use the chat feature to ask questions about your tran
 The chat feature allows you to ask natural language questions about your transcript and get AI-powered answers with timestamp citations that link directly to relevant segments.
 
 **Key Features:**
+- **Rich markdown responses** with formatted text, lists, code blocks, and more
+- **Inline timestamp citations** placed directly in the answer where they support the text
 - Persistent chat history (survives page reloads and works across devices)
 - Interactive timestamp citations with auto-play
 - Rotating contextual question suggestions
@@ -41,11 +43,40 @@ The chat provides contextual question suggestions that rotate after each query:
 
 ## Understanding Chat Responses
 
-### Timestamp Citations
+### Markdown Formatting
 
-When the AI references specific parts of the transcript, it includes interactive timestamp citations with powerful auto-play features:
+Assistant responses support rich markdown formatting for better readability:
 
-**What happens when you click a timestamp:**
+- **Bold** and *italic* text for emphasis
+- Bulleted and numbered lists
+- `Inline code` for technical terms
+- Code blocks for longer snippets (scrollable if wide)
+- Headings for structured answers
+- Block quotes for referenced text
+- Links to external resources
+
+Code blocks automatically scroll horizontally if they're too wide, so they won't break the chat bubble layout.
+
+### Inline Timestamp Citations
+
+Timestamp buttons now appear **directly inline** with the text they support, making it easy to verify exactly which part of the transcript backs each statement.
+
+**Example response:**
+> The speaker mentioned that Q4 revenue exceeded projections **[▶ 2:15 - Sarah]**. They also discussed plans for the next quarter **[▶ 5:42 - Sarah]**.
+
+Each inline button shows:
+- A play icon
+- The timestamp (MM:SS format)
+- The speaker's name
+
+### Additional Sources
+
+If the AI cites segments that couldn't be placed inline (rare), they appear in an "Additional sources" section below the response. This ensures no citations are lost.
+
+### Timestamp Interactions
+
+When you click a timestamp citation (inline or in the sources section), the following happens:
+
 1. **Auto-play:** Audio automatically starts playing from that moment
 2. **Scroll:** Transcript scrolls to the referenced segment
 3. **Highlight:** Segment glows with a yellow highlight for 2 seconds

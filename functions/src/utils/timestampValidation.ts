@@ -12,6 +12,7 @@ export interface TimestampSource {
   startMs: number;
   endMs: number;
   text: string;
+  speaker: string;
   confidence: 'high' | 'medium' | 'low';
 }
 
@@ -28,10 +29,11 @@ const TIMESTAMP_TOLERANCE_MS = 500;
  * 1. Verifies they map to actual segments in the transcript
  * 2. Assigns confidence levels based on match quality
  * 3. Filters out invalid or low-quality citations
+ * 4. PRESERVES ORDER from rawSources for {{SOURCE_n}} placeholder mapping
  *
  * @param rawSources - Sources extracted from LLM response (segment index or timestamps)
  * @param segments - Full transcript segments for validation
- * @returns Validated sources with confidence scores
+ * @returns Validated sources with confidence scores IN THE SAME ORDER as rawSources
  */
 export function validateTimestampSources(
   rawSources: Array<{ segmentIndex?: number; startMs?: number; endMs?: number }>,
@@ -80,18 +82,15 @@ export function validateTimestampSources(
         startMs: matchedSegment.startMs,
         endMs: matchedSegment.endMs,
         text: matchedSegment.text,
+        speaker: matchedSegment.speakerId,
         confidence
       });
     }
   }
 
-  // Sort by confidence (high first), then by timestamp
-  return validatedSources.sort((a, b) => {
-    const confidenceOrder = { high: 0, medium: 1, low: 2 };
-    const confidenceDiff = confidenceOrder[a.confidence] - confidenceOrder[b.confidence];
-    if (confidenceDiff !== 0) return confidenceDiff;
-    return a.startMs - b.startMs;
-  });
+  // CRITICAL: Do NOT sort. Preserve order for {{SOURCE_n}} placeholder mapping.
+  // Frontend expects sources[0] to correspond to {{SOURCE_0}}, etc.
+  return validatedSources;
 }
 
 /**
@@ -138,8 +137,10 @@ function findSegmentByTimestamp(
  * - [Segment 10: 1:23-1:45]
  * - segment 3
  *
+ * CRITICAL: Returns indices in ORDER OF FIRST APPEARANCE for {{SOURCE_n}} mapping.
+ *
  * @param responseText - Raw LLM response
- * @returns Array of segment indices found in the response
+ * @returns Array of segment indices in order of first appearance (deduplicated)
  */
 export function extractSegmentIndices(responseText: string): number[] {
   const indices: number[] = [];
@@ -150,10 +151,12 @@ export function extractSegmentIndices(responseText: string): number[] {
 
   while ((match = pattern.exec(responseText)) !== null) {
     const index = parseInt(match[1], 10);
+    // Only add if not already present (preserves first appearance order)
     if (!indices.includes(index)) {
       indices.push(index);
     }
   }
 
-  return indices.sort((a, b) => a - b);
+  // CRITICAL: Do NOT sort. Preserve order of appearance for {{SOURCE_n}} mapping.
+  return indices;
 }

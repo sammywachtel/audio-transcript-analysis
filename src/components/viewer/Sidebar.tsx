@@ -141,9 +141,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onClick={() => setActiveTab('chat')}
               className={cn(
                 "flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all relative",
-                activeTab === 'chat'
-                  ? "bg-white text-blue-600 shadow-sm"
-                  : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
+                // Note: This renders only when activeTab !== 'chat', so chat tab is never active here
+                "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
               )}
             >
               <MessageSquare size={14} />

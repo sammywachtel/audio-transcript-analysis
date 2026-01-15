@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-01-14
+
+### Added
+- **Markdown Rendering in Chat** - AI assistant responses now render rich formatting
+  - Supports bold, italic, lists, inline code, code blocks, headings, blockquotes, horizontal rules, and links via `react-markdown` + `remark-gfm`
+  - Risky elements (`<img>`, `<iframe>`) automatically stripped for security
+  - Long code blocks scroll horizontally without blocking the chat bubble
+
+- **Inline Source Citations** - Timestamp references now appear directly in the assistant's response text
+  - `{{SOURCE_n}}` placeholders replaced with clickable `TimestampLink` buttons
+  - Click to seek audio and highlight the referenced transcript segment
+  - Unreferenced sources still appear in labeled "Additional sources" section
+  - Graceful fallback when placeholders are missing or out of range
+
+### Fixed
+- **Speaker Attribution in Chat Sources** - Source citations now correctly show speaker names
+  - Fixed frontend/backend schema mismatch (`speaker` vs `speakerId` field)
+  - Sources now properly display speaker identity instead of always showing "Unknown"
+
+### Changed
+- **Chat Response Presentation** - Moved from plain text to semantic HTML rendering
+  - Accessibility preserved: 44px minimum touch targets, visible focus states, proper semantic elements
+  - Backward compatible: existing chat messages render correctly without placeholders
+
 ## [2.2.0] - 2026-01-14
 
 ### Added
