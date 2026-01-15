@@ -27,6 +27,7 @@ import { TimestampLink } from './TimestampLink';
 import { Speaker } from '@/config/types';
 
 export interface TimestampSource {
+  segmentIndex: number;
   segmentId: string;
   startMs: number;
   speaker?: string;
@@ -52,31 +53,58 @@ export interface MarkdownWithSourcesProps {
 }
 
 interface ProcessedContent {
-  /** Content with {{SOURCE_n}} replaced by unique markers */
+  /** Content with [segment N] replaced by unique markers */
   processedContent: string;
-  /** Set of source indices that were consumed */
-  consumedIndices: Set<number>;
+  /** Set of segment indices that were consumed (matched to sources) */
+  consumedSegmentIndices: Set<number>;
+}
+
+/**
+ * Expand comma-separated segment lists into individual references.
+ * e.g. "[segment 3, segment 4, segment 9]" -> "[segment 3] [segment 4] [segment 9]"
+ *
+ * LLMs sometimes output grouped citations - this normalizes them for parsing.
+ */
+function expandSegmentLists(content: string): string {
+  // Match [segment N, segment M, ...] patterns (comma-separated)
+  const listPattern = /\[segment\s+\d+(?:\s*,\s*segment\s+\d+)+\]/gi;
+
+  return content.replace(listPattern, (match) => {
+    const numbers = match.match(/\d+/g);
+    if (numbers) {
+      return numbers.map(n => `[segment ${n}]`).join(' ');
+    }
+    return match;
+  });
 }
 
 /**
  * Pre-process content to track which sources are used inline.
- * Replaces {{SOURCE_n}} with §§SOURCE_n§§ markers (markdown won't process §).
+ * Replaces [segment N] with §§SEGMENT_n§§ markers (markdown won't process §).
+ * Uses segmentIndex to match sources, not array position.
  */
-function preprocessContent(content: string, sourcesCount: number): ProcessedContent {
-  const consumedIndices = new Set<number>();
-  const sourcePattern = /\{\{SOURCE_(\d+)\}\}/g;
+function preprocessContent(content: string, sources: TimestampSource[]): ProcessedContent {
+  const consumedSegmentIndices = new Set<number>();
+  // Build a set of valid segment indices from sources
+  const validSegmentIndices = new Set(sources.map(s => s.segmentIndex));
 
-  const processedContent = content.replace(sourcePattern, (match, indexStr) => {
-    const index = parseInt(indexStr, 10);
-    if (index >= 0 && index < sourcesCount) {
-      consumedIndices.add(index);
-      return `§§SOURCE_${index}§§`;
+  // First expand comma-separated lists: [segment 3, segment 4] -> [segment 3] [segment 4]
+  const expandedContent = expandSegmentLists(content);
+
+  // Pattern matches [segment N] or [Segment N] (case insensitive)
+  const segmentPattern = /\[segment\s+(\d+)\]/gi;
+
+  const processedContent = expandedContent.replace(segmentPattern, (match, indexStr) => {
+    const segmentIndex = parseInt(indexStr, 10);
+    if (validSegmentIndices.has(segmentIndex)) {
+      consumedSegmentIndices.add(segmentIndex);
+      return `§§SEGMENT_${segmentIndex}§§`;
     }
-    // Out of range - replace with placeholder text
-    return '[Source unavailable]';
+    // Segment not in sources - leave as-is (might be invalid citation)
+    return match;
   });
 
-  return { processedContent, consumedIndices };
+  return { processedContent, consumedSegmentIndices };
 }
 
 /**
@@ -84,7 +112,8 @@ function preprocessContent(content: string, sourcesCount: number): ProcessedCont
  * Avoids prop drilling while keeping the transform function pure-ish.
  */
 interface SourceContext {
-  sources: TimestampSource[];
+  /** Map from segment index to source data */
+  sourcesByIndex: Map<number, TimestampSource>;
   speakers: Record<string, Speaker>;
   conversationId: string;
   onSeek?: (timeMs: number) => void;
@@ -93,12 +122,12 @@ interface SourceContext {
 }
 
 /**
- * Recursively transform React children, replacing §§SOURCE_n§§ markers
+ * Recursively transform React children, replacing §§SEGMENT_n§§ markers
  * in text nodes with TimestampLink components while preserving the
  * structure of other elements (bold, links, etc.).
  *
  * The magic here: we only touch text nodes. Everything else passes through
- * unchanged, so <strong>bold text {{SOURCE_0}}</strong> becomes
+ * unchanged, so <strong>bold text [segment 5]</strong> becomes
  * <strong>bold text <TimestampLink/></strong> instead of losing the bold.
  */
 function transformChildren(
@@ -112,7 +141,7 @@ function transformChildren(
 
   // Plain string - split by markers and replace
   if (typeof children === 'string') {
-    if (!children.includes('§§SOURCE_')) {
+    if (!children.includes('§§SEGMENT_')) {
       return children;
     }
     return splitAndReplace(children, ctx, keyPrefix);
@@ -148,7 +177,7 @@ function transformChildren(
 }
 
 /**
- * Split a text string by §§SOURCE_n§§ markers and return an array
+ * Split a text string by §§SEGMENT_n§§ markers and return an array
  * of text fragments and TimestampLink components.
  */
 function splitAndReplace(
@@ -156,15 +185,16 @@ function splitAndReplace(
   ctx: SourceContext,
   keyPrefix: string
 ): React.ReactNode[] {
-  const parts = text.split(/(§§SOURCE_\d+§§)/);
+  const parts = text.split(/(§§SEGMENT_\d+§§)/);
 
   return parts.map((part, idx) => {
-    const sourceMatch = part.match(/^§§SOURCE_(\d+)§§$/);
-    if (sourceMatch) {
-      const sourceIdx = parseInt(sourceMatch[1], 10);
-      const source = ctx.sources[sourceIdx];
+    const segmentMatch = part.match(/^§§SEGMENT_(\d+)§§$/);
+    if (segmentMatch) {
+      const segmentIndex = parseInt(segmentMatch[1], 10);
+      const source = ctx.sourcesByIndex.get(segmentIndex);
       if (!source) {
-        return <span key={`${keyPrefix}-src-${idx}`}>[Source unavailable]</span>;
+        // This shouldn't happen if preprocessContent worked correctly
+        return <span key={`${keyPrefix}-seg-${idx}`}>[segment {segmentIndex}]</span>;
       }
 
       const speaker = source.speaker ? ctx.speakers[source.speaker] : null;
@@ -172,7 +202,7 @@ function splitAndReplace(
 
       return (
         <TimestampLink
-          key={`${keyPrefix}-src-${idx}`}
+          key={`${keyPrefix}-seg-${idx}`}
           segmentId={source.segmentId}
           startMs={source.startMs}
           speakerName={speakerName}
@@ -204,20 +234,29 @@ export const MarkdownWithSources: React.FC<MarkdownWithSourcesProps> = ({
   onHighlight,
   onUnconsumedSources
 }) => {
-  const { processedContent, consumedIndices } = useMemo(
-    () => preprocessContent(content, sources.length),
-    [content, sources.length]
+  // Build map from segment index to source for O(1) lookup
+  const sourcesByIndex = useMemo(() => {
+    const map = new Map<number, TimestampSource>();
+    for (const source of sources) {
+      map.set(source.segmentIndex, source);
+    }
+    return map;
+  }, [sources]);
+
+  const { processedContent, consumedSegmentIndices } = useMemo(
+    () => preprocessContent(content, sources),
+    [content, sources]
   );
 
   // Build source context once for the transform function
   const sourceCtx: SourceContext = useMemo(() => ({
-    sources,
+    sourcesByIndex,
     speakers,
     conversationId,
     onSeek,
     onPlay,
     onHighlight
-  }), [sources, speakers, conversationId, onSeek, onPlay, onHighlight]);
+  }), [sourcesByIndex, speakers, conversationId, onSeek, onPlay, onHighlight]);
 
   // Custom component renderers for markdown elements
   // Uses transformChildren to preserve formatting while replacing source markers
@@ -362,14 +401,23 @@ export const MarkdownWithSources: React.FC<MarkdownWithSourcesProps> = ({
   }), [sourceCtx]);
 
   // Calculate unconsumed sources and notify parent via callback
+  // Filter sources whose segmentIndex wasn't referenced in the content
   const unconsumedSources = useMemo(() => {
-    return sources.filter((_, idx) => !consumedIndices.has(idx));
-  }, [sources, consumedIndices]);
+    return sources.filter(s => !consumedSegmentIndices.has(s.segmentIndex));
+  }, [sources, consumedSegmentIndices]);
 
-  // Notify parent component of unconsumed sources
+  // Track previous unconsumed sources to avoid infinite loops
+  const prevUnconsumedRef = React.useRef<string>('');
+
+  // Notify parent component of unconsumed sources (only when actually changed)
   React.useEffect(() => {
     if (onUnconsumedSources) {
-      onUnconsumedSources(unconsumedSources);
+      // Compare by stringified value to detect actual changes
+      const currentKey = JSON.stringify(unconsumedSources.map(s => s.segmentId));
+      if (currentKey !== prevUnconsumedRef.current) {
+        prevUnconsumedRef.current = currentKey;
+        onUnconsumedSources(unconsumedSources);
+      }
     }
   }, [unconsumedSources, onUnconsumedSources]);
 

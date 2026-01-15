@@ -49,6 +49,45 @@ function getVertexAIClient(): VertexAI {
   return new VertexAI({ project, location });
 }
 
+/**
+ * Retry with exponential backoff for transient Vertex AI errors.
+ * Handles 429 (rate limit), 503 (service unavailable), and similar.
+ */
+async function retryWithBackoff<T>(
+  operation: () => Promise<T>,
+  operationName: string,
+  maxRetries = 3,
+  baseDelayMs = 2000
+): Promise<T> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Retryable errors: rate limits, temporary unavailability
+      const isRetryable = errorMessage.includes('429') ||
+                          errorMessage.includes('RESOURCE_EXHAUSTED') ||
+                          errorMessage.includes('503') ||
+                          errorMessage.includes('UNAVAILABLE') ||
+                          errorMessage.includes('DEADLINE_EXCEEDED');
+
+      if (!isRetryable || attempt === maxRetries) {
+        throw error;
+      }
+
+      const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+      log.warn(`${operationName} failed (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms`, {
+        error: errorMessage,
+        attempt,
+        maxRetries
+      });
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error(`${operationName} failed after ${maxRetries} attempts`);
+}
+
 interface ChatRequest {
   conversationId: string;
   message: string;
@@ -145,15 +184,21 @@ export const chatWithConversation = onCall<ChatRequest>(
 
       // Call Gemini API via Vertex AI
       const vertexAI = getVertexAIClient();
-      const model = vertexAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
+      const model = vertexAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
       // Build labels for billing attribution
       const labels = buildGeminiLabels(conversationId, userId, 'chat');
 
-      const result = await model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        labels
-      });
+      // Wrap in retry logic for transient 429/rate limit errors
+      const result = await retryWithBackoff(
+        () => model.generateContent({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          labels
+        }),
+        'Gemini chat completion',
+        3,     // maxRetries
+        3000   // 3 second base delay (gives rate limits time to recover)
+      );
       const response = result.response;
       // Vertex AI SDK response structure
       const answerText = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
@@ -163,7 +208,7 @@ export const chatWithConversation = onCall<ChatRequest>(
       const tokenUsage: ChatTokenUsage = {
         inputTokens: usage?.promptTokenCount || 0,
         outputTokens: usage?.candidatesTokenCount || 0,
-        model: 'gemini-2.0-flash-exp'
+        model: 'gemini-2.5-flash'
       };
 
       // Determine if the question is unanswerable

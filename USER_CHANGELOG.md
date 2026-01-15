@@ -1,5 +1,21 @@
 # What's New
 
+## Version 2.4.0 - January 15, 2026
+
+### ✨ Improvements
+
+**More Reliable Chat**
+- Chat no longer fails intermittently with "resource exhausted" errors
+- If the AI service is temporarily busy, the app now automatically retries instead of showing an error
+- Upgraded to a more stable AI model for consistent responses
+
+**Better Source Citations**
+- Timestamp citations in chat responses now work more reliably
+- When the AI groups multiple sources together like `[segment 3, segment 4, segment 9]`, each one now becomes a separate clickable button
+- Previously, grouped citations would sometimes appear as plain text—now they all render correctly
+
+---
+
 ## Version 2.3.2 - January 15, 2026
 
 ### 🐛 Bug Fixes

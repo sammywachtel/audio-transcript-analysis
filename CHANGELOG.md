@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-01-15
+
+### Added
+- **Chat Rate Limit Resilience** - Vertex AI calls now retry automatically with exponential backoff
+  - Handles 429 (RESOURCE_EXHAUSTED), 503 (UNAVAILABLE), and DEADLINE_EXCEEDED errors
+  - Up to 3 retries with 3-second base delay, prevents intermittent chat failures
+
+### Changed
+- **Upgraded Chat Model** - Switched from experimental `gemini-2.0-flash-exp` to stable `gemini-2.5-flash`
+  - More consistent behavior and reduced rate limiting issues
+- **Simplified Citation System** - Chat now uses direct `[segment N]` citation format
+  - Replaced complex dual-format system (`[Segment N]` + `{{SOURCE_n}}` placeholders)
+  - More resilient to LLM output variations
+  - Citations render reliably as clickable timestamp buttons
+
+### Fixed
+- **Comma-Separated Citations** - LLM sometimes outputs `[segment 3, segment 4, segment 9]`
+  - These grouped citations now auto-expand and render as individual timestamp buttons
+  - Previously showed as plain text or in "Additional sources" section
+
 ## [2.3.2] - 2026-01-15
 
 ### Fixed

@@ -15,8 +15,8 @@ describe('MarkdownWithSources', () => {
   };
 
   const mockSources: TimestampSource[] = [
-    { segmentId: 'seg1', startMs: 1000, speaker: 'speaker1' },
-    { segmentId: 'seg2', startMs: 2000, speaker: 'speaker1' }
+    { segmentIndex: 5, segmentId: 'seg1', startMs: 1000, speaker: 'speaker1' },
+    { segmentIndex: 12, segmentId: 'seg2', startMs: 2000, speaker: 'speaker1' }
   ];
 
   const mockCallbacks = {
@@ -149,8 +149,8 @@ describe('MarkdownWithSources', () => {
     expect(quote.parentElement).toHaveClass('border-l-4', 'italic');
   });
 
-  it('should replace {{SOURCE_0}} with TimestampLink', () => {
-    const content = 'Check this source {{SOURCE_0}} for details.';
+  it('should replace [segment N] with TimestampLink', () => {
+    const content = 'Check this source [segment 5] for details.';
 
     render(
       <MarkdownWithSources
@@ -167,8 +167,8 @@ describe('MarkdownWithSources', () => {
     expect(screen.getByText('John Doe')).toBeInTheDocument();
   });
 
-  it('should render first source inline', () => {
-    const content = 'Only using first source {{SOURCE_0}} here.';
+  it('should render source inline when referenced by segment index', () => {
+    const content = 'Only using segment 5 [segment 5] here.';
 
     render(
       <MarkdownWithSources
@@ -180,13 +180,13 @@ describe('MarkdownWithSources', () => {
       />
     );
 
-    // First source should be rendered as TimestampLink
+    // Source should be rendered as TimestampLink
     expect(screen.getByText('0:01')).toBeInTheDocument();
     expect(screen.getByText('John Doe')).toBeInTheDocument();
   });
 
-  it('should handle out-of-range source indices gracefully', () => {
-    const content = 'Bad source {{SOURCE_99}} here.';
+  it('should leave unmatched segment references as-is', () => {
+    const content = 'Unknown segment [segment 99] here.';
 
     render(
       <MarkdownWithSources
@@ -198,12 +198,12 @@ describe('MarkdownWithSources', () => {
       />
     );
 
-    // The text includes the full sentence
-    expect(screen.getByText(/Bad source \[Source unavailable\] here/)).toBeInTheDocument();
+    // Unmatched segments should be left as plain text
+    expect(screen.getByText(/Unknown segment \[segment 99\] here/)).toBeInTheDocument();
   });
 
   it('should render both sources inline when referenced', () => {
-    const content = 'First {{SOURCE_0}} and second {{SOURCE_1}} sources.';
+    const content = 'First [segment 5] and second [segment 12] sources.';
 
     render(
       <MarkdownWithSources
@@ -216,6 +216,25 @@ describe('MarkdownWithSources', () => {
     );
 
     // Both sources should be rendered
+    expect(screen.getByText('0:01')).toBeInTheDocument();
+    expect(screen.getByText('0:02')).toBeInTheDocument();
+  });
+
+  it('should expand comma-separated segment lists', () => {
+    // LLMs sometimes output [segment 5, segment 12] instead of [segment 5] [segment 12]
+    const content = 'Multiple sources [segment 5, segment 12] grouped together.';
+
+    render(
+      <MarkdownWithSources
+        content={content}
+        sources={mockSources}
+        speakers={mockSpeakers}
+        conversationId="test-conv"
+        {...mockCallbacks}
+      />
+    );
+
+    // Both timestamps should be rendered from expanded list
     expect(screen.getByText('0:01')).toBeInTheDocument();
     expect(screen.getByText('0:02')).toBeInTheDocument();
   });
@@ -238,7 +257,7 @@ describe('MarkdownWithSources', () => {
   });
 
   it('should handle multiple inline sources in same paragraph', () => {
-    const content = 'See {{SOURCE_0}} and also {{SOURCE_1}} for context.';
+    const content = 'See [segment 5] and also [segment 12] for context.';
 
     render(
       <MarkdownWithSources
@@ -257,7 +276,7 @@ describe('MarkdownWithSources', () => {
 
   it('should preserve bold formatting around inline sources', () => {
     // The key test: bold should survive source replacement
-    const content = '**Important:** see this {{SOURCE_0}} for proof.';
+    const content = '**Important:** see this [segment 5] for proof.';
 
     render(
       <MarkdownWithSources
@@ -278,7 +297,7 @@ describe('MarkdownWithSources', () => {
   });
 
   it('should preserve links around inline sources', () => {
-    const content = 'Read [the docs](https://example.com) and see {{SOURCE_0}} for details.';
+    const content = 'Read [the docs](https://example.com) and see [segment 5] for details.';
 
     render(
       <MarkdownWithSources
@@ -300,7 +319,7 @@ describe('MarkdownWithSources', () => {
 
   it('should preserve formatting when source is inside bold text', () => {
     // Edge case: source marker directly inside bold
-    const content = '**Bold with source {{SOURCE_0}} inside.**';
+    const content = '**Bold with source [segment 5] inside.**';
 
     render(
       <MarkdownWithSources

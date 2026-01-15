@@ -17,12 +17,12 @@ import { functions } from '@/config/firebase-config';
  */
 export interface TimestampSource {
   segmentIndex: number;
-  segmentId?: string;
-  startMs?: number;
-  endMs?: number;
-  speaker?: string;
-  text?: string;
-  confidence?: 'high' | 'medium' | 'low';
+  segmentId: string;
+  startMs: number;
+  endMs: number;
+  speaker: string;
+  text: string;
+  confidence: 'high' | 'medium' | 'low';
 }
 
 /**

@@ -22,6 +22,7 @@ import { db } from '@/config/firebase-config';
  * Chat message timestamp source - links to transcript segment
  */
 export interface TimestampSource {
+  segmentIndex: number;
   segmentId: string;
   startMs: number;
   endMs: number;
