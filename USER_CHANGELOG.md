@@ -1,5 +1,16 @@
 # What's New
 
+## Version 2.3.1 - January 15, 2026
+
+### 🐛 Bug Fixes
+
+**Code Blocks Now Display Correctly**
+- Fixed an issue where code blocks in chat responses didn't scroll horizontally
+- Long lines of code now stay readable instead of breaking the layout
+- This was a regression from the v2.3.0 update
+
+---
+
 ## Version 2.3.0 - January 14, 2026
 
 ### ✨ New Features

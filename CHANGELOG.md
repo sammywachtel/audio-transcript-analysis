@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-01-15
+
+### Fixed
+- **Block Code Styling in Chat** - Fenced code blocks now properly display with horizontal scrolling
+  - Fixed react-markdown v10 migration issue where block code received inline styling
+  - Code blocks with language specifiers (` ```js `) now correctly have `overflow-x-auto` for long lines
+
 ## [2.3.0] - 2026-01-14
 
 ### Added
