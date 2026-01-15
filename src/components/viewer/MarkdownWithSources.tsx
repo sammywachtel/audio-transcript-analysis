@@ -236,17 +236,28 @@ export const MarkdownWithSources: React.FC<MarkdownWithSourcesProps> = ({
       </li>
     ),
 
-    // Inline code - monospace (no source replacement in code)
-    // Note: Block code is handled by the `pre` component below
-    code: ({ children }) => (
-      <code className="bg-slate-100 rounded px-1 py-0.5 text-xs font-mono">
-        {children}
-      </code>
-    ),
+    // Code - inline or block based on className presence
+    // Block code (fenced with ```) gets className="language-xxx"
+    // Inline code (single backticks) has no className
+    code: ({ className, children }) => {
+      const isBlock = className?.startsWith('language-');
+      if (isBlock) {
+        return (
+          <code className="block bg-slate-100 rounded p-2 overflow-x-auto text-xs font-mono my-2">
+            {children}
+          </code>
+        );
+      }
+      return (
+        <code className="bg-slate-100 rounded px-1 py-0.5 text-xs font-mono">
+          {children}
+        </code>
+      );
+    },
 
-    // Pre-formatted blocks
+    // Pre-formatted blocks - minimal wrapper since code handles styling
     pre: ({ children }) => (
-      <pre className="bg-slate-100 rounded p-2 overflow-x-auto text-xs font-mono my-2">
+      <pre className="my-2">
         {children}
       </pre>
     ),
