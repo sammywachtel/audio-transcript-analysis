@@ -386,6 +386,9 @@ export async function getRecentMetrics(
       id: doc.id  // Include Firestore document ID for detail views
     }));
 
+    // Filter out chat metrics - they have type='chat', processing metrics don't have type field
+    results = results.filter(m => !('type' in m) || (m as any).type !== 'chat');
+
     // Apply status filter client-side (minor optimization potential but keeps code simple)
     if (status) {
       results = results.filter(m => m.status === status);
@@ -466,7 +469,8 @@ export async function getCurrentPricing(model: string): Promise<PricingConfig | 
  */
 export function formatDuration(ms: number | undefined | null): string {
   // Guard against missing/invalid values from old Firestore docs
-  if (ms === undefined || ms === null || isNaN(ms) || ms < 0) {
+  // Also treat 0 as missing - no real operation takes 0ms
+  if (ms === undefined || ms === null || isNaN(ms) || ms <= 0) {
     return '-';  // Display dash for missing duration data
   }
 

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-01-15
+
+### Fixed
+- **Missing Duration Display in Old Metrics** - Admin dashboard now gracefully handles metrics created before v2.2.0
+  - `formatDuration()` returns "-" for missing/invalid duration values instead of showing "0ms" or crashing
+  - Prevents display errors when viewing historical transcription job details
+
+### Added
+- **Metrics Repair Tool** - New `fix-missing` mode in `scripts/reset-metrics.mjs` for database maintenance
+  - Repairs old metrics documents by looking up `durationMs` from their associated conversations
+  - Can also fix incorrect `status: 'failed'` on metrics where the conversation actually completed
+  - Use `--mode=fix-missing-dry` to preview changes before applying
+
 ## [2.3.1] - 2026-01-15
 
 ### Fixed

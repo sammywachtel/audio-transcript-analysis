@@ -45,8 +45,9 @@ describe('metricsService formatters', () => {
       expect(formatDuration(-1000)).toBe('-');
     });
 
-    it('should handle zero correctly', () => {
-      expect(formatDuration(0)).toBe('0ms');
+    it('should handle zero as missing data', () => {
+      // 0ms is meaningless for processing/duration - treat as missing
+      expect(formatDuration(0)).toBe('-');
     });
   });
 

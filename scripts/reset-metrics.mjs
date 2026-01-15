@@ -9,16 +9,22 @@
  * Also fixes metrics with missing durationMs fields (pre-v2.2.0 data).
  *
  * Usage:
- *   node scripts/reset-metrics.mjs --mode=dry-run         # Preview cost recalculation
- *   node scripts/reset-metrics.mjs --mode=recalculate     # Recalculate costs
- *   node scripts/reset-metrics.mjs --mode=analyze         # Analyze existing metrics
- *   node scripts/reset-metrics.mjs --mode=fix-missing-dry # Preview missing durationMs fixes
- *   node scripts/reset-metrics.mjs --mode=fix-missing     # Fix missing durationMs fields
- *   node scripts/reset-metrics.mjs --mode=delete          # Delete all metrics
+ *   node scripts/reset-metrics.mjs --mode=dry-run             # Preview cost recalculation
+ *   node scripts/reset-metrics.mjs --mode=recalculate         # Recalculate costs
+ *   node scripts/reset-metrics.mjs --mode=analyze             # Analyze existing metrics
+ *   node scripts/reset-metrics.mjs --mode=fix-missing-dry     # Preview missing durationMs fixes
+ *   node scripts/reset-metrics.mjs --mode=fix-missing         # Fix missing durationMs fields
+ *   node scripts/reset-metrics.mjs --mode=fix-status-dry      # Preview status fixes (failed → success)
+ *   node scripts/reset-metrics.mjs --mode=fix-status          # Fix incorrect failed status
+ *   node scripts/reset-metrics.mjs --mode=fix-type-dry        # Preview type fixes (remove incorrect chat type)
+ *   node scripts/reset-metrics.mjs --mode=fix-type            # Remove incorrect type='chat' from processing metrics
+ *   node scripts/reset-metrics.mjs --mode=delete-orphaned-dry # Preview orphaned metrics deletion
+ *   node scripts/reset-metrics.mjs --mode=delete-orphaned     # Delete metrics with no conversation
+ *   node scripts/reset-metrics.mjs --mode=delete              # Delete ALL metrics (danger!)
  */
 
 import { initializeApp, applicationDefault } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -272,27 +278,30 @@ async function fixMissingDuration(dryRun) {
 
     // Try to look up the conversation to get the actual duration
     const conversationId = data.conversationId;
-    if (!conversationId) {
-      console.log(`  ⚠️  ${doc.id}: No conversationId, skipping`);
+    const userId = data.userId;
+
+    if (!conversationId || !userId) {
+      console.log(`  ⚠️  ${doc.id}: Missing conversationId or userId, skipping`);
       skipped++;
       continue;
     }
 
-    // Find the conversation document (could be in any user's subcollection)
-    // Search across all users' conversations
-    const usersSnapshot = await db.collectionGroup('conversations')
-      .where('id', '==', conversationId)
-      .limit(1)
+    // Look up conversation directly at root level
+    // Structure: conversations/{conversationId}
+    const convDoc = await db
+      .collection('conversations')
+      .doc(conversationId)
       .get();
 
-    if (usersSnapshot.empty) {
+    if (!convDoc.exists) {
       console.log(`  ⚠️  ${conversationId.slice(0, 12)}... No conversation found`);
       notFound++;
       continue;
     }
 
-    const conversation = usersSnapshot.docs[0].data();
+    const conversation = convDoc.data();
     const convDurationMs = conversation.durationMs;
+    const convStatus = conversation.status;
 
     if (!convDurationMs || isNaN(convDurationMs) || convDurationMs === 0) {
       console.log(`  ⚠️  ${conversationId.slice(0, 12)}... Conversation has no valid durationMs`);
@@ -300,10 +309,22 @@ async function fixMissingDuration(dryRun) {
       continue;
     }
 
-    console.log(`  ✓  ${conversationId.slice(0, 12)}... Setting durationMs: ${(convDurationMs/1000/60).toFixed(1)}m`);
+    // Build update object
+    const updateData = { durationMs: convDurationMs };
+
+    // If conversation is complete but metric says failed, fix the status
+    const metricStatus = data.status;
+    const shouldFixStatus = convStatus === 'complete' && metricStatus === 'failed';
+
+    if (shouldFixStatus) {
+      updateData.status = 'success';
+      console.log(`  ✓  ${conversationId.slice(0, 12)}... Setting durationMs: ${(convDurationMs/1000/60).toFixed(1)}m, status: failed → success`);
+    } else {
+      console.log(`  ✓  ${conversationId.slice(0, 12)}... Setting durationMs: ${(convDurationMs/1000/60).toFixed(1)}m`);
+    }
 
     if (!dryRun) {
-      await doc.ref.update({ durationMs: convDurationMs });
+      await doc.ref.update(updateData);
     }
 
     fixed++;
@@ -321,6 +342,312 @@ async function fixMissingDuration(dryRun) {
   } else {
     console.log(`\n✅ Done! ${fixed} metrics have been updated.`);
   }
+}
+
+async function fixIncorrectStatus(dryRun) {
+  console.log(`\n${dryRun ? '🔍 DRY RUN - ' : ''}Fixing metrics with incorrect status...\n`);
+
+  const snapshot = await db.collection('_metrics').get();
+  console.log(`Found ${snapshot.docs.length} total metrics\n`);
+
+  // Show status and type breakdown
+  const statusCounts = {};
+  const typeCounts = {};
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+    const status = data.status || 'undefined';
+    const type = data.type || 'processing';  // processing metrics don't have type field
+    statusCounts[status] = (statusCounts[status] || 0) + 1;
+    typeCounts[type] = (typeCounts[type] || 0) + 1;
+  }
+  console.log('Status breakdown:', statusCounts);
+  console.log('Type breakdown:', typeCounts, '\n');
+
+  // First pass: calculate average processing ratio from successful metrics
+  let totalRatio = 0;
+  let ratioCount = 0;
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+    if (data.status === 'success' &&
+        data.durationMs > 0 &&
+        data.timingMs?.total > 0) {
+      const ratio = data.timingMs.total / data.durationMs;
+      // Only include reasonable ratios (5% to 100% of audio duration)
+      if (ratio > 0.05 && ratio < 1.0) {
+        totalRatio += ratio;
+        ratioCount++;
+      }
+    }
+  }
+
+  const avgRatio = ratioCount > 0 ? totalRatio / ratioCount : 0.3; // Default 30% if no data
+  console.log(`Average processing ratio: ${(avgRatio * 100).toFixed(1)}% of audio duration (from ${ratioCount} successful jobs)\n`);
+
+  let fixed = 0;
+  let skipped = 0;
+  let alreadyCorrect = 0;
+  let orphaned = 0;
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+
+    // Skip chat metrics - they have different schema
+    if (data.type === 'chat') {
+      alreadyCorrect++;
+      continue;
+    }
+
+    const metricStatus = data.status;
+
+    // Only check metrics that need fixing (failed, undefined, or missing)
+    if (metricStatus === 'success') {
+      alreadyCorrect++;
+      continue;
+    }
+
+    const conversationId = data.conversationId;
+    if (!conversationId) {
+      console.log(`  ⚠️  ${doc.id}: No conversationId, skipping`);
+      skipped++;
+      continue;
+    }
+
+    // Look up conversation
+    const convDoc = await db
+      .collection('conversations')
+      .doc(conversationId)
+      .get();
+
+    if (!convDoc.exists) {
+      orphaned++;
+      continue;
+    }
+
+    const conversation = convDoc.data();
+    const convStatus = conversation.status;
+
+    // If conversation is complete, the metric should be success
+    if (convStatus === 'complete') {
+      const updateData = { status: 'success' };
+
+      // Estimate processing time if we have audio duration
+      const audioDurationMs = data.durationMs || conversation.durationMs;
+      let estimatedProcessingMs = 0;
+
+      if (audioDurationMs > 0 && (!data.timingMs?.total || data.timingMs.total === 0)) {
+        estimatedProcessingMs = Math.round(audioDurationMs * avgRatio);
+        updateData['timingMs.total'] = estimatedProcessingMs;
+      }
+
+      const processingStr = estimatedProcessingMs > 0
+        ? `, processing: ~${(estimatedProcessingMs/1000/60).toFixed(1)}m (estimated)`
+        : '';
+
+      const oldStatus = metricStatus || 'undefined';
+      console.log(`  ✓  ${conversationId.slice(0, 12)}... status: ${oldStatus} → success${processingStr}`);
+
+      if (!dryRun) {
+        await doc.ref.update(updateData);
+      }
+
+      fixed++;
+    }
+  }
+
+  console.log(`\n${'─'.repeat(60)}`);
+  console.log(`Summary:`);
+  console.log(`  Already correct: ${alreadyCorrect}`);
+  console.log(`  Fixed:           ${fixed}`);
+  console.log(`  Orphaned:        ${orphaned}`);
+  console.log(`  Skipped:         ${skipped}`);
+
+  if (dryRun) {
+    console.log(`\n⚠️  This was a dry run. Run with --mode=fix-status to apply changes.`);
+  } else {
+    console.log(`\n✅ Done! ${fixed} metrics have been updated.`);
+  }
+}
+
+async function fixBrokenChatMetrics(dryRun) {
+  console.log(`\n${dryRun ? '🔍 DRY RUN - ' : ''}Fixing broken chat metrics (removing fields we incorrectly added)...\n`);
+
+  const snapshot = await db.collection('_metrics').get();
+  console.log(`Found ${snapshot.docs.length} total metrics\n`);
+
+  const toFix = [];
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+
+    // Find chat metrics that we broke by adding status/timingMs/durationMs
+    // Real chat metrics have type='chat' but should NOT have these processing-related fields
+    const isChatMetric = data.type === 'chat';
+    const wasIncorrectlyModified = isChatMetric && (
+      data.status !== undefined ||
+      data.timingMs !== undefined ||
+      data.durationMs !== undefined
+    );
+
+    if (wasIncorrectlyModified) {
+      const conversationId = data.conversationId || 'unknown';
+      console.log(`  🔧  ${conversationId.slice(0, 12)}... will remove status/timingMs/durationMs`);
+      toFix.push(doc);
+    }
+  }
+
+  console.log(`\n${'─'.repeat(60)}`);
+  console.log(`Found ${toFix.length} broken chat metrics to fix`);
+
+  if (dryRun) {
+    console.log(`\n⚠️  This was a dry run. Run with --mode=fix-broken-chats to actually fix.`);
+    return;
+  }
+
+  if (toFix.length === 0) {
+    console.log(`\n✅ No broken chat metrics to fix.`);
+    return;
+  }
+
+  // Fix in batches - remove the fields we incorrectly added
+  const batchSize = 500;
+  let fixed = 0;
+
+  while (fixed < toFix.length) {
+    const batch = db.batch();
+    const docs = toFix.slice(fixed, fixed + batchSize);
+
+    for (const doc of docs) {
+      // Use FieldValue.delete() to remove the fields we incorrectly added
+      batch.update(doc.ref, {
+        status: FieldValue.delete(),
+        timingMs: FieldValue.delete(),
+        durationMs: FieldValue.delete(),
+      });
+    }
+
+    await batch.commit();
+    fixed += docs.length;
+    console.log(`Fixed ${fixed}/${toFix.length}`);
+  }
+
+  console.log(`\n✅ Done! Fixed ${toFix.length} broken chat metrics (removed status/timingMs/durationMs fields).`);
+}
+
+async function fixIncorrectType(dryRun) {
+  console.log(`\n${dryRun ? '🔍 DRY RUN - ' : ''}Fixing metrics with incorrect type field...\n`);
+
+  const snapshot = await db.collection('_metrics').get();
+  console.log(`Found ${snapshot.docs.length} total metrics\n`);
+
+  let fixed = 0;
+  let alreadyCorrect = 0;
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+
+    // Check if it has type='chat' but looks like a processing metric
+    // Processing metrics have durationMs, timingMs, etc. but NOT queryType
+    const hasType = 'type' in data && data.type === 'chat';
+    const looksLikeProcessing = 'durationMs' in data || 'timingMs' in data || 'audioSizeMB' in data;
+    const looksLikeChat = 'queryType' in data || 'tokenUsage' in data;
+
+    if (hasType && looksLikeProcessing && !looksLikeChat) {
+      const conversationId = data.conversationId || 'unknown';
+      console.log(`  ✓  ${conversationId.slice(0, 12)}... removing incorrect type='chat' field`);
+
+      if (!dryRun) {
+        // Use FieldValue.delete() to remove the field
+        const { FieldValue } = await import('firebase-admin/firestore');
+        await doc.ref.update({ type: FieldValue.delete() });
+      }
+
+      fixed++;
+    } else {
+      alreadyCorrect++;
+    }
+  }
+
+  console.log(`\n${'─'.repeat(60)}`);
+  console.log(`Summary:`);
+  console.log(`  Already correct: ${alreadyCorrect}`);
+  console.log(`  Fixed:           ${fixed}`);
+
+  if (dryRun) {
+    console.log(`\n⚠️  This was a dry run. Run with --mode=fix-type to apply changes.`);
+  } else {
+    console.log(`\n✅ Done! ${fixed} metrics have been updated.`);
+  }
+}
+
+async function deleteOrphanedMetrics(dryRun) {
+  console.log(`\n${dryRun ? '🔍 DRY RUN - ' : ''}Deleting orphaned metrics (no conversation exists)...\n`);
+
+  const snapshot = await db.collection('_metrics').get();
+  console.log(`Found ${snapshot.docs.length} total metrics\n`);
+
+  const orphanedDocs = [];
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+
+    // Skip chat metrics - they have different schema and lifecycle
+    if (data.type === 'chat') {
+      continue;
+    }
+
+    const conversationId = data.conversationId;
+    const userId = data.userId;
+
+    if (!conversationId || !userId) {
+      console.log(`  🗑️  ${doc.id}: Missing conversationId or userId`);
+      orphanedDocs.push(doc);
+      continue;
+    }
+
+    // Check if conversation exists at root level
+    const convDoc = await db
+      .collection('conversations')
+      .doc(conversationId)
+      .get();
+
+    if (!convDoc.exists) {
+      console.log(`  🗑️  ${conversationId.slice(0, 12)}... Orphaned (conversation deleted)`);
+      orphanedDocs.push(doc);
+    }
+  }
+
+  console.log(`\n${'─'.repeat(60)}`);
+  console.log(`Found ${orphanedDocs.length} orphaned metrics to delete`);
+
+  if (dryRun) {
+    console.log(`\n⚠️  This was a dry run. Run with --mode=delete-orphaned to actually delete.`);
+    return;
+  }
+
+  if (orphanedDocs.length === 0) {
+    console.log(`\n✅ No orphaned metrics to delete.`);
+    return;
+  }
+
+  // Delete in batches of 500
+  const batchSize = 500;
+  let deleted = 0;
+
+  while (deleted < orphanedDocs.length) {
+    const batch = db.batch();
+    const docs = orphanedDocs.slice(deleted, deleted + batchSize);
+
+    for (const doc of docs) {
+      batch.delete(doc.ref);
+    }
+
+    await batch.commit();
+    deleted += docs.length;
+    console.log(`Deleted ${deleted}/${orphanedDocs.length}`);
+  }
+
+  console.log(`\n✅ Done! Deleted ${orphanedDocs.length} orphaned metrics.`);
 }
 
 async function deleteAllMetrics(dryRun) {
@@ -375,6 +702,30 @@ async function main() {
       break;
     case 'fix-missing-dry':
       await fixMissingDuration(true);
+      break;
+    case 'fix-status':
+      await fixIncorrectStatus(false);
+      break;
+    case 'fix-status-dry':
+      await fixIncorrectStatus(true);
+      break;
+    case 'fix-type':
+      await fixIncorrectType(false);
+      break;
+    case 'fix-type-dry':
+      await fixIncorrectType(true);
+      break;
+    case 'fix-broken-chats-dry':
+      await fixBrokenChatMetrics(true);
+      break;
+    case 'fix-broken-chats':
+      await fixBrokenChatMetrics(false);
+      break;
+    case 'delete-orphaned-dry':
+      await deleteOrphanedMetrics(true);
+      break;
+    case 'delete-orphaned':
+      await deleteOrphanedMetrics(false);
       break;
     case 'delete':
       await deleteAllMetrics(false);
