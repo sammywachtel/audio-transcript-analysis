@@ -462,10 +462,16 @@ export async function getCurrentPricing(model: string): Promise<PricingConfig | 
 
 /**
  * Format milliseconds as human-readable duration
+ * Handles missing/invalid values gracefully for backward compatibility
  */
-export function formatDuration(ms: number): string {
+export function formatDuration(ms: number | undefined | null): string {
+  // Guard against missing/invalid values from old Firestore docs
+  if (ms === undefined || ms === null || isNaN(ms) || ms < 0) {
+    return '-';  // Display dash for missing duration data
+  }
+
   if (ms < 1000) {
-    return `${ms}ms`;
+    return `${Math.round(ms)}ms`;
   }
   const seconds = ms / 1000;
   if (seconds < 60) {
@@ -482,7 +488,12 @@ export function formatDuration(ms: number): string {
 /**
  * Format bytes as human-readable size
  */
-export function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number | undefined | null): string {
+  // Guard against missing/invalid values from old Firestore docs
+  if (bytes === undefined || bytes === null || isNaN(bytes) || bytes < 0) {
+    return '-';
+  }
+
   if (bytes < 1024) {
     return `${bytes} B`;
   }
@@ -501,7 +512,12 @@ export function formatBytes(bytes: number): string {
 /**
  * Format USD amount
  */
-export function formatUsd(amount: number): string {
+export function formatUsd(amount: number | undefined | null): string {
+  // Guard against missing/invalid values from old Firestore docs
+  if (amount === undefined || amount === null || isNaN(amount)) {
+    return '$0.00';  // Show zero cost for missing pricing data
+  }
+
   if (amount < 0.01) {
     return `$${amount.toFixed(6)}`;
   }
