@@ -386,6 +386,9 @@ export async function getRecentMetrics(
       id: doc.id  // Include Firestore document ID for detail views
     }));
 
+    // Filter out chat metrics - they have type='chat', processing metrics don't have type field
+    results = results.filter(m => !('type' in m) || (m as any).type !== 'chat');
+
     // Apply status filter client-side (minor optimization potential but keeps code simple)
     if (status) {
       results = results.filter(m => m.status === status);
@@ -462,10 +465,17 @@ export async function getCurrentPricing(model: string): Promise<PricingConfig | 
 
 /**
  * Format milliseconds as human-readable duration
+ * Handles missing/invalid values gracefully for backward compatibility
  */
-export function formatDuration(ms: number): string {
+export function formatDuration(ms: number | undefined | null): string {
+  // Guard against missing/invalid values from old Firestore docs
+  // Also treat 0 as missing - no real operation takes 0ms
+  if (ms === undefined || ms === null || isNaN(ms) || ms <= 0) {
+    return '-';  // Display dash for missing duration data
+  }
+
   if (ms < 1000) {
-    return `${ms}ms`;
+    return `${Math.round(ms)}ms`;
   }
   const seconds = ms / 1000;
   if (seconds < 60) {
@@ -482,7 +492,12 @@ export function formatDuration(ms: number): string {
 /**
  * Format bytes as human-readable size
  */
-export function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number | undefined | null): string {
+  // Guard against missing/invalid values from old Firestore docs
+  if (bytes === undefined || bytes === null || isNaN(bytes) || bytes < 0) {
+    return '-';
+  }
+
   if (bytes < 1024) {
     return `${bytes} B`;
   }
@@ -501,7 +516,12 @@ export function formatBytes(bytes: number): string {
 /**
  * Format USD amount
  */
-export function formatUsd(amount: number): string {
+export function formatUsd(amount: number | undefined | null): string {
+  // Guard against missing/invalid values from old Firestore docs
+  if (amount === undefined || amount === null || isNaN(amount)) {
+    return '$0.00';  // Show zero cost for missing pricing data
+  }
+
   if (amount < 0.01) {
     return `$${amount.toFixed(6)}`;
   }

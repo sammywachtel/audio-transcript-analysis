@@ -1,5 +1,21 @@
 # What's New
 
+## Version 2.3.2 - January 15, 2026
+
+### 🐛 Bug Fixes
+
+**Historical Job Details Now Display Correctly**
+- The admin dashboard now properly shows processing details for older transcription jobs
+- Duration and timing information for jobs processed before v2.2.0 now displays as "-" instead of causing display errors
+
+### 🔧 Admin Tools
+
+**Repair Tool for Old Data**
+- Added a new script mode (`--mode=fix-missing`) to repair metrics documents from older versions
+- Run `node scripts/reset-metrics.mjs --mode=fix-missing-dry` to preview what will be fixed
+
+---
+
 ## Version 2.3.1 - January 15, 2026
 
 ### 🐛 Bug Fixes
