@@ -6,10 +6,15 @@
  * Fixes historical metrics that have inflated cost estimates due to
  * using wall-clock time instead of actual Replicate compute time.
  *
+ * Also fixes metrics with missing durationMs fields (pre-v2.2.0 data).
+ *
  * Usage:
- *   node scripts/reset-metrics.mjs --mode=dry-run      # Preview changes
- *   node scripts/reset-metrics.mjs --mode=recalculate  # Recalculate costs
- *   node scripts/reset-metrics.mjs --mode=delete       # Delete all metrics
+ *   node scripts/reset-metrics.mjs --mode=dry-run         # Preview cost recalculation
+ *   node scripts/reset-metrics.mjs --mode=recalculate     # Recalculate costs
+ *   node scripts/reset-metrics.mjs --mode=analyze         # Analyze existing metrics
+ *   node scripts/reset-metrics.mjs --mode=fix-missing-dry # Preview missing durationMs fixes
+ *   node scripts/reset-metrics.mjs --mode=fix-missing     # Fix missing durationMs fields
+ *   node scripts/reset-metrics.mjs --mode=delete          # Delete all metrics
  */
 
 import { initializeApp, applicationDefault } from 'firebase-admin/app';
@@ -241,6 +246,83 @@ async function recalculateCosts(dryRun) {
   }
 }
 
+async function fixMissingDuration(dryRun) {
+  console.log(`\n${dryRun ? '🔍 DRY RUN - ' : ''}Fixing metrics with missing durationMs...\n`);
+
+  const snapshot = await db.collection('_metrics').get();
+  console.log(`Found ${snapshot.docs.length} total metrics\n`);
+
+  let fixed = 0;
+  let skipped = 0;
+  let notFound = 0;
+  let alreadyValid = 0;
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+
+    // Check if durationMs is missing or invalid (NaN, undefined, null, 0)
+    const hasMissingDuration = !data.durationMs ||
+      isNaN(data.durationMs) ||
+      data.durationMs === 0;
+
+    if (!hasMissingDuration) {
+      alreadyValid++;
+      continue;
+    }
+
+    // Try to look up the conversation to get the actual duration
+    const conversationId = data.conversationId;
+    if (!conversationId) {
+      console.log(`  ⚠️  ${doc.id}: No conversationId, skipping`);
+      skipped++;
+      continue;
+    }
+
+    // Find the conversation document (could be in any user's subcollection)
+    // Search across all users' conversations
+    const usersSnapshot = await db.collectionGroup('conversations')
+      .where('id', '==', conversationId)
+      .limit(1)
+      .get();
+
+    if (usersSnapshot.empty) {
+      console.log(`  ⚠️  ${conversationId.slice(0, 12)}... No conversation found`);
+      notFound++;
+      continue;
+    }
+
+    const conversation = usersSnapshot.docs[0].data();
+    const convDurationMs = conversation.durationMs;
+
+    if (!convDurationMs || isNaN(convDurationMs) || convDurationMs === 0) {
+      console.log(`  ⚠️  ${conversationId.slice(0, 12)}... Conversation has no valid durationMs`);
+      notFound++;
+      continue;
+    }
+
+    console.log(`  ✓  ${conversationId.slice(0, 12)}... Setting durationMs: ${(convDurationMs/1000/60).toFixed(1)}m`);
+
+    if (!dryRun) {
+      await doc.ref.update({ durationMs: convDurationMs });
+    }
+
+    fixed++;
+  }
+
+  console.log(`\n${'─'.repeat(60)}`);
+  console.log(`Summary:`);
+  console.log(`  Already valid: ${alreadyValid}`);
+  console.log(`  Fixed:         ${fixed}`);
+  console.log(`  Not found:     ${notFound}`);
+  console.log(`  Skipped:       ${skipped}`);
+
+  if (dryRun) {
+    console.log(`\n⚠️  This was a dry run. Run with --mode=fix-missing to apply changes.`);
+  } else {
+    console.log(`\n✅ Done! ${fixed} metrics have been updated.`);
+  }
+}
+
 async function deleteAllMetrics(dryRun) {
   console.log(`\n${dryRun ? '🔍 DRY RUN - ' : ''}Deleting all metrics...\n`);
 
@@ -287,6 +369,12 @@ async function main() {
       break;
     case 'recalculate':
       await recalculateCosts(false);
+      break;
+    case 'fix-missing':
+      await fixMissingDuration(false);
+      break;
+    case 'fix-missing-dry':
+      await fixMissingDuration(true);
       break;
     case 'delete':
       await deleteAllMetrics(false);
