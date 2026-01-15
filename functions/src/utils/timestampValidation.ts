@@ -8,6 +8,7 @@
 import type { Segment } from '../types';
 
 export interface TimestampSource {
+  segmentIndex: number;
   segmentId: string;
   startMs: number;
   endMs: number;
@@ -78,6 +79,7 @@ export function validateTimestampSources(
     // Only include if we found a valid match
     if (matchedSegment) {
       validatedSources.push({
+        segmentIndex: matchedSegment.index,
         segmentId: matchedSegment.segmentId,
         startMs: matchedSegment.startMs,
         endMs: matchedSegment.endMs,
