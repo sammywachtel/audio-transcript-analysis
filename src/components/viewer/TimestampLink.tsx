@@ -92,7 +92,7 @@ export const TimestampLink: React.FC<TimestampLinkProps> = ({
   const hasError = errorState !== null;
 
   return (
-    <div className="relative inline-block">
+    <span className="relative inline-block">
       <button
         onClick={handleClick}
         className={cn(
@@ -122,10 +122,10 @@ export const TimestampLink: React.FC<TimestampLinkProps> = ({
 
       {/* Error tooltip */}
       {hasError && (
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-slate-900 text-white text-[10px] rounded whitespace-nowrap z-10 animate-in fade-in slide-in-from-bottom-1 duration-200">
+        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-slate-900 text-white text-[10px] rounded whitespace-nowrap z-10 animate-in fade-in slide-in-from-bottom-1 duration-200">
           {errorState}
-        </div>
+        </span>
       )}
-    </div>
+    </span>
   );
 };

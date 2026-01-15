@@ -72,9 +72,9 @@ export const LLMUsageBreakdown: React.FC<LLMUsageBreakdownProps> = ({
     );
   }
 
-  // Custom label renderer
-  const renderLabel = ({ percent }: { name: string; percent: number }) => {
-    if (percent < 0.05) return null; // Hide tiny slices
+  // Custom label renderer - uses PieLabelRenderProps where percent is guaranteed
+  const renderLabel = ({ percent }: { percent?: number }) => {
+    if (!percent || percent < 0.05) return null; // Hide tiny slices
     return `${(percent * 100).toFixed(0)}%`;
   };
 

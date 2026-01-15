@@ -138,15 +138,15 @@ export function useChat({ conversationId, messageCount, messages = [] }: UseChat
       const response = await sendChatMessage(conversationId, message);
 
       // Convert chatService sources to chatHistoryService format
-      // chatService has segmentIndex, chatHistoryService expects full source data
+      // Backend returns validated sources with speaker (not speakerId)
       const sources: TimestampSource[] = response.sources
         .filter(s => s.segmentId && s.startMs !== undefined && s.endMs !== undefined)
         .map(s => ({
           segmentId: s.segmentId!,
           startMs: s.startMs!,
           endMs: s.endMs!,
-          speaker: s.speakerId || 'Unknown',
-          text: '' // Text is not included in chatService response, but not critical for display
+          speaker: s.speaker || 'Unknown',
+          text: s.text || '' // Backend includes text; fallback if missing
         }));
 
       // Add assistant response to Firestore

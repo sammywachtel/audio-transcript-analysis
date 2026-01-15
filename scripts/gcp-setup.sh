@@ -147,7 +147,7 @@ ensure_service_identity() {
 
     # Run gcloud command, capturing output and exit code without triggering set -e
     # The '|| true' prevents set -e from killing the script on failure
-    output=$(gcloud services identity create \
+    output=$(gcloud beta services identity create \
         --service="$service" \
         --project="$PROJECT_ID" \
         --quiet 2>&1) || exit_code=$?

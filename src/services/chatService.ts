@@ -11,14 +11,18 @@ import { functions } from '@/config/firebase-config';
 /**
  * Timestamp source from chat response
  * Contains segment metadata for citation links
+ *
+ * Note: Backend (timestampValidation.ts) returns 'speaker' not 'speakerId'.
+ * Keep this aligned with the Cloud Function's TimestampSource interface.
  */
 export interface TimestampSource {
   segmentIndex: number;
   segmentId?: string;
   startMs?: number;
   endMs?: number;
-  speakerId?: string;
-  confidence?: string;
+  speaker?: string;
+  text?: string;
+  confidence?: 'high' | 'medium' | 'low';
 }
 
 /**

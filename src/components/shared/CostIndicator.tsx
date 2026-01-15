@@ -94,15 +94,9 @@ export const CostIndicator: React.FC<CostIndicatorProps> = ({
               <span className="font-mono">{formatUsd(breakdown.geminiUsd)}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-300">WhisperX:</span>
+              <span className="text-slate-300">WhisperX (incl. diarization):</span>
               <span className="font-mono">{formatUsd(breakdown.whisperxUsd)}</span>
             </div>
-            {breakdown.diarizationUsd > 0 && (
-              <div className="flex justify-between">
-                <span className="text-slate-300">Diarization:</span>
-                <span className="font-mono">{formatUsd(breakdown.diarizationUsd)}</span>
-              </div>
-            )}
             <div className="flex justify-between pt-1.5 mt-1.5 border-t border-slate-700 font-semibold">
               <span>Total:</span>
               <span className="font-mono">{formatUsd(breakdown.totalUsd)}</span>

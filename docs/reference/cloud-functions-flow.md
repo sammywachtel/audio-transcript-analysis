@@ -283,9 +283,29 @@ Enables natural language Q&A about transcripts with timestamp citations.
 
 **Features:**
 - Rate limited (20 queries/day per conversation per user)
-- Returns answers with timestamp-backed source citations
+- Returns markdown-formatted answers with inline `{{SOURCE_n}}` placeholders
 - Validates citations against actual segments
 - Calculates and records cost metrics
+
+**Inline Source Placeholder Contract:**
+
+The LLM is instructed to emit `{{SOURCE_n}}` placeholders in its response, where `n` is a 0-indexed position corresponding to the order of segment citations. This enables the frontend to render interactive timestamp buttons inline with the supporting text.
+
+```
+Example LLM response:
+"The speaker mentioned Q4 revenue {{SOURCE_0}}. They also discussed next quarter {{SOURCE_1}}."
+```
+
+**Source Ordering Requirements:**
+- `extractSegmentIndices()` returns segment indices in order of first appearance
+- `validateTimestampSources()` preserves this order (no sorting)
+- The returned `sources` array matches placeholder indices: `sources[0]` → `{{SOURCE_0}}`
+- Frontend handles out-of-range indices gracefully with `[Source unavailable]`
+
+**Files involved:**
+- `functions/src/utils/promptBuilder.ts` - LLM prompt instructions for `{{SOURCE_n}}` format
+- `functions/src/utils/timestampValidation.ts` - Source extraction and validation
+- `src/components/viewer/MarkdownWithSources.tsx` - Frontend markdown + source rendering
 
 ### 6. retryTranscription (HTTPS Callable)
 

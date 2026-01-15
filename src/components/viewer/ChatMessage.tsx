@@ -15,6 +15,7 @@ import { CostIndicator } from '../shared/CostIndicator';
 import { ChatHistoryMessage } from '@/services/chatHistoryService';
 import { Speaker } from '@/config/types';
 import { TimestampLink } from './TimestampLink';
+import { MarkdownWithSources } from './MarkdownWithSources';
 
 interface ChatMessageProps {
   message: ChatHistoryMessage;
@@ -38,6 +39,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
 }) => {
   const isUser = message.role === 'user';
   const isUnanswerable = message.isUnanswerable;
+  const [unconsumedSources, setUnconsumedSources] = React.useState<Array<{ segmentId: string; startMs: number; speaker?: string }>>([]);
 
   return (
     <div
@@ -81,17 +83,31 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
               </span>
             </div>
           )}
-          {message.content}
+          {/* Render markdown for all assistant messages (even without sources), plain text for user/unanswerable */}
+          {!isUser && !isUnanswerable ? (
+            <MarkdownWithSources
+              content={message.content}
+              sources={message.sources ?? []}
+              speakers={speakers}
+              conversationId={conversationId}
+              onSeek={onSeek}
+              onPlay={onPlay}
+              onHighlight={onHighlight}
+              onUnconsumedSources={setUnconsumedSources}
+            />
+          ) : (
+            message.content
+          )}
         </div>
 
-        {/* Timestamp Sources (only for answerable assistant messages) */}
-        {!isUser && message.sources && message.sources.length > 0 && !isUnanswerable && (
+        {/* Additional sources section - only show if there are unconsumed sources */}
+        {!isUser && !isUnanswerable && unconsumedSources.length > 0 && (
           <div className="mt-2 pt-2 border-t border-slate-100">
             <div className="text-[10px] uppercase font-semibold text-slate-400 tracking-wider mb-1.5">
-              Sources
+              Additional sources
             </div>
             <div className="flex flex-wrap gap-1.5">
-              {message.sources.map((source, idx) => {
+              {unconsumedSources.map((source, idx) => {
                 const speaker = source.speaker ? speakers[source.speaker] : null;
                 const speakerName = speaker?.displayName || source.speaker || 'Unknown';
 

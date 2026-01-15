@@ -569,7 +569,7 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
                 >
                   <Zap size={16} className={cn(processingMode === 'parallel' && "text-blue-500")} />
                   <span className="font-medium text-sm">Fast</span>
-                  <span className="text-xs opacity-60">(Parallel)</span>
+                  <span className="text-xs opacity-60">(Parallel, USE THIS)</span>
                 </button>
                 <button
                   type="button"
