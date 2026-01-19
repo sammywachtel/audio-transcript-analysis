@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-01-19
+
+### Added
+- **Copy Button on All Assistant Messages** - Copy button now appears on every assistant message, including "unanswerable" responses
+  - Users can copy any AI response to clipboard for sharing, reporting issues, or pasting elsewhere
+  - Copied text excludes timestamp citations and "Additional sources" UI content
+
+### Fixed
+- **Chat History Controls Now Work Immediately** - Export and clear buttons enable instantly when messages exist
+  - Previously required page refresh after sending first message
+  - Message count updates in real-time without manual refresh
+
 ## [2.4.0] - 2026-01-15
 
 ### Added

@@ -115,6 +115,7 @@ export const chatWithConversation = onCall<ChatRequest>(
   {
     region: 'us-central1',
     memory: '512MiB',
+    timeoutSeconds: 300,  // 5 minutes - Gemini can be slow with large transcript contexts
     // CORS: allow all origins (callable functions are already auth-protected)
     cors: true
   },
@@ -159,7 +160,13 @@ export const chatWithConversation = onCall<ChatRequest>(
 
     try {
       // Fetch conversation and verify ownership
+      const fetchStart = Date.now();
       const conversationDoc = await db.collection('conversations').doc(conversationId).get();
+      log.info('Firestore fetch complete', {
+        conversationId,
+        fetchTimeMs: Date.now() - fetchStart,
+        docSize: JSON.stringify(conversationDoc.data() || {}).length
+      });
 
       if (!conversationDoc.exists) {
         throw new HttpsError('not-found', 'Conversation not found');
@@ -180,7 +187,14 @@ export const chatWithConversation = onCall<ChatRequest>(
       }
 
       // Build prompt with full transcript context
+      const promptStart = Date.now();
       const prompt = buildChatPrompt(conversation, message);
+      log.info('Prompt built', {
+        conversationId,
+        promptBuildTimeMs: Date.now() - promptStart,
+        promptLength: prompt.length,
+        segmentCount: conversation.segments?.length || 0
+      });
 
       // Call Gemini API via Vertex AI
       const vertexAI = getVertexAIClient();
@@ -190,6 +204,8 @@ export const chatWithConversation = onCall<ChatRequest>(
       const labels = buildGeminiLabels(conversationId, userId, 'chat');
 
       // Wrap in retry logic for transient 429/rate limit errors
+      const geminiStart = Date.now();
+      log.info('Calling Gemini API', { conversationId, promptLength: prompt.length });
       const result = await retryWithBackoff(
         () => model.generateContent({
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -200,6 +216,10 @@ export const chatWithConversation = onCall<ChatRequest>(
         3000   // 3 second base delay (gives rate limits time to recover)
       );
       const response = result.response;
+      log.info('Gemini API response received', {
+        conversationId,
+        geminiTimeMs: Date.now() - geminiStart
+      });
       // Vertex AI SDK response structure
       const answerText = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
 

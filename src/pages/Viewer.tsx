@@ -15,6 +15,7 @@ import { AudioPlayer } from '../components/viewer/AudioPlayer';
 import { RenameSpeakerModal } from '../components/viewer/RenameSpeakerModal';
 import { EditTitleModal } from '../components/viewer/EditTitleModal';
 import { KeyboardShortcutsModal } from '../components/viewer/KeyboardShortcutsModal';
+import { exportTranscript } from '../utils/exportTranscript';
 import { HelpCircle, X, PanelRight, AlertTriangle } from 'lucide-react';
 
 interface ViewerProps {
@@ -312,6 +313,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
         onBack={onBack}
         onStatsClick={onStatsClick}
         onEditTitle={() => setEditingTitle(true)}
+        onExport={() => exportTranscript(conversation)}
         driftCorrectionApplied={driftCorrectionApplied}
         driftRatio={driftRatio}
         driftMs={driftMs}

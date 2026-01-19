@@ -14,6 +14,7 @@ interface ViewerHeaderProps {
   onBack: () => void;
   onStatsClick?: () => void;
   onEditTitle?: () => void;
+  onExport?: () => void;
   // Drift correction metrics (for legacy display)
   driftCorrectionApplied?: boolean;
   driftRatio?: number;
@@ -37,6 +38,7 @@ export const ViewerHeader: React.FC<ViewerHeaderProps> = ({
   onBack,
   onStatsClick,
   onEditTitle,
+  onExport,
   driftCorrectionApplied,
   driftRatio,
   driftMs,
@@ -138,7 +140,7 @@ export const ViewerHeader: React.FC<ViewerHeaderProps> = ({
         <Button variant="outline" size="sm" className="hidden md:flex gap-2">
           <Share2 size={14} /> Share
         </Button>
-        <Button variant="ghost" size="sm" className="hidden md:flex gap-2">
+        <Button variant="ghost" size="sm" className="hidden md:flex gap-2" onClick={onExport}>
           <Download size={14} /> Export
         </Button>
         <button className="hidden sm:block p-2 hover:bg-slate-100 rounded text-slate-500">
