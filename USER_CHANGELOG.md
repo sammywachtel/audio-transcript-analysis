@@ -1,5 +1,19 @@
 # What's New
 
+## Version 2.5.0 - January 19, 2026
+
+### ✨ Improvements
+
+**Copy Any AI Response**
+- You can now copy **any** assistant message to your clipboard, including responses where the AI couldn't answer your question
+- Copied text is clean—timestamp citations and "Additional sources" content are excluded automatically
+
+**Chat Controls Work Instantly**
+- Export and clear buttons now enable immediately after you send your first message
+- Previously, you had to refresh the page to use these controls after starting a new conversation
+
+---
+
 ## Version 2.4.0 - January 15, 2026
 
 ### ✨ Improvements

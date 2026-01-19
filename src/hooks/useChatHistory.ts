@@ -144,11 +144,14 @@ export function useChatHistory({
           // If we got exactly 10 messages, there might be more
           setHasOlder(updatedMessages.length === 10);
         }
+
+        // Refresh the count whenever the snapshot changes - this ensures
+        // export/clear buttons enable immediately when messages arrive.
+        // The count may differ from updatedMessages.length due to pagination
+        // (we only load 10 most recent), so we need the server count.
+        refreshCount();
       }
     );
-
-    // Load message count
-    refreshCount();
 
     // Cleanup on unmount or conversation change
     return () => {
