@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Quality-Weighted Speaker Reconciliation** - Speaker matching across chunks now considers audio quality signals
+  - Embedding similarity weighted by composite quality score: `cosine * sqrt(quality_A * quality_B)`
+  - Quality derived from WhisperX word confidence, timing consistency, and speaker overlap detection
+  - Low-quality speakers (< 0.3 threshold) excluded from reconciliation graph to prevent false merges
+  - Reduces speaker misidentification in noisy audio or sections with overlapping speech
+
 ## [2.5.0] - 2026-01-19
 
 ### Added

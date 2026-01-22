@@ -94,7 +94,20 @@ const WEIGHTS = {
  * This module only computes confidence - it does not enforce thresholds.
  */
 const THRESHOLDS = {
-  highConfidenceMatch: ReconciliationConfig.HIGH_CONFIDENCE_MATCH   // Pairs above this are merged greedily
+  highConfidenceMatch: ReconciliationConfig.HIGH_CONFIDENCE_MATCH,  // Pairs above this create edges (0.7)
+  /**
+   * Cohesion safeguard threshold: minimum similarity required across all
+   * cross-cluster pairs when merging. Lower than highConfidenceMatch to allow
+   * transitive merges where some pairs are slightly weaker.
+   * 0.7 caused over-fragmentation (24 clusters); 0.6 is more permissive.
+   */
+  cohesionThreshold: 0.6,
+  /**
+   * Singleton cluster confidence: "no evidence" means neutral, not bad.
+   * A speaker appearing in only one chunk has no cross-chunk comparisons,
+   * so we assign 0.75 (neutral-ish) instead of 0.0 which tanks overall confidence.
+   */
+  singletonConfidence: 0.75
 };
 
 /**
@@ -334,16 +347,63 @@ interface SpeakerCluster {
   };
 }
 
+// =============================================================================
+// Union-Find for Transitive Merging
+// =============================================================================
+
 /**
- * Cluster speakers using greedy algorithm.
+ * Union-Find (Disjoint Set Union) for transitive clustering.
+ * Enables A+B+C to merge when A-B and B-C both exceed threshold,
+ * even if we never directly compared A-C.
+ */
+class UnionFind {
+  private parent: number[];
+  private rank: number[];
+
+  constructor(size: number) {
+    this.parent = Array.from({ length: size }, (_, i) => i);
+    this.rank = Array(size).fill(0);
+  }
+
+  find(x: number): number {
+    if (this.parent[x] !== x) {
+      this.parent[x] = this.find(this.parent[x]); // Path compression
+    }
+    return this.parent[x];
+  }
+
+  union(x: number, y: number): void {
+    const rootX = this.find(x);
+    const rootY = this.find(y);
+    if (rootX === rootY) return;
+
+    // Union by rank
+    if (this.rank[rootX] < this.rank[rootY]) {
+      this.parent[rootX] = rootY;
+    } else if (this.rank[rootX] > this.rank[rootY]) {
+      this.parent[rootY] = rootX;
+    } else {
+      this.parent[rootY] = rootX;
+      this.rank[rootX]++;
+    }
+  }
+
+  connected(x: number, y: number): boolean {
+    return this.find(x) === this.find(y);
+  }
+}
+
+/**
+ * Cluster speakers using union-find with cohesion safeguard.
  *
  * Algorithm:
- * 1. Sort pairs by similarity (descending)
- * 2. For each high-confidence pair (>0.7):
- *    - If neither speaker is clustered, create new cluster
- *    - If one speaker is clustered, add other to same cluster
- *    - If both are clustered, skip (already matched)
- * 3. Unclustered speakers become singleton clusters
+ * 1. Build edges: all pairs with similarity ≥ threshold
+ * 2. Union-find: merge transitively (A-B, B-C → A,B,C together)
+ * 3. Cohesion safeguard: before finalizing a merge, check that the minimum
+ *    cross-component similarity is ≥ threshold to avoid "bridge" over-merges
+ *    (e.g., A-B=0.8, B-C=0.8, but A-C=0.3 should NOT merge)
+ * 4. Extract connected components as clusters
+ * 5. Singletons get neutral confidence (0.75)
  *
  * @param signatures - All speaker signatures
  * @param pairs - Similarity pairs (sorted by score descending)
@@ -353,94 +413,143 @@ function clusterSpeakers(
   signatures: SpeakerSignature[],
   pairs: SimilarityPair[]
 ): SpeakerCluster[] {
-  // Track which signature belongs to which cluster
-  const sigToClusterId = new Map<SpeakerSignature, number>();
-  const clusters: SpeakerCluster[] = [];
+  const n = signatures.length;
+  if (n === 0) return [];
 
-  // Helper: Get or create cluster for a signature
-  const getClusterId = (sig: SpeakerSignature): number | null => {
-    return sigToClusterId.get(sig) ?? null;
-  };
+  // Build signature index map
+  const sigToIndex = new Map<SpeakerSignature, number>();
+  signatures.forEach((sig, i) => sigToIndex.set(sig, i));
 
-  // Helper: Create a new cluster
-  const createCluster = (sig: SpeakerSignature): number => {
-    const clusterId = clusters.length;
-    clusters.push({
-      signatures: [sig],
-      avgSimilarity: 0.0, // Singleton clusters have no similarity evidence (not 1.0!)
-      evidence: { nameMatches: 0, topicOverlap: 0, termOverlap: 0 }
-    });
-    sigToClusterId.set(sig, clusterId);
-    return clusterId;
-  };
-
-  // Helper: Add signature to existing cluster
-  const addToCluster = (sig: SpeakerSignature, clusterId: number): void => {
-    clusters[clusterId].signatures.push(sig);
-    sigToClusterId.set(sig, clusterId);
-  };
-
-  // Process high-confidence pairs in order (greedy)
+  // Build similarity lookup for cohesion check
+  // Key: "i,j" where i < j, Value: similarity score
+  const similarityLookup = new Map<string, number>();
   for (const pair of pairs) {
-    if (pair.score < THRESHOLDS.highConfidenceMatch) {
-      break; // Pairs are sorted, rest are below threshold
+    const i = sigToIndex.get(pair.sig1)!;
+    const j = sigToIndex.get(pair.sig2)!;
+    const key = i < j ? `${i},${j}` : `${j},${i}`;
+    similarityLookup.set(key, pair.score);
+  }
+
+  const getSimilarity = (i: number, j: number): number => {
+    if (i === j) return 1.0;
+    const key = i < j ? `${i},${j}` : `${j},${i}`;
+    return similarityLookup.get(key) ?? 0.0;
+  };
+
+  // Initialize union-find
+  const uf = new UnionFind(n);
+
+  // Build edge list for pairs above threshold
+  const edges: { i: number; j: number; pair: SimilarityPair }[] = [];
+  for (const pair of pairs) {
+    if (pair.score < THRESHOLDS.highConfidenceMatch) break; // Sorted descending
+    const i = sigToIndex.get(pair.sig1)!;
+    const j = sigToIndex.get(pair.sig2)!;
+    edges.push({ i, j, pair });
+  }
+
+  console.log('[Reconciliation] Building transitive clusters:', {
+    signatureCount: n,
+    edgeCount: edges.length,
+    threshold: THRESHOLDS.highConfidenceMatch
+  });
+
+  // Process edges with cohesion safeguard
+  // We union if the minimum similarity across the would-be merged component
+  // stays above threshold. This is an approximation of complete-linkage.
+  for (const { i, j } of edges) {
+    const rootI = uf.find(i);
+    const rootJ = uf.find(j);
+    if (rootI === rootJ) continue; // Already connected
+
+    // Collect members of both components
+    const membersI: number[] = [];
+    const membersJ: number[] = [];
+    for (let k = 0; k < n; k++) {
+      if (uf.find(k) === rootI) membersI.push(k);
+      if (uf.find(k) === rootJ) membersJ.push(k);
     }
 
-    const cluster1 = getClusterId(pair.sig1);
-    const cluster2 = getClusterId(pair.sig2);
+    // Cohesion check: minimum cross-component similarity
+    let minCrossSim = 1.0;
+    for (const mi of membersI) {
+      for (const mj of membersJ) {
+        const sim = getSimilarity(mi, mj);
+        if (sim < minCrossSim) minCrossSim = sim;
+      }
+    }
 
-    if (cluster1 === null && cluster2 === null) {
-      // Neither clustered - create new cluster with both
-      const clusterId = createCluster(pair.sig1);
-      addToCluster(pair.sig2, clusterId);
-
-      // Update cluster evidence
-      clusters[clusterId].evidence.nameMatches += pair.evidence.nameScore > 0 ? 1 : 0;
-      clusters[clusterId].evidence.topicOverlap += pair.evidence.topicOverlap;
-      clusters[clusterId].evidence.termOverlap += pair.evidence.termOverlap;
-      clusters[clusterId].avgSimilarity = pair.score;
-
-    } else if (cluster1 !== null && cluster2 === null) {
-      // sig1 clustered, sig2 not - add sig2 to sig1's cluster
-      addToCluster(pair.sig2, cluster1);
-
-      // Update average similarity
-      const cluster = clusters[cluster1];
-      const pairCount = cluster.signatures.length - 1; // Exclude the new signature
-      cluster.avgSimilarity = (cluster.avgSimilarity * pairCount + pair.score) / (pairCount + 1);
-      cluster.evidence.nameMatches += pair.evidence.nameScore > 0 ? 1 : 0;
-      cluster.evidence.topicOverlap += pair.evidence.topicOverlap;
-      cluster.evidence.termOverlap += pair.evidence.termOverlap;
-
-    } else if (cluster1 === null && cluster2 !== null) {
-      // sig2 clustered, sig1 not - add sig1 to sig2's cluster
-      addToCluster(pair.sig1, cluster2);
-
-      // Update average similarity
-      const cluster = clusters[cluster2];
-      const pairCount = cluster.signatures.length - 1;
-      cluster.avgSimilarity = (cluster.avgSimilarity * pairCount + pair.score) / (pairCount + 1);
-      cluster.evidence.nameMatches += pair.evidence.nameScore > 0 ? 1 : 0;
-      cluster.evidence.topicOverlap += pair.evidence.topicOverlap;
-      cluster.evidence.termOverlap += pair.evidence.termOverlap;
-
-    } else if (cluster1 === cluster2) {
-      // Already in same cluster - skip
-      continue;
-
-    } else {
-      // Both in different clusters - don't merge (avoid cluster merging complexity)
-      // This is a simplification; in practice, we'd merge clusters here
-      continue;
+    // Only merge if all cross-pairs meet cohesion threshold (complete-linkage style)
+    // Using cohesionThreshold (0.6) instead of highConfidenceMatch (0.7) to allow
+    // transitive merges where some pairs are slightly weaker but still valid
+    if (minCrossSim >= THRESHOLDS.cohesionThreshold) {
+      uf.union(i, j);
     }
   }
 
-  // Add unclustered signatures as singletons
-  for (const sig of signatures) {
-    if (!sigToClusterId.has(sig)) {
-      createCluster(sig);
+  // Extract clusters from union-find
+  const componentMembers = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
+    const root = uf.find(i);
+    if (!componentMembers.has(root)) {
+      componentMembers.set(root, []);
     }
+    componentMembers.get(root)!.push(i);
   }
+
+  // Build cluster objects with proper confidence
+  const clusters: SpeakerCluster[] = [];
+  for (const members of componentMembers.values()) {
+    const clusterSigs = members.map(i => signatures[i]);
+
+    // Compute average pairwise similarity within cluster
+    let totalSim = 0;
+    let pairCount = 0;
+    let nameMatches = 0;
+    let topicOverlap = 0;
+    let termOverlap = 0;
+
+    for (let a = 0; a < members.length; a++) {
+      for (let b = a + 1; b < members.length; b++) {
+        const sim = getSimilarity(members[a], members[b]);
+        totalSim += sim;
+        pairCount++;
+
+        // Accumulate evidence from matching pairs
+        const key = members[a] < members[b]
+          ? `${members[a]},${members[b]}`
+          : `${members[b]},${members[a]}`;
+        for (const pair of pairs) {
+          const pi = sigToIndex.get(pair.sig1)!;
+          const pj = sigToIndex.get(pair.sig2)!;
+          const pairKey = pi < pj ? `${pi},${pj}` : `${pj},${pi}`;
+          if (pairKey === key) {
+            if (pair.evidence.nameScore > 0) nameMatches++;
+            topicOverlap += pair.evidence.topicOverlap;
+            termOverlap += pair.evidence.termOverlap;
+            break;
+          }
+        }
+      }
+    }
+
+    // Singleton clusters get neutral confidence
+    const avgSimilarity = pairCount > 0
+      ? totalSim / pairCount
+      : THRESHOLDS.singletonConfidence;
+
+    clusters.push({
+      signatures: clusterSigs,
+      avgSimilarity,
+      evidence: { nameMatches, topicOverlap, termOverlap }
+    });
+  }
+
+  console.log('[Reconciliation] Transitive clustering complete:', {
+    inputSignatures: n,
+    outputClusters: clusters.length,
+    clusterSizes: clusters.map(c => c.signatures.length)
+  });
 
   return clusters;
 }

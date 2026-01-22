@@ -12,6 +12,7 @@
  */
 
 import { ChunkArtifact } from './types';
+import { computeWeightedSimilarity } from './speakerQuality';
 
 // ============================================================================
 // Types
@@ -44,6 +45,7 @@ interface EmbeddingEntry {
   speakerId: string;
   originalId: string;     // "SPEAKER_00_chunk0"
   embedding: number[];
+  quality: number;        // Composite quality score [0-1]
 }
 
 // ============================================================================
@@ -54,11 +56,32 @@ export const EmbeddingReconciliationConfig = {
   /** Cosine similarity threshold for clustering (0.65-0.75 typical) */
   SIMILARITY_THRESHOLD: 0.70,
 
+  /**
+   * Cohesion safeguard threshold: minimum similarity required across all
+   * cross-cluster pairs when merging. Lower than SIMILARITY_THRESHOLD to allow
+   * transitive merges where some pairs are slightly weaker.
+   * 0.7 caused over-fragmentation (24 clusters); 0.6 is more permissive.
+   */
+  COHESION_THRESHOLD: 0.60,
+
   /** Minimum embedding dimension (wespeaker uses 256) */
   MIN_EMBEDDING_DIM: 256,
 
   /** Confidence threshold below which we trigger fallback */
   CONFIDENCE_THRESHOLD: 0.60,
+
+  /**
+   * Singleton cluster confidence: "no evidence" means neutral, not bad.
+   * A speaker appearing in only one chunk has no cross-chunk comparisons,
+   * so we assign 0.75 (neutral-ish) instead of 0.5 which tanks overall confidence.
+   */
+  SINGLETON_CONFIDENCE: 0.75,
+
+  /**
+   * Quality floor: segments below this quality threshold are excluded
+   * from reconciliation to prevent low-quality audio from causing false merges.
+   */
+  QUALITY_FLOOR: 0.3,
 };
 
 // ============================================================================
@@ -95,10 +118,8 @@ export function reconcileSpeakersWithEmbeddings(
     embeddingDim: embeddingEntries[0].embedding.length
   });
 
-  // Step 2: Compute pairwise cosine similarity matrix
-  const similarityMatrix = computeCosineSimilarityMatrix(
-    embeddingEntries.map(e => e.embedding)
-  );
+  // Step 2: Compute pairwise quality-weighted cosine similarity matrix
+  const similarityMatrix = computeCosineSimilarityMatrix(embeddingEntries);
 
   // Step 3: Cluster using agglomerative clustering
   const clusterLabels = agglomerativeCluster(
@@ -152,6 +173,7 @@ function collectEmbeddings(chunkArtifacts: ChunkArtifact[]): EmbeddingEntry[] {
 
   for (const artifact of chunkArtifacts) {
     const embeddings = artifact.speakerEmbeddings ?? {};
+    const qualities = artifact.speakerQuality ?? {};
 
     for (const [speakerId, embedding] of Object.entries(embeddings)) {
       // Validate embedding dimension
@@ -160,11 +182,24 @@ function collectEmbeddings(chunkArtifacts: ChunkArtifact[]): EmbeddingEntry[] {
         continue;
       }
 
+      // Get quality score if available, default to 1.0 (neutral quality)
+      const quality = qualities[speakerId]?.compositeScore ?? 1.0;
+
+      // Apply quality floor - skip low-quality segments
+      if (quality < EmbeddingReconciliationConfig.QUALITY_FLOOR) {
+        console.log(
+          `[EmbeddingReconciliation] Excluding ${speakerId} from chunk ${artifact.chunkIndex} ` +
+          `due to low quality: ${quality.toFixed(3)} < ${EmbeddingReconciliationConfig.QUALITY_FLOOR}`
+        );
+        continue;
+      }
+
       entries.push({
         chunkIndex: artifact.chunkIndex,
         speakerId,
         originalId: `${speakerId}_chunk${artifact.chunkIndex}`,
-        embedding
+        embedding,
+        quality
       });
     }
   }
@@ -198,19 +233,27 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Compute pairwise cosine similarity matrix for all embeddings.
- * Returns NxN matrix where matrix[i][j] = similarity between embedding i and j.
+ * Compute pairwise quality-weighted cosine similarity matrix.
+ * Returns NxN matrix where matrix[i][j] = quality-weighted similarity.
  */
-function computeCosineSimilarityMatrix(embeddings: number[][]): number[][] {
-  const n = embeddings.length;
+function computeCosineSimilarityMatrix(entries: EmbeddingEntry[]): number[][] {
+  const n = entries.length;
   const matrix: number[][] = Array(n).fill(null).map(() => Array(n).fill(0));
 
   for (let i = 0; i < n; i++) {
     matrix[i][i] = 1.0; // Self-similarity
     for (let j = i + 1; j < n; j++) {
-      const sim = cosineSimilarity(embeddings[i], embeddings[j]);
-      matrix[i][j] = sim;
-      matrix[j][i] = sim; // Symmetric
+      const cosine = cosineSimilarity(entries[i].embedding, entries[j].embedding);
+
+      // Apply quality weighting to reduce influence of low-quality segments
+      const weighted = computeWeightedSimilarity(
+        cosine,
+        entries[i].quality,
+        entries[j].quality
+      );
+
+      matrix[i][j] = weighted;
+      matrix[j][i] = weighted; // Symmetric
     }
   }
 
@@ -218,10 +261,15 @@ function computeCosineSimilarityMatrix(embeddings: number[][]): number[][] {
 }
 
 /**
- * Agglomerative clustering using average linkage.
+ * Agglomerative clustering with cohesion safeguard.
  *
  * Starts with each item in its own cluster, then iteratively merges
  * the two most similar clusters until similarity falls below threshold.
+ *
+ * COHESION SAFEGUARD: Before merging two clusters, we check that the
+ * MINIMUM pairwise similarity across all cross-cluster pairs meets the
+ * threshold. This prevents "bridge" over-merges where A-B and B-C are
+ * high but A-C is low.
  *
  * @param similarityMatrix - NxN pairwise similarity matrix
  * @param threshold - Minimum similarity to merge clusters (e.g., 0.70)
@@ -243,9 +291,20 @@ function agglomerativeCluster(
     clusterMembers.set(i, [i]);
   }
 
+  // Use separate cohesion threshold (0.6) for bridge prevention
+  // This is more permissive than the main threshold (0.7) to allow transitive merges
+  const cohesionThreshold = EmbeddingReconciliationConfig.COHESION_THRESHOLD;
+
+  console.log('[EmbeddingReconciliation] Agglomerative clustering with cohesion safeguard:', {
+    itemCount: n,
+    threshold,
+    cohesionThreshold
+  });
+
   // Iteratively merge closest clusters
   while (activeClusters.size > 1) {
-    // Find the two most similar clusters
+    // Find the two most similar clusters (by average linkage)
+    // that also pass the cohesion safeguard (minimum cross-pair ≥ cohesionThreshold)
     let bestSim = -Infinity;
     let bestPair: [number, number] | null = null;
 
@@ -254,19 +313,35 @@ function agglomerativeCluster(
       for (let j = i + 1; j < activeList.length; j++) {
         const c1 = activeList[i];
         const c2 = activeList[j];
-        const sim = averageLinkageSimilarity(
-          clusterMembers.get(c1)!,
-          clusterMembers.get(c2)!,
-          similarityMatrix
-        );
-        if (sim > bestSim) {
-          bestSim = sim;
+        const members1 = clusterMembers.get(c1)!;
+        const members2 = clusterMembers.get(c2)!;
+
+        // Cohesion check: minimum cross-cluster similarity
+        let minCrossSim = Infinity;
+        for (const m1 of members1) {
+          for (const m2 of members2) {
+            if (similarityMatrix[m1][m2] < minCrossSim) {
+              minCrossSim = similarityMatrix[m1][m2];
+            }
+          }
+        }
+
+        // Skip this pair if any cross-pair is below cohesion threshold (bridge prevention)
+        // Using cohesionThreshold (0.6) instead of threshold (0.7) to be more permissive
+        if (minCrossSim < cohesionThreshold) {
+          continue;
+        }
+
+        // Use average linkage for ranking valid pairs
+        const avgSim = averageLinkageSimilarity(members1, members2, similarityMatrix);
+        if (avgSim > bestSim) {
+          bestSim = avgSim;
           bestPair = [c1, c2];
         }
       }
     }
 
-    // Stop if best similarity is below threshold
+    // Stop if no valid pair found (all below threshold or fail cohesion)
     if (bestSim < threshold || !bestPair) {
       break;
     }
@@ -289,6 +364,11 @@ function agglomerativeCluster(
     activeClusters.delete(c2);
     clusterMembers.delete(c2);
   }
+
+  console.log('[EmbeddingReconciliation] Clustering complete:', {
+    finalClusterCount: activeClusters.size,
+    clusterSizes: Array.from(clusterMembers.values()).map(m => m.length)
+  });
 
   // Renumber clusters to be sequential (0, 1, 2, ...)
   const uniqueClusters = [...new Set(clusterAssignment)];
@@ -355,8 +435,8 @@ function buildClusters(
       }
       confidence = count > 0 ? totalSim / count : 1.0;
     } else {
-      // Singleton cluster - lower confidence since we couldn't match anyone
-      confidence = 0.5;
+      // Singleton cluster - neutral confidence since "no evidence" != "bad match"
+      confidence = EmbeddingReconciliationConfig.SINGLETON_CONFIDENCE;
     }
 
     // Compute centroid (average embedding)
