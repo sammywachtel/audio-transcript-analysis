@@ -79,6 +79,7 @@ export interface Word {
   start: number;  // seconds
   end: number;    // seconds
   index: number;
+  score?: number; // WhisperX confidence score [0-1], if available
 }
 
 export interface Segment {
@@ -1473,6 +1474,7 @@ export interface WhisperXSegment {
   start: number;  // seconds
   end: number;    // seconds
   speaker?: string;  // May have speaker diarization (e.g., "SPEAKER_00")
+  words?: Word[];    // Word-level alignments with optional confidence scores
 }
 
 /**
@@ -1940,8 +1942,34 @@ function parseWhisperXOutput(output: unknown): {
       const end = typeof segObj.end === 'number' ? segObj.end : 0.0;
       const speaker = typeof segObj.speaker === 'string' ? segObj.speaker : undefined;
 
+      // Parse word-level data if present
+      let words: Word[] | undefined;
+      if (Array.isArray(segObj.words)) {
+        words = [];
+        for (let i = 0; i < segObj.words.length; i++) {
+          const wordObj = segObj.words[i];
+          if (typeof wordObj === 'object' && wordObj !== null) {
+            const w = wordObj as Record<string, unknown>;
+            const word = typeof w.word === 'string' ? w.word : '';
+            const wordStart = typeof w.start === 'number' ? w.start : 0.0;
+            const wordEnd = typeof w.end === 'number' ? w.end : 0.0;
+            const score = typeof w.score === 'number' ? w.score : undefined;
+
+            if (word.trim()) {
+              words.push({
+                word: word.trim(),
+                start: wordStart,
+                end: wordEnd,
+                index: i,
+                score
+              });
+            }
+          }
+        }
+      }
+
       if (text.trim()) {
-        segments.push({ text: text.trim(), start, end, speaker });
+        segments.push({ text: text.trim(), start, end, speaker, words });
       }
     }
   }

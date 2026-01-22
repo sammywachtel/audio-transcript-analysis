@@ -50,11 +50,11 @@
       ]
     },
     {
-      "collectionGroup": "_userEvents",
+      "collectionGroup": "_user_events",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "userId", "order": "ASCENDING" },
-        { "fieldPath": "timestamp", "order": "DESCENDING" }
+        { "fieldPath": "timestamp", "order": "ASCENDING" }
       ]
     }
   ],

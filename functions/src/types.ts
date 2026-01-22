@@ -373,11 +373,35 @@ export interface ChunkArtifact {
     [speakerId: string]: number[];
   };
 
+  /**
+   * Quality scores for each speaker in this chunk.
+   * Used to weight embedding similarity and filter low-quality segments.
+   * Present when quality assessment is enabled.
+   */
+  speakerQuality?: {
+    [speakerId: string]: SpeakerQuality;
+  };
+
   // Metadata
   /** When this chunk artifact was created */
   createdAt: string;
   /** Storage path to chunk audio file */
   storagePath: string;
+}
+
+/**
+ * Quality assessment for a speaker's audio in a chunk.
+ * Used to weight embedding similarity and filter unreliable segments.
+ */
+export interface SpeakerQuality {
+  /** SNR proxy from WhisperX word confidence scores [0-1] */
+  snrProxy: number;
+  /** Speech clarity from timing consistency and filler detection [0-1] */
+  clarityScore: number;
+  /** True if segment has excessive speaker overlap */
+  isContaminated: boolean;
+  /** Composite quality score [0-1]: 0.4*snr + 0.3*clarity + 0.3*(1-overlap) */
+  compositeScore: number;
 }
 
 // =============================================================================

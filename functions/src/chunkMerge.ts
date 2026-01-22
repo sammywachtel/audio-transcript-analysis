@@ -888,7 +888,7 @@ export async function mergeChunks(conversationId: string): Promise<void> {
  */
 export const processMerge = onRequest(
   {
-    memory: '512MiB',
+    memory: '1GiB',  // Increased from 512MiB to reduce fragmentation during speaker reconciliation
     timeoutSeconds: 600, // 10 minutes (merge can be slow for large files)
     region: 'us-central1',
     invoker: 'private' // Only Cloud Tasks can call this

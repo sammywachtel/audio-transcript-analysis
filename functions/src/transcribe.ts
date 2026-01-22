@@ -48,6 +48,7 @@ import {
   SpeakerSignature,
   ProcessingMode
 } from './types';
+import { computeSpeakerQualityMapFromWhisperXSegments } from './speakerQuality';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
@@ -984,6 +985,20 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     // Check for abort after WhisperX
     await checkAbort(conversationId);
 
+    // Compute per-speaker quality scores from WhisperX word-level confidence
+    // This happens BEFORE segment transformation so we have access to raw word scores
+    const speakerQuality = computeSpeakerQualityMapFromWhisperXSegments(whisperxResult.segments);
+    console.debug('[Pipeline] Speaker quality computed:', {
+      speakerCount: Object.keys(speakerQuality).length,
+      scores: Object.entries(speakerQuality).map(([id, q]) => ({
+        speakerId: id,
+        composite: q.compositeScore.toFixed(3),
+        snr: q.snrProxy.toFixed(3),
+        clarity: q.clarityScore.toFixed(3),
+        contaminated: q.isContaminated
+      }))
+    });
+
     // Build segments from WhisperX output
     console.debug('[Pipeline] Building segments from WhisperX...');
     const buildStartTime = Date.now();
@@ -1184,6 +1199,8 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
         emittedContext: chunkContext!, // Will be replaced by processTranscription with actual emitted context
         // Include speaker embeddings if present (from WhisperX fork)
         speakerEmbeddings: whisperxResult.speakerEmbeddings,
+        // Include speaker quality scores for quality-weighted reconciliation
+        speakerQuality,
         createdAt: new Date().toISOString(),
         storagePath: filePath
       };

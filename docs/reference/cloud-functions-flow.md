@@ -10,7 +10,7 @@ The application uses **10 Cloud Functions** to handle audio processing, chat, an
 |----------|---------|--------|---------|---------|
 | `transcribeAudio` | Storage `onObjectFinalized` | 2GiB | 9 min | Entry point for uploads, chunks large files |
 | `processTranscription` | Cloud Tasks HTTP | 2GiB | 60 min | Process each chunk via Gemini + WhisperX |
-| `processMerge` | Cloud Tasks HTTP | 512MiB | 10 min | Stitch chunks, reconcile speakers |
+| `processMerge` | Cloud Tasks HTTP | 1GiB | 10 min | Stitch chunks, reconcile speakers |
 | `processReprocessing` | Cloud Tasks HTTP | 512MiB | 10 min | Fallback: re-chunk in sequential mode |
 | `chatWithConversation` | HTTPS Callable | 512MiB | 10 min | LLM chat with timestamp citations |
 | `retryTranscription` | HTTPS Callable | 512MiB | 60 sec | Resume or restart failed jobs |
