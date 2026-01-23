@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Quality derived from WhisperX word confidence, timing consistency, and speaker overlap detection
   - Low-quality speakers (< 0.3 threshold) excluded from reconciliation graph to prevent false merges
   - Reduces speaker misidentification in noisy audio or sections with overlapping speech
+- **Temporal Proximity Speaker Reconciliation** - Speaker matching now considers when speakers appear in the audio timeline
+  - Speakers appearing close in time receive similarity boosts via exponential decay (5-minute half-life)
+  - Speakers at chunk boundaries (within 30 seconds of edge) receive additional bridging boost when similarity > 0.65
+  - Time window constraint: no temporal boost for speakers more than 1 hour apart
+  - Reduces false speaker splits when the same person speaks across chunk boundaries
 
 ## [2.5.0] - 2026-01-19
 
