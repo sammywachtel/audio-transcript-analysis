@@ -37,7 +37,8 @@ import {
 } from './chunking';
 import { validateChunkSequence } from './chunkBounds';
 import {
-  createInitialChunkStatuses
+  createInitialChunkStatuses,
+  sanitizeForFirestore
 } from './chunkContext';
 import {
   ChunkingMetadata,
@@ -1205,13 +1206,17 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
         storagePath: filePath
       };
 
+      // Sanitize to remove undefined values (Firestore doesn't allow them)
+      // e.g., Person.affiliation is optional but Firestore rejects undefined
+      const sanitizedChunkArtifact = sanitizeForFirestore(chunkArtifact);
+
       await retryWithBackoff(
         () => db
           .collection('conversations')
           .doc(conversationId)
           .collection('chunks')
           .doc(String(chunkMetadata.chunkIndex))
-          .set(chunkArtifact),
+          .set(sanitizedChunkArtifact),
         'Firestore save chunk artifact'
       );
 
@@ -1245,14 +1250,19 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
       });
     } else {
       // For whole-file tasks, update the main conversation document as before
+      // Sanitize to remove undefined values (Firestore doesn't allow them)
+      const sanitizedData = sanitizeForFirestore({
+        ...processedData,
+        status: 'complete',
+        alignmentStatus: finalAlignmentStatus,
+        alignmentError: usedGeminiFallback ? 'WhisperX failed, used Gemini fallback' : null,
+        abortRequested: false,
+        audioStoragePath: filePath
+      });
+
       await retryWithBackoff(
         () => db.collection('conversations').doc(conversationId).update({
-          ...processedData,
-          status: 'complete',
-          alignmentStatus: finalAlignmentStatus,
-          alignmentError: usedGeminiFallback ? 'WhisperX failed, used Gemini fallback' : null,
-          abortRequested: false,
-          audioStoragePath: filePath,
+          ...sanitizedData,
           updatedAt: FieldValue.serverTimestamp()
         }),
         'Firestore save results'
