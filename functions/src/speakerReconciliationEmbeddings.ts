@@ -13,6 +13,11 @@
 
 import { ChunkArtifact } from './types';
 import { computeWeightedSimilarity } from './speakerQuality';
+import {
+  buildSpeakerAppearanceWindows,
+  buildChunkBoundsMap,
+  applyTemporalBoosts,
+} from './temporalGraph';
 
 // ============================================================================
 // Types
@@ -120,6 +125,18 @@ export function reconcileSpeakersWithEmbeddings(
 
   // Step 2: Compute pairwise quality-weighted cosine similarity matrix
   const similarityMatrix = computeCosineSimilarityMatrix(embeddingEntries);
+
+  // Step 2.5: Apply temporal and boundary boosts to cross-chunk pairs
+  const speakerKeys = embeddingEntries.map(e => e.originalId);
+  const speakerAppearances = buildSpeakerAppearanceWindows(chunkArtifacts);
+  const chunkBounds = buildChunkBoundsMap(chunkArtifacts);
+
+  applyTemporalBoosts(similarityMatrix, speakerKeys, speakerAppearances, chunkBounds);
+
+  console.log('[EmbeddingReconciliation] Applied temporal/boundary boosts:', {
+    speakerAppearanceCount: speakerAppearances.size,
+    chunkBoundsCount: chunkBounds.size
+  });
 
   // Step 3: Cluster using agglomerative clustering
   const clusterLabels = agglomerativeCluster(
