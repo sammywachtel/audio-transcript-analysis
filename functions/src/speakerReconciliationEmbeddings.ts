@@ -18,6 +18,12 @@ import {
   buildChunkBoundsMap,
   applyTemporalBoosts,
 } from './temporalGraph';
+import {
+  computeAdaptiveEdgeThreshold,
+  computeClusterCohesionThreshold,
+  computeClusterAverageQuality,
+  DEFAULT_CONFIG as ADAPTIVE_CONFIG
+} from './adaptiveThresholds';
 
 // ============================================================================
 // Types
@@ -138,11 +144,42 @@ export function reconcileSpeakersWithEmbeddings(
     chunkBoundsCount: chunkBounds.size
   });
 
-  // Step 3: Cluster using agglomerative clustering
-  const clusterLabels = agglomerativeCluster(
-    similarityMatrix,
-    EmbeddingReconciliationConfig.SIMILARITY_THRESHOLD
-  );
+  // Step 3: Iterative agglomerative clustering with adaptive thresholds
+  let clusterLabels = initializeSingletonClusters(embeddingEntries.length);
+  let edgeThreshold = computeAdaptiveEdgeThreshold(embeddingEntries.length);
+
+  console.log('[EmbeddingReconciliation] Starting iterative clustering:', {
+    initialClusters: embeddingEntries.length,
+    initialEdgeThreshold: edgeThreshold.toFixed(3),
+    maxIterations: ADAPTIVE_CONFIG.maxIterations
+  });
+
+  for (let iter = 0; iter < ADAPTIVE_CONFIG.maxIterations; iter++) {
+    const prevClusterCount = countUniqueClusters(clusterLabels);
+
+    console.log(`[EmbeddingReconciliation] Iteration ${iter + 1}:`, {
+      clusterCount: prevClusterCount,
+      edgeThreshold: edgeThreshold.toFixed(3)
+    });
+
+    // One pass of agglomerative clustering with current threshold
+    clusterLabels = agglomerativeCluster(
+      similarityMatrix,
+      edgeThreshold,
+      embeddingEntries
+    );
+
+    const newClusterCount = countUniqueClusters(clusterLabels);
+
+    // Convergence check
+    if (newClusterCount === prevClusterCount) {
+      console.log('[EmbeddingReconciliation] Converged - cluster count stable');
+      break;
+    }
+
+    // Recompute edge threshold for next iteration based on new cluster count
+    edgeThreshold = computeAdaptiveEdgeThreshold(newClusterCount);
+  }
 
   // Step 4: Build clusters and compute confidence
   const clusters = buildClusters(embeddingEntries, clusterLabels, similarityMatrix, chunkArtifacts);
@@ -278,23 +315,39 @@ function computeCosineSimilarityMatrix(entries: EmbeddingEntry[]): number[][] {
 }
 
 /**
- * Agglomerative clustering with cohesion safeguard.
+ * Initialize cluster labels where each item is in its own cluster.
+ */
+function initializeSingletonClusters(n: number): number[] {
+  return Array(n).fill(0).map((_, i) => i);
+}
+
+/**
+ * Count the number of unique clusters in a label array.
+ */
+function countUniqueClusters(clusterLabels: number[]): number {
+  return new Set(clusterLabels).size;
+}
+
+/**
+ * Agglomerative clustering with quality-adjusted cohesion safeguard.
  *
  * Starts with each item in its own cluster, then iteratively merges
  * the two most similar clusters until similarity falls below threshold.
  *
- * COHESION SAFEGUARD: Before merging two clusters, we check that the
- * MINIMUM pairwise similarity across all cross-cluster pairs meets the
- * threshold. This prevents "bridge" over-merges where A-B and B-C are
- * high but A-C is low.
+ * QUALITY-ADJUSTED COHESION: Before merging two clusters, we check that
+ * the MINIMUM pairwise similarity across all cross-cluster pairs meets
+ * a quality-adjusted threshold. High-quality clusters require stricter
+ * cohesion to avoid over-merging.
  *
  * @param similarityMatrix - NxN pairwise similarity matrix
- * @param threshold - Minimum similarity to merge clusters (e.g., 0.70)
+ * @param threshold - Minimum similarity to merge clusters (adaptive)
+ * @param entries - Embedding entries with quality scores
  * @returns Array of cluster labels (same length as matrix dimension)
  */
 function agglomerativeCluster(
   similarityMatrix: number[][],
-  threshold: number
+  threshold: number,
+  entries: EmbeddingEntry[]
 ): number[] {
   const n = similarityMatrix.length;
 
@@ -308,14 +361,9 @@ function agglomerativeCluster(
     clusterMembers.set(i, [i]);
   }
 
-  // Use separate cohesion threshold (0.6) for bridge prevention
-  // This is more permissive than the main threshold (0.7) to allow transitive merges
-  const cohesionThreshold = EmbeddingReconciliationConfig.COHESION_THRESHOLD;
-
-  console.log('[EmbeddingReconciliation] Agglomerative clustering with cohesion safeguard:', {
+  console.log('[EmbeddingReconciliation] Agglomerative clustering with quality-adjusted cohesion:', {
     itemCount: n,
-    threshold,
-    cohesionThreshold
+    edgeThreshold: threshold.toFixed(3)
   });
 
   // Iteratively merge closest clusters
@@ -333,7 +381,17 @@ function agglomerativeCluster(
         const members1 = clusterMembers.get(c1)!;
         const members2 = clusterMembers.get(c2)!;
 
-        // Cohesion check: minimum cross-cluster similarity
+        // Quality-adjusted cohesion check
+        // Compute average quality for each cluster
+        const quality1 = computeClusterAverageQuality(members1.map(i => entries[i]));
+        const quality2 = computeClusterAverageQuality(members2.map(i => entries[i]));
+
+        // Use the stricter (higher) cohesion threshold of the two clusters
+        const cohesion1 = computeClusterCohesionThreshold(quality1);
+        const cohesion2 = computeClusterCohesionThreshold(quality2);
+        const cohesionThreshold = Math.max(cohesion1, cohesion2);
+
+        // Check minimum cross-cluster similarity
         let minCrossSim = Infinity;
         for (const m1 of members1) {
           for (const m2 of members2) {
@@ -343,8 +401,7 @@ function agglomerativeCluster(
           }
         }
 
-        // Skip this pair if any cross-pair is below cohesion threshold (bridge prevention)
-        // Using cohesionThreshold (0.6) instead of threshold (0.7) to be more permissive
+        // Skip this pair if any cross-pair is below quality-adjusted cohesion threshold
         if (minCrossSim < cohesionThreshold) {
           continue;
         }

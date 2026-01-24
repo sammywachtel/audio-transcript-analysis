@@ -6,9 +6,10 @@
  * - Speaker mapping reconciliation
  * - Term/topic/person merging with deterministic IDs
  * - Idempotency (already merged = no-op)
+ * - Content-based signature quality enrichment flow
  */
 
-import { ChunkArtifact } from '../types';
+import { ChunkArtifact, SpeakerSignature } from '../types';
 
 // Mock Firestore - track the update payload
 let lastUpdatePayload: Record<string, unknown> | null = null;
@@ -42,6 +43,80 @@ jest.mock('../index', () => ({
   db: mockFirestore
 }));
 
+// Capture signatures passed to content-based reconcileSpeakers
+let capturedSignatures: SpeakerSignature[] | null = null;
+const mockReconcileSpeakers = jest.fn((sigs: SpeakerSignature[]) => {
+  capturedSignatures = sigs;
+
+  // Build a reasonable mock result based on the input signatures
+  // Group signatures by speakerId to simulate basic clustering
+  const speakerMap = new Map<string, SpeakerSignature[]>();
+  for (const sig of sigs) {
+    const existing = speakerMap.get(sig.speakerId) || [];
+    existing.push(sig);
+    speakerMap.set(sig.speakerId, existing);
+  }
+
+  // Create clusters and speakerIdMap
+  const speakerIdMap = new Map<string, string>();
+  const clusterDetails: Array<{
+    canonicalId: string;
+    originalIds: string[];
+    confidence: number;
+    displayName: string;
+    matchEvidence: { nameMatches: number; topicOverlap: number; termOverlap: number };
+  }> = [];
+
+  let clusterIndex = 0;
+  for (const [_speakerId, sigList] of speakerMap) {
+    const canonicalId = `speaker_canonical_${clusterIndex}`;
+    const originalIds = sigList.map(s => `${s.speakerId}_chunk${s.chunkIndex}`);
+
+    for (const oid of originalIds) {
+      speakerIdMap.set(oid, canonicalId);
+    }
+
+    clusterDetails.push({
+      canonicalId,
+      originalIds,
+      confidence: 1.0,
+      displayName: sigList[0].inferredName || `Speaker ${clusterIndex}`,
+      matchEvidence: { nameMatches: 1, topicOverlap: 0, termOverlap: 0 }
+    });
+
+    clusterIndex++;
+  }
+
+  return {
+    speakerIdMap,
+    clusterDetails,
+    overallConfidence: 1.0
+  };
+});
+
+// Mock speakerReconciliation module
+jest.mock('../speakerReconciliation', () => ({
+  reconcileSpeakers: mockReconcileSpeakers
+}));
+
+// Mock speakerReconciliationEmbeddings to disable embeddings path and force content-based
+jest.mock('../speakerReconciliationEmbeddings', () => ({
+  hasValidEmbeddings: () => false,  // Force content-based path
+  reconcileSpeakersWithEmbeddings: jest.fn(),
+  EmbeddingReconciliationConfig: { CONFIDENCE_THRESHOLD: 0.5 }
+}));
+
+// Mock transcribe module to avoid Firebase storage trigger initialization issues
+jest.mock('../transcribe', () => ({
+  checkAbort: jest.fn().mockResolvedValue(undefined),
+  AbortRequestedError: class AbortRequestedError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'AbortRequestedError';
+    }
+  }
+}));
+
 // Import after mocking
 import { mergeChunks } from '../chunkMerge';
 
@@ -49,6 +124,7 @@ describe('chunkMerge', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     lastUpdatePayload = null;
+    capturedSignatures = null;
   });
 
   describe('mergeChunks', () => {
@@ -218,6 +294,7 @@ describe('chunkMerge', () => {
         exists: true,
         data: () => ({
           userId: 'user-123',
+          processingMode: 'sequential',  // Use sequential to test basic speaker union (no reconciliation)
           chunkingMetadata: {
             totalChunks: 2,
             originalStoragePath: 'audio/original.mp3',
@@ -405,6 +482,383 @@ describe('chunkMerge', () => {
       expect(
         highlight1 === term2.display || term2.aliases.includes(highlight1)
       ).toBe(true);
+    });
+
+    describe('content-based signature quality enrichment', () => {
+      it('should populate quality from artifact.speakerQuality[speakerId].compositeScore', async () => {
+        const conversationId = 'test-conv-quality';
+
+        // Mock conversation in parallel mode (triggers content-based reconciliation)
+        mockGet.mockResolvedValueOnce({
+          exists: true,
+          data: () => ({
+            userId: 'user-123',
+            processingMode: 'parallel',
+            chunkingMetadata: {
+              totalChunks: 2,
+              originalStoragePath: 'audio/original.mp3',
+              originalDurationMs: 60000
+            }
+          })
+        });
+
+        // Create chunk artifacts with speakerQuality data
+        // Chunk 0: SPEAKER_00 has quality data
+        // Chunk 1: SPEAKER_00 has quality data, SPEAKER_01 is MISSING quality
+        const chunk0: ChunkArtifact = {
+          conversationId,
+          userId: 'user-123',
+          chunkIndex: 0,
+          totalChunks: 2,
+          segments: [
+            { segmentId: 'seg-0', index: 0, speakerId: 'SPEAKER_00', startMs: 0, endMs: 10000, text: 'Hello from chunk 0' }
+          ],
+          speakers: {
+            'SPEAKER_00': { speakerId: 'SPEAKER_00', displayName: 'Alice', colorIndex: 0 }
+          },
+          terms: {},
+          termOccurrences: [],
+          topics: [],
+          people: [],
+          chunkBounds: { startMs: 0, endMs: 15000, overlapBeforeMs: 0, overlapAfterMs: 0 },
+          emittedContext: {} as ChunkArtifact['emittedContext'],
+          createdAt: '2024-01-01T00:00:00.000Z',
+          storagePath: 'chunks/test/0.mp3',
+          // The key data: chunkSpeakerSignatures with NO quality field (should be enriched)
+          chunkSpeakerSignatures: [
+            {
+              speakerId: 'SPEAKER_00',
+              chunkIndex: 0,
+              inferredName: 'Alice',
+              topicSignatures: [],
+              termSignatures: [],
+              segmentCount: 1,
+              sampleQuote: 'Hello from chunk 0'
+              // quality is UNDEFINED - should be enriched from speakerQuality
+            }
+          ],
+          // speakerQuality with compositeScore = 0.85 for SPEAKER_00
+          speakerQuality: {
+            'SPEAKER_00': {
+              snrProxy: 0.9,
+              clarityScore: 0.8,
+              isContaminated: false,
+              compositeScore: 0.85
+            }
+          }
+        };
+
+        const chunk1: ChunkArtifact = {
+          conversationId,
+          userId: 'user-123',
+          chunkIndex: 1,
+          totalChunks: 2,
+          segments: [
+            { segmentId: 'seg-1', index: 0, speakerId: 'SPEAKER_00', startMs: 0, endMs: 10000, text: 'Hello from chunk 1' },
+            { segmentId: 'seg-2', index: 1, speakerId: 'SPEAKER_01', startMs: 10000, endMs: 15000, text: 'I have no quality data' }
+          ],
+          speakers: {
+            'SPEAKER_00': { speakerId: 'SPEAKER_00', displayName: 'Alice', colorIndex: 0 },
+            'SPEAKER_01': { speakerId: 'SPEAKER_01', displayName: 'Bob', colorIndex: 1 }
+          },
+          terms: {},
+          termOccurrences: [],
+          topics: [],
+          people: [],
+          chunkBounds: { startMs: 15000, endMs: 30000, overlapBeforeMs: 0, overlapAfterMs: 0 },
+          emittedContext: {} as ChunkArtifact['emittedContext'],
+          createdAt: '2024-01-01T00:00:00.000Z',
+          storagePath: 'chunks/test/1.mp3',
+          // Signatures without quality
+          chunkSpeakerSignatures: [
+            {
+              speakerId: 'SPEAKER_00',
+              chunkIndex: 1,
+              inferredName: 'Alice',
+              topicSignatures: [],
+              termSignatures: [],
+              segmentCount: 1,
+              sampleQuote: 'Hello from chunk 1'
+            },
+            {
+              speakerId: 'SPEAKER_01',
+              chunkIndex: 1,
+              inferredName: 'Bob',
+              topicSignatures: [],
+              termSignatures: [],
+              segmentCount: 1,
+              sampleQuote: 'I have no quality data'
+            }
+          ],
+          // speakerQuality only has SPEAKER_00, SPEAKER_01 is missing
+          speakerQuality: {
+            'SPEAKER_00': {
+              snrProxy: 0.7,
+              clarityScore: 0.75,
+              isContaminated: false,
+              compositeScore: 0.72
+            }
+            // SPEAKER_01 is intentionally MISSING - should default to 1.0
+          }
+        };
+
+        mockQueryGet.mockResolvedValueOnce({
+          empty: false,
+          docs: [
+            { data: () => chunk0 },
+            { data: () => chunk1 }
+          ]
+        });
+
+        // Execute merge (will call content-based reconcileSpeakers)
+        await mergeChunks(conversationId);
+
+        // Verify reconcileSpeakers was called with enriched signatures
+        expect(mockReconcileSpeakers).toHaveBeenCalled();
+        expect(capturedSignatures).not.toBeNull();
+        expect(capturedSignatures).toHaveLength(3); // 1 from chunk0, 2 from chunk1
+
+        // Find each signature and verify quality
+        const sig0_chunk0 = capturedSignatures!.find(
+          s => s.speakerId === 'SPEAKER_00' && s.chunkIndex === 0
+        );
+        const sig0_chunk1 = capturedSignatures!.find(
+          s => s.speakerId === 'SPEAKER_00' && s.chunkIndex === 1
+        );
+        const sig1_chunk1 = capturedSignatures!.find(
+          s => s.speakerId === 'SPEAKER_01' && s.chunkIndex === 1
+        );
+
+        // CRITICAL: All signatures must have quality defined (not undefined)
+        expect(sig0_chunk0).toBeDefined();
+        expect(sig0_chunk1).toBeDefined();
+        expect(sig1_chunk1).toBeDefined();
+
+        expect(sig0_chunk0!.quality).toBeDefined();
+        expect(sig0_chunk1!.quality).toBeDefined();
+        expect(sig1_chunk1!.quality).toBeDefined();
+
+        // Verify quality values
+        // SPEAKER_00 chunk0: compositeScore = 0.85
+        expect(sig0_chunk0!.quality).toBe(0.85);
+        // SPEAKER_00 chunk1: compositeScore = 0.72
+        expect(sig0_chunk1!.quality).toBe(0.72);
+        // SPEAKER_01 chunk1: no speakerQuality entry, should default to 1.0
+        expect(sig1_chunk1!.quality).toBe(1.0);
+      });
+
+      it('should default quality to 1.0 when speakerQuality is completely missing', async () => {
+        const conversationId = 'test-conv-no-quality';
+
+        mockGet.mockResolvedValueOnce({
+          exists: true,
+          data: () => ({
+            userId: 'user-123',
+            processingMode: 'parallel',
+            chunkingMetadata: {
+              totalChunks: 1,
+              originalStoragePath: 'audio/original.mp3',
+              originalDurationMs: 30000
+            }
+          })
+        });
+
+        // Chunk with NO speakerQuality at all
+        const chunk0: ChunkArtifact = {
+          conversationId,
+          userId: 'user-123',
+          chunkIndex: 0,
+          totalChunks: 1,
+          segments: [
+            { segmentId: 'seg-0', index: 0, speakerId: 'SPEAKER_00', startMs: 0, endMs: 10000, text: 'Test' }
+          ],
+          speakers: {
+            'SPEAKER_00': { speakerId: 'SPEAKER_00', displayName: 'Test', colorIndex: 0 }
+          },
+          terms: {},
+          termOccurrences: [],
+          topics: [],
+          people: [],
+          chunkBounds: { startMs: 0, endMs: 30000, overlapBeforeMs: 0, overlapAfterMs: 0 },
+          emittedContext: {} as ChunkArtifact['emittedContext'],
+          createdAt: '2024-01-01T00:00:00.000Z',
+          storagePath: 'chunks/test/0.mp3',
+          chunkSpeakerSignatures: [
+            {
+              speakerId: 'SPEAKER_00',
+              chunkIndex: 0,
+              inferredName: 'Test',
+              topicSignatures: [],
+              termSignatures: [],
+              segmentCount: 1,
+              sampleQuote: 'Test'
+            }
+          ]
+          // NOTE: speakerQuality is completely ABSENT
+        };
+
+        mockQueryGet.mockResolvedValueOnce({
+          empty: false,
+          docs: [{ data: () => chunk0 }]
+        });
+
+        // Single-chunk files skip reconciliation, so we need 2+ chunks
+        // Actually looking at chunkMerge.ts:416-452, single-chunk skips reconcileSpeakers
+        // Let's use a 2-chunk scenario instead
+        const chunk1: ChunkArtifact = {
+          ...chunk0,
+          chunkIndex: 1,
+          segments: [
+            { segmentId: 'seg-1', index: 0, speakerId: 'SPEAKER_00', startMs: 0, endMs: 10000, text: 'Test 2' }
+          ],
+          chunkBounds: { startMs: 30000, endMs: 60000, overlapBeforeMs: 0, overlapAfterMs: 0 },
+          storagePath: 'chunks/test/1.mp3',
+          chunkSpeakerSignatures: [
+            {
+              speakerId: 'SPEAKER_00',
+              chunkIndex: 1,
+              inferredName: 'Test',
+              topicSignatures: [],
+              termSignatures: [],
+              segmentCount: 1,
+              sampleQuote: 'Test 2'
+            }
+          ]
+          // Still no speakerQuality
+        };
+
+        // Re-mock for 2 chunks
+        mockGet.mockReset();
+        mockQueryGet.mockReset();
+        mockGet.mockResolvedValueOnce({
+          exists: true,
+          data: () => ({
+            userId: 'user-123',
+            processingMode: 'parallel',
+            chunkingMetadata: {
+              totalChunks: 2,
+              originalStoragePath: 'audio/original.mp3',
+              originalDurationMs: 60000
+            }
+          })
+        });
+        mockQueryGet.mockResolvedValueOnce({
+          empty: false,
+          docs: [
+            { data: () => ({ ...chunk0, totalChunks: 2 }) },
+            { data: () => ({ ...chunk1, totalChunks: 2 }) }
+          ]
+        });
+
+        await mergeChunks(conversationId);
+
+        expect(mockReconcileSpeakers).toHaveBeenCalled();
+        expect(capturedSignatures).not.toBeNull();
+
+        // All signatures should have quality = 1.0 (default)
+        for (const sig of capturedSignatures!) {
+          expect(sig.quality).toBeDefined();
+          expect(sig.quality).toBe(1.0);
+        }
+      });
+
+      it('should preserve existing quality if already set on signature', async () => {
+        const conversationId = 'test-conv-preserve';
+
+        mockGet.mockResolvedValueOnce({
+          exists: true,
+          data: () => ({
+            userId: 'user-123',
+            processingMode: 'parallel',
+            chunkingMetadata: {
+              totalChunks: 2,
+              originalStoragePath: 'audio/original.mp3',
+              originalDurationMs: 60000
+            }
+          })
+        });
+
+        // Chunk with signature that ALREADY has quality set
+        const chunk0: ChunkArtifact = {
+          conversationId,
+          userId: 'user-123',
+          chunkIndex: 0,
+          totalChunks: 2,
+          segments: [
+            { segmentId: 'seg-0', index: 0, speakerId: 'SPEAKER_00', startMs: 0, endMs: 10000, text: 'Test' }
+          ],
+          speakers: {
+            'SPEAKER_00': { speakerId: 'SPEAKER_00', displayName: 'Test', colorIndex: 0 }
+          },
+          terms: {},
+          termOccurrences: [],
+          topics: [],
+          people: [],
+          chunkBounds: { startMs: 0, endMs: 30000, overlapBeforeMs: 0, overlapAfterMs: 0 },
+          emittedContext: {} as ChunkArtifact['emittedContext'],
+          createdAt: '2024-01-01T00:00:00.000Z',
+          storagePath: 'chunks/test/0.mp3',
+          chunkSpeakerSignatures: [
+            {
+              speakerId: 'SPEAKER_00',
+              chunkIndex: 0,
+              inferredName: 'Test',
+              topicSignatures: [],
+              termSignatures: [],
+              segmentCount: 1,
+              sampleQuote: 'Test',
+              quality: 0.42  // ALREADY SET - should be preserved
+            }
+          ],
+          speakerQuality: {
+            'SPEAKER_00': {
+              snrProxy: 0.9,
+              clarityScore: 0.9,
+              isContaminated: false,
+              compositeScore: 0.95  // Different from sig.quality - should NOT override
+            }
+          }
+        };
+
+        const chunk1: ChunkArtifact = {
+          ...chunk0,
+          chunkIndex: 1,
+          chunkBounds: { startMs: 30000, endMs: 60000, overlapBeforeMs: 0, overlapAfterMs: 0 },
+          storagePath: 'chunks/test/1.mp3',
+          chunkSpeakerSignatures: [
+            {
+              speakerId: 'SPEAKER_00',
+              chunkIndex: 1,
+              inferredName: 'Test',
+              topicSignatures: [],
+              termSignatures: [],
+              segmentCount: 1,
+              sampleQuote: 'Test chunk 1'
+              // NO quality - should get from speakerQuality
+            }
+          ]
+        };
+
+        mockQueryGet.mockResolvedValueOnce({
+          empty: false,
+          docs: [
+            { data: () => chunk0 },
+            { data: () => chunk1 }
+          ]
+        });
+
+        await mergeChunks(conversationId);
+
+        expect(capturedSignatures).not.toBeNull();
+
+        const sig_chunk0 = capturedSignatures!.find(s => s.chunkIndex === 0);
+        const sig_chunk1 = capturedSignatures!.find(s => s.chunkIndex === 1);
+
+        // Chunk 0: quality was already 0.42, should be preserved (NOT overwritten by 0.95)
+        expect(sig_chunk0!.quality).toBe(0.42);
+        // Chunk 1: quality was undefined, should be populated from speakerQuality (0.95)
+        expect(sig_chunk1!.quality).toBe(0.95);
+      });
     });
 
     it('should throw error if conversation not found', async () => {

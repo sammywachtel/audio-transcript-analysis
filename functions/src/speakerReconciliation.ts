@@ -12,7 +12,11 @@
  */
 
 import { SpeakerSignature } from './types';
-import { ReconciliationConfig } from './config/reconciliation';
+import {
+  computeAdaptiveEdgeThreshold,
+  computeClusterCohesionThreshold,
+  computeClusterAverageQuality
+} from './adaptiveThresholds';
 
 /**
  * Result of speaker reconciliation with canonical mappings and confidence details.
@@ -92,16 +96,11 @@ const WEIGHTS = {
  * Note: The low-confidence threshold check is performed in chunkMerge.ts
  * against ReconciliationConfig.CONFIDENCE_THRESHOLD for env var override support.
  * This module only computes confidence - it does not enforce thresholds.
+ *
+ * Edge threshold is now adaptive (computed per reconciliation based on cluster count).
+ * Cohesion threshold is now quality-adjusted (computed per-cluster based on quality scores).
  */
 const THRESHOLDS = {
-  highConfidenceMatch: ReconciliationConfig.HIGH_CONFIDENCE_MATCH,  // Pairs above this create edges (0.7)
-  /**
-   * Cohesion safeguard threshold: minimum similarity required across all
-   * cross-cluster pairs when merging. Lower than highConfidenceMatch to allow
-   * transitive merges where some pairs are slightly weaker.
-   * 0.7 caused over-fragmentation (24 clusters); 0.6 is more permissive.
-   */
-  cohesionThreshold: 0.6,
   /**
    * Singleton cluster confidence: "no evidence" means neutral, not bad.
    * A speaker appearing in only one chunk has no cross-chunk comparisons,
@@ -129,13 +128,17 @@ export function reconcileSpeakers(signatures: SpeakerSignature[]): Reconciliatio
   // Step 1: Compute similarity matrix (only cross-chunk pairs)
   const similarityPairs = computeSimilarityMatrix(signatures);
 
+  // Compute adaptive edge threshold based on initial signature count
+  const edgeThreshold = computeAdaptiveEdgeThreshold(signatures.length);
+
   console.log('[Reconciliation] Similarity matrix computed:', {
     totalPairs: similarityPairs.length,
-    highConfidencePairs: similarityPairs.filter(p => p.score >= THRESHOLDS.highConfidenceMatch).length
+    adaptiveEdgeThreshold: edgeThreshold.toFixed(3),
+    highConfidencePairs: similarityPairs.filter(p => p.score >= edgeThreshold).length
   });
 
-  // Step 2: Greedy clustering
-  const clusters = clusterSpeakers(signatures, similarityPairs);
+  // Step 2: Greedy clustering with adaptive thresholds
+  const clusters = clusterSpeakers(signatures, similarityPairs, edgeThreshold);
 
   console.log('[Reconciliation] Clustering complete:', {
     totalClusters: clusters.length
@@ -394,24 +397,26 @@ class UnionFind {
 }
 
 /**
- * Cluster speakers using union-find with cohesion safeguard.
+ * Cluster speakers using union-find with quality-adjusted cohesion safeguard.
  *
  * Algorithm:
- * 1. Build edges: all pairs with similarity ≥ threshold
+ * 1. Build edges: all pairs with similarity ≥ adaptive threshold
  * 2. Union-find: merge transitively (A-B, B-C → A,B,C together)
- * 3. Cohesion safeguard: before finalizing a merge, check that the minimum
- *    cross-component similarity is ≥ threshold to avoid "bridge" over-merges
- *    (e.g., A-B=0.8, B-C=0.8, but A-C=0.3 should NOT merge)
+ * 3. Quality-adjusted cohesion safeguard: before finalizing a merge, check that
+ *    the minimum cross-component similarity meets the stricter of the two clusters'
+ *    quality-adjusted cohesion thresholds
  * 4. Extract connected components as clusters
  * 5. Singletons get neutral confidence (0.75)
  *
  * @param signatures - All speaker signatures
  * @param pairs - Similarity pairs (sorted by score descending)
+ * @param edgeThreshold - Adaptive edge threshold for cluster formation
  * @returns Array of speaker clusters
  */
 function clusterSpeakers(
   signatures: SpeakerSignature[],
-  pairs: SimilarityPair[]
+  pairs: SimilarityPair[],
+  edgeThreshold: number
 ): SpeakerCluster[] {
   const n = signatures.length;
   if (n === 0) return [];
@@ -439,10 +444,10 @@ function clusterSpeakers(
   // Initialize union-find
   const uf = new UnionFind(n);
 
-  // Build edge list for pairs above threshold
+  // Build edge list for pairs above adaptive threshold
   const edges: { i: number; j: number; pair: SimilarityPair }[] = [];
   for (const pair of pairs) {
-    if (pair.score < THRESHOLDS.highConfidenceMatch) break; // Sorted descending
+    if (pair.score < edgeThreshold) break; // Sorted descending
     const i = sigToIndex.get(pair.sig1)!;
     const j = sigToIndex.get(pair.sig2)!;
     edges.push({ i, j, pair });
@@ -451,7 +456,7 @@ function clusterSpeakers(
   console.log('[Reconciliation] Building transitive clusters:', {
     signatureCount: n,
     edgeCount: edges.length,
-    threshold: THRESHOLDS.highConfidenceMatch
+    adaptiveEdgeThreshold: edgeThreshold.toFixed(3)
   });
 
   // Process edges with cohesion safeguard
@@ -470,7 +475,17 @@ function clusterSpeakers(
       if (uf.find(k) === rootJ) membersJ.push(k);
     }
 
-    // Cohesion check: minimum cross-component similarity
+    // Quality-adjusted cohesion check
+    // Compute average quality for each cluster
+    const quality1 = computeClusterAverageQuality(membersI.map(idx => signatures[idx]));
+    const quality2 = computeClusterAverageQuality(membersJ.map(idx => signatures[idx]));
+
+    // Use the stricter (higher) cohesion threshold of the two clusters
+    const cohesion1 = computeClusterCohesionThreshold(quality1);
+    const cohesion2 = computeClusterCohesionThreshold(quality2);
+    const cohesionThreshold = Math.max(cohesion1, cohesion2);
+
+    // Check minimum cross-component similarity
     let minCrossSim = 1.0;
     for (const mi of membersI) {
       for (const mj of membersJ) {
@@ -479,10 +494,8 @@ function clusterSpeakers(
       }
     }
 
-    // Only merge if all cross-pairs meet cohesion threshold (complete-linkage style)
-    // Using cohesionThreshold (0.6) instead of highConfidenceMatch (0.7) to allow
-    // transitive merges where some pairs are slightly weaker but still valid
-    if (minCrossSim >= THRESHOLDS.cohesionThreshold) {
+    // Only merge if all cross-pairs meet quality-adjusted cohesion threshold
+    if (minCrossSim >= cohesionThreshold) {
       uf.union(i, j);
     }
   }

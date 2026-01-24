@@ -108,13 +108,13 @@ describe('Quality-Weighted Speaker Reconciliation Integration', () => {
     ]);
 
     const chunk1 = createChunkArtifact(1, [
-      { id: 'SPEAKER_00', embedding, quality: 0.5 }, // Medium quality
+      { id: 'SPEAKER_00', embedding, quality: 0.6 }, // Medium quality (raised from 0.5 to exceed adaptive threshold)
     ]);
 
     const result = reconcileSpeakersWithEmbeddings([chunk0, chunk1]);
 
     // Despite identical embeddings, quality weighting affects cluster confidence
-    // Both speakers should still be merged (cosine=1.0, weighted=0.707)
+    // Both speakers should still be merged (cosine=1.0, weighted=sqrt(1.0*0.6)=0.775 > adaptive threshold 0.73)
     expect(result.speakerIdMap.size).toBe(2);
 
     // Both should map to same canonical ID
@@ -123,9 +123,9 @@ describe('Quality-Weighted Speaker Reconciliation Integration', () => {
     expect(canonical0).toBe(canonical1);
 
     // Cluster confidence should reflect quality weighting
-    // sqrt(1.0 * 0.5) = 0.707, so weighted similarity = 1.0 * 0.707 = 0.707
+    // sqrt(1.0 * 0.6) = 0.775, so weighted similarity = 1.0 * 0.775 = 0.775
     expect(result.clusterDetails).toHaveLength(1);
-    expect(result.clusterDetails[0].confidence).toBeCloseTo(0.707, 2);
+    expect(result.clusterDetails[0].confidence).toBeCloseTo(0.775, 2);
   });
 
   it('should prevent false merges when quality is low', () => {

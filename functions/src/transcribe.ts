@@ -173,8 +173,9 @@ function buildChunkSpeakerSignatures(params: {
   topics: Topic[];
   terms: Record<string, Term>;
   termOccurrences: TermOccurrence[];
+  speakerQuality?: Record<string, { compositeScore: number }>;
 }): SpeakerSignature[] {
-  const { chunkIndex, segments, speakers, topics, terms, termOccurrences } = params;
+  const { chunkIndex, segments, speakers, topics, terms, termOccurrences, speakerQuality } = params;
 
   // Group segments by speaker
   const segmentsBySpeaker = new Map<string, Segment[]>();
@@ -234,6 +235,9 @@ function buildChunkSpeakerSignatures(params: {
       ? sampleSegment.text.slice(0, 100) + (sampleSegment.text.length > 100 ? '...' : '')
       : '';
 
+    // Get quality score if available
+    const quality = speakerQuality?.[speakerId]?.compositeScore;
+
     signatures.push({
       speakerId,
       chunkIndex,
@@ -241,7 +245,8 @@ function buildChunkSpeakerSignatures(params: {
       topicSignatures: Array.from(topicSet),
       termSignatures: Array.from(termSet),
       segmentCount: speakerSegments.length,
-      sampleQuote
+      sampleQuote,
+      quality
     });
   }
 
@@ -1390,7 +1395,8 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
       speakers: processedData.speakers,
       topics: processedData.topics,
       terms: processedData.terms,
-      termOccurrences: processedData.termOccurrences
+      termOccurrences: processedData.termOccurrences,
+      speakerQuality
     });
 
     const pipelineResult: ChunkPipelineResult = {

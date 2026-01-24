@@ -312,6 +312,8 @@ export interface SpeakerSignature {
   segmentCount: number;
   /** Sample quote from this speaker (first ~100 chars) */
   sampleQuote: string;
+  /** Composite quality score for this speaker (0-1, optional) */
+  quality?: number;
 }
 
 /**

@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Speakers at chunk boundaries (within 30 seconds of edge) receive additional bridging boost when similarity > 0.65
   - Time window constraint: no temporal boost for speakers more than 1 hour apart
   - Reduces false speaker splits when the same person speaks across chunk boundaries
+- **Adaptive Speaker Clustering Thresholds** - Speaker reconciliation now self-tunes to reduce over-fragmentation
+  - Edge threshold adapts based on cluster count: relaxes when >14 speakers detected, tightens when <10
+  - Iterative refinement recomputes thresholds after each merge pass (converges within 3 iterations)
+  - Quality-adjusted cohesion: stricter merge criteria for low-confidence speaker clusters
+  - Unified behavior across embedding-based and content-based reconciliation paths
+  - Reduces false speaker splits without requiring manual threshold tuning
 
 ## [2.5.0] - 2026-01-19
 
