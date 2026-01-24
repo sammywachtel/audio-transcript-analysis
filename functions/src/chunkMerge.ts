@@ -499,11 +499,20 @@ export async function mergeChunks(conversationId: string): Promise<void> {
       if (!reconciliationResult || reconciliationMethod === 'content') {
         console.log('[ChunkMerge] Using content-based speaker reconciliation (fallback or no embeddings)');
 
-        // Collect all speaker signatures from chunks
+        // Collect all speaker signatures from chunks with quality populated
         const allSignatures: SpeakerSignature[] = [];
         for (const artifact of chunkArtifacts) {
           if (artifact.chunkSpeakerSignatures) {
-            allSignatures.push(...artifact.chunkSpeakerSignatures);
+            for (const sig of artifact.chunkSpeakerSignatures) {
+              // Non-mutating copy with quality populated from speakerQuality
+              const enrichedSig: SpeakerSignature = {
+                ...sig,
+                quality: sig.quality ??
+                  artifact.speakerQuality?.[sig.speakerId]?.compositeScore ??
+                  1.0
+              };
+              allSignatures.push(enrichedSig);
+            }
           }
         }
 

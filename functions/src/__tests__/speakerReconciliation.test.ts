@@ -298,12 +298,12 @@ describe('speakerReconciliation', () => {
         ];
 
         // These speakers have no strong signals and will remain as singletons
-        // Singleton clusters have confidence 0.0 (no matching evidence)
+        // Singleton clusters have confidence 0.75 (neutral - "no evidence" not "bad evidence")
         const result = reconcileSpeakers(signatures);
-        expect(result.overallConfidence).toBe(0.0); // Fixed: was incorrectly 1.0
+        expect(result.overallConfidence).toBe(0.75);
         expect(result.clusterDetails).toHaveLength(2); // Two singleton clusters
-        expect(result.clusterDetails[0].confidence).toBe(0.0);
-        expect(result.clusterDetails[1].confidence).toBe(0.0);
+        expect(result.clusterDetails[0].confidence).toBe(0.75);
+        expect(result.clusterDetails[1].confidence).toBe(0.75);
       });
 
       it('should include cluster details in low confidence error', () => {
@@ -366,7 +366,7 @@ describe('speakerReconciliation', () => {
         expect(result.clusterDetails).toHaveLength(1);
         expect(result.clusterDetails[0].canonicalId).toBe('speaker_canonical_0');
         expect(result.clusterDetails[0].displayName).toBe('Solo Speaker');
-        expect(result.overallConfidence).toBe(0.0); // Fixed: Singleton cluster has no match evidence
+        expect(result.overallConfidence).toBe(0.75); // Singleton cluster has neutral confidence
       });
 
       it('should handle all speakers from same chunk (no cross-chunk pairs)', () => {
@@ -395,7 +395,7 @@ describe('speakerReconciliation', () => {
 
         // No cross-chunk pairs → all singletons
         expect(result.clusterDetails).toHaveLength(2);
-        expect(result.overallConfidence).toBe(0.0); // Fixed: Singleton clusters have no match evidence
+        expect(result.overallConfidence).toBe(0.75); // Singleton clusters have neutral confidence
       });
 
       it('should preserve display names when speakers ARE merged', () => {
