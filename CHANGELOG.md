@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Speaker Reconciliation Calibration System** - New tooling to optimize reconciliation thresholds via grid search
+  - Calibration script (`scripts/calibrate-reconciliation.ts`) sweeps 1512 parameter combinations
+  - Synthetic calibration corpus with 10 labeled conversations exercising edge cases
+  - Optimal parameters stored in `functions/src/config/reconciliationConfig.ts`
+  - Achieves F1=0.8846 with perfect precision (zero false speaker merges)
+  - Calibrates edge threshold, cohesion threshold, temporal half-life, and quality floor
+
 ### Changed
 - **Quality-Weighted Speaker Reconciliation** - Speaker matching across chunks now considers audio quality signals
   - Embedding similarity weighted by composite quality score: `cosine * sqrt(quality_A * quality_B)`
