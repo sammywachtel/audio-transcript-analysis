@@ -1,5 +1,16 @@
 # What's New
 
+## Version 2.5.1-beta.2 - January 25, 2026
+
+### 🔧 Behind the Scenes
+
+**Zero-Configuration Deployments**
+- Speaker reconciliation feature flags are now automatically created during deployment
+- Fresh deployments work immediately—no manual Firestore setup required
+- Existing settings are preserved; the system only initializes when flags don't exist
+
+---
+
 ## Version 2.5.1-beta.1 - January 25, 2026
 
 ### 🔧 Behind the Scenes

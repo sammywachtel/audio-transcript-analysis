@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.1-beta.2] - 2026-01-25
+
+### Added
+- **Automatic Feature Flag Initialization** - CI/CD pipeline now creates Firestore feature flags during deployment
+  - New `scripts/init-feature-flags.js` creates `/system/feature_flags` document when missing
+  - Idempotent: preserves existing values, only creates if document doesn't exist
+  - Production-ready defaults: `enableContextAwareReconciliation=true`, `contextAwareRolloutPercentage=100`
+  - Deployment logs clearly show initialization status (created or already exists)
+
+### Changed
+- **Firebase Deploy Workflow** - Added root dependency installation and feature flag initialization steps
+  - Runs after functions deploy, before summary
+  - Conditionally skipped for "rules-only" deployments
+
 ## [2.5.1-beta.1] - 2026-01-25
 
 ### Added

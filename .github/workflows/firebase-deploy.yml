@@ -216,6 +216,17 @@ jobs:
         run: |
           firebase deploy --only functions --force
 
+      # Initialize feature flags in Firestore (idempotent - preserves existing values)
+      - name: Install Root Dependencies
+        if: github.event_name == 'push' || github.event.inputs.deploy_target != 'rules-only'
+        run: npm ci
+
+      - name: Initialize Feature Flags
+        if: github.event_name == 'push' || github.event.inputs.deploy_target != 'rules-only'
+        run: |
+          echo "Initializing feature flags..."
+          node scripts/init-feature-flags.js ${{ env.FIREBASE_PROJECT_ID }}
+
       - name: Deployment Summary
         if: success()
         run: |

@@ -30,6 +30,50 @@ Feature flags are stored in Firestore at:
 | `disableReason` | string | Human-readable reason for auto-disable |
 | `updatedAt` | timestamp | Last modification time |
 
+## Automatic Initialization (CI/CD)
+
+The feature flags document is **automatically created** during Firebase deployment if it doesn't already exist. This ensures a consistent baseline configuration across environments.
+
+### How It Works
+
+1. After Cloud Functions deploy, the CI/CD pipeline runs `scripts/init-feature-flags.js`
+2. The script checks if `/system/feature_flags` exists
+3. If missing, it creates the document with production-ready defaults:
+   - `enableContextAwareReconciliation: true`
+   - `contextAwareRolloutPercentage: 100`
+   - `forceEmbeddingOnlyConversationIds: []`
+4. If the document already exists, **existing values are preserved** (no overwrites)
+
+### Deployment Logs
+
+The deployment output shows initialization status:
+
+```
+# Fresh deployment (document created)
+Initializing feature flags...
+✓ Feature flags initialized with defaults
+  Values: {"enableContextAwareReconciliation":true,"contextAwareRolloutPercentage":100,"forceEmbeddingOnlyConversationIds":[]}
+
+# Subsequent deployment (document preserved)
+Initializing feature flags...
+✓ Feature flags already initialized
+  Current values: {"enableContextAwareReconciliation":true,"contextAwareRolloutPercentage":50,...}
+```
+
+### Manual Initialization (Fallback)
+
+If you need to create the feature flags document manually (e.g., before first deployment or in a fresh environment), you can:
+
+**Option 1: Run the script locally**
+```bash
+# Requires gcloud auth or service account credentials
+node scripts/init-feature-flags.js YOUR_PROJECT_ID
+```
+
+**Option 2: Create via Firebase Console**
+
+Navigate to Firestore > `/system/feature_flags` and create the document with the fields listed in the table above.
+
 ## Rollout Procedure
 
 ### Step 1: Pre-flight Checks
