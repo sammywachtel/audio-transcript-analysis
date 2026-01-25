@@ -232,3 +232,118 @@ export function logReconciliationFailed(
     error
   });
 }
+
+// ============================================================================
+// Structured Monitoring Logs
+// ============================================================================
+// These logs use eventType fields for Cloud Monitoring log-based metrics.
+// Filter examples:
+//   jsonPayload.eventType="reconciliation_completed"
+//   jsonPayload.eventType="reconciliation_error"
+
+/**
+ * Reconciliation metrics for monitoring and admin dashboard.
+ */
+export interface ReconciliationMetrics {
+  conversationId: string;
+  strategy: 'context-aware' | 'embedding-only';
+  clusterCount: number;
+  confidence: number;
+  latencyMs: number;
+  edgeThreshold?: number;
+  cohesionThreshold?: number;
+  qualityExclusions?: number;
+  avgClusterQuality?: number;
+  temporalBoosts?: number;
+  boundaryBridges?: number;
+  hasWarning: boolean;
+  rolloutPercentage: number;
+  flagEnabled: boolean;
+}
+
+/**
+ * Error types for reconciliation failures.
+ */
+export type ReconciliationErrorType =
+  | 'exception'
+  | 'low_confidence'
+  | 'timeout'
+  | 'missing_data';
+
+/**
+ * Log reconciliation error for Cloud Monitoring metrics.
+ *
+ * Use this for critical errors that should count toward the 5% auto-disable threshold.
+ *
+ * Filter: jsonPayload.eventType="reconciliation_error"
+ */
+export function logReconciliationError(
+  conversationId: string,
+  errorType: ReconciliationErrorType,
+  strategy: 'context-aware' | 'embedding-only',
+  details: Record<string, unknown> = {}
+): void {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    eventType: 'reconciliation_error',  // Key for log-based metric
+    service: 'speaker-reconciliation',
+    severity: 'critical',
+    conversationId,
+    strategy,
+    errorType,
+    ...details
+  };
+
+  // Use console.error for ERROR severity in Cloud Logging
+  console.error(JSON.stringify(logEntry));
+}
+
+/**
+ * Log successful reconciliation for Cloud Monitoring metrics.
+ *
+ * Filter: jsonPayload.eventType="reconciliation_completed"
+ */
+export function logReconciliationSuccess(
+  metrics: ReconciliationMetrics
+): void {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    eventType: 'reconciliation_completed',  // Key for log-based metric
+    service: 'speaker-reconciliation',
+    severity: 'info',
+    success: true,
+    warning: metrics.hasWarning,
+    ...metrics
+  };
+
+  console.log(JSON.stringify(logEntry));
+}
+
+/**
+ * Log strategy selection for observability.
+ *
+ * Filter: jsonPayload.eventType="reconciliation_strategy_selected"
+ */
+export function logStrategySelection(
+  conversationId: string,
+  strategy: 'context-aware' | 'embedding-only',
+  reason: string,
+  rolloutPercentage: number,
+  flagEnabled: boolean,
+  isOverridden: boolean
+): void {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    eventType: 'reconciliation_strategy_selected',
+    service: 'speaker-reconciliation',
+    severity: 'info',
+    conversationId,
+    strategy,
+    reason,
+    rolloutPercentage,
+    flagEnabled,
+    isOverridden
+  };
+
+  console.log(JSON.stringify(logEntry));
+}

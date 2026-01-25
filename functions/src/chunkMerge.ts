@@ -40,8 +40,13 @@ import { ReconciliationConfig } from './config/reconciliation';
 import {
   logReconciliationStarted,
   logReconciliationCompleted,
-  logFallbackTriggered
+  logFallbackTriggered,
+  logReconciliationSuccess,
+  logReconciliationError,
+  logStrategySelection,
+  ReconciliationMetrics
 } from './logging/reconciliation';
+import { getFeatureFlags, shouldUseContextAware, ReconciliationStrategy } from './featureFlags';
 import { BUILD_VERSION, BUILD_NUMBER } from './version';
 import { checkAbort, AbortRequestedError } from './transcribe';
 import { randomBytes } from 'crypto';
@@ -70,6 +75,70 @@ function createSpeakerConfidenceWarning(
     severity: confidence < 0.4 ? 'warning' : 'info',
     createdAt: new Date().toISOString()
   };
+}
+
+// =============================================================================
+// Reconciliation Metrics Collection
+// =============================================================================
+
+/**
+ * Reconciliation metric document for admin dashboard.
+ * Stored in _reconciliation_metrics collection with 7-day rolling window.
+ */
+interface ReconciliationMetricDoc {
+  conversationId: string;
+  timestamp: FirebaseFirestore.Timestamp;
+  strategy: 'context-aware' | 'embedding-only';
+  confidence: number;
+  clusterCount: number;
+  latencyMs: number;
+  hasWarning: boolean;
+  errorType?: string;
+}
+
+/**
+ * Write reconciliation metric to Firestore for admin dashboard.
+ *
+ * Uses a separate collection (_reconciliation_metrics) for efficient queries
+ * without bloating the main conversation documents.
+ */
+async function writeReconciliationMetric(
+  conversationId: string,
+  metrics: {
+    strategy: 'context-aware' | 'embedding-only';
+    confidence: number;
+    clusterCount: number;
+    latencyMs: number;
+    hasWarning: boolean;
+    errorType?: string;
+  }
+): Promise<void> {
+  try {
+    const { Timestamp } = await import('firebase-admin/firestore');
+
+    const doc: ReconciliationMetricDoc = {
+      conversationId,
+      timestamp: Timestamp.now(),
+      strategy: metrics.strategy,
+      confidence: metrics.confidence,
+      clusterCount: metrics.clusterCount,
+      latencyMs: metrics.latencyMs,
+      hasWarning: metrics.hasWarning,
+      ...(metrics.errorType && { errorType: metrics.errorType })
+    };
+
+    // Use conversationId as document ID for easy lookup and idempotency
+    await db.collection('_reconciliation_metrics').doc(conversationId).set(doc);
+
+    console.log('[ChunkMerge] Wrote reconciliation metric:', {
+      conversationId,
+      strategy: metrics.strategy,
+      confidence: metrics.confidence
+    });
+  } catch (error) {
+    // Non-fatal - don't fail the merge just because metrics write failed
+    console.error('[ChunkMerge] Failed to write reconciliation metric:', error);
+  }
 }
 
 // =============================================================================
@@ -453,20 +522,43 @@ export async function mergeChunks(conversationId: string): Promise<void> {
 
     } else {
       // ==========================================================================
-      // MULTI-CHUNK RECONCILIATION: Normal flow with graceful degradation
+      // MULTI-CHUNK RECONCILIATION: Feature-flagged with graceful degradation
       // ==========================================================================
       // Log reconciliation start for observability
       logReconciliationStarted(conversationId, chunkArtifacts.length, 'parallel');
 
       console.log('[ChunkMerge] Running speaker reconciliation (parallel mode)...');
 
-      // Try embedding-based reconciliation first (if embeddings are available)
+      // Check feature flags for strategy selection
+      const featureFlags = await getFeatureFlags();
+      const strategyDecision: ReconciliationStrategy = shouldUseContextAware(conversationId, featureFlags);
+
+      // Log strategy selection for monitoring
+      logStrategySelection(
+        conversationId,
+        strategyDecision.strategy,
+        strategyDecision.reason,
+        strategyDecision.rolloutPercentage,
+        strategyDecision.flagEnabled,
+        strategyDecision.isOverridden
+      );
+
+      console.log('[ChunkMerge] Strategy selected:', {
+        strategy: strategyDecision.strategy,
+        reason: strategyDecision.reason,
+        rolloutPercentage: strategyDecision.rolloutPercentage
+      });
+
+      // Determine reconciliation method based on feature flags and available data
       let reconciliationMethod: 'embeddings' | 'content' = 'content';
       let reconciliationResult: any;
       let lowConfidenceWarningNeeded = false;
 
-      if (hasValidEmbeddings(chunkArtifacts)) {
-        console.log('[ChunkMerge] Using embedding-based speaker reconciliation');
+      // Use context-aware (embeddings) only if feature flag allows AND embeddings exist
+      const useContextAware = strategyDecision.strategy === 'context-aware' && hasValidEmbeddings(chunkArtifacts);
+
+      if (useContextAware) {
+        console.log('[ChunkMerge] Using context-aware (embedding-based) speaker reconciliation');
         reconciliationMethod = 'embeddings';
 
         try {
@@ -490,6 +582,12 @@ export async function mergeChunks(conversationId: string): Promise<void> {
         } catch (error) {
           // If embedding reconciliation fails completely, fall back to content-based
           console.warn('[ChunkMerge] Embedding reconciliation failed, falling back to content-based:', error);
+          logReconciliationError(
+            conversationId,
+            'exception',
+            strategyDecision.strategy,
+            { error: error instanceof Error ? error.message : 'Unknown error' }
+          );
           reconciliationMethod = 'content';
           reconciliationResult = null;
         }
@@ -497,7 +595,12 @@ export async function mergeChunks(conversationId: string): Promise<void> {
 
       // Fall back to content-based reconciliation if needed
       if (!reconciliationResult || reconciliationMethod === 'content') {
-        console.log('[ChunkMerge] Using content-based speaker reconciliation (fallback or no embeddings)');
+        const fallbackReason = strategyDecision.strategy === 'embedding-only'
+          ? 'feature flag routing'
+          : !hasValidEmbeddings(chunkArtifacts)
+            ? 'no embeddings available'
+            : 'embedding reconciliation failed';
+        console.log(`[ChunkMerge] Using content-based speaker reconciliation (${fallbackReason})`);
 
         // Collect all speaker signatures from chunks with quality populated
         const allSignatures: SpeakerSignature[] = [];
@@ -605,7 +708,7 @@ export async function mergeChunks(conversationId: string): Promise<void> {
         speakerIdRemapping.set(originalId, canonicalId);
       }
 
-      // Log successful reconciliation
+      // Log successful reconciliation (legacy format)
       if (reconciliationConfidence !== undefined && reconciliationDetails && reconciliationMetadata) {
         logReconciliationCompleted(
           conversationId,
@@ -615,6 +718,32 @@ export async function mergeChunks(conversationId: string): Promise<void> {
           reconciliationDurationMs,
           'parallel'
         );
+
+        // Log structured metrics for Cloud Monitoring (new format with eventType)
+        const monitoringMetrics: ReconciliationMetrics = {
+          conversationId,
+          strategy: reconciliationMethod === 'embeddings' ? 'context-aware' : 'embedding-only',
+          clusterCount: reconciliationDetails.clusterCount,
+          confidence: reconciliationConfidence,
+          latencyMs: reconciliationDurationMs,
+          edgeThreshold: reconciliationResult.edgeThreshold,
+          cohesionThreshold: reconciliationResult.cohesionThreshold,
+          qualityExclusions: reconciliationResult.qualityExclusions,
+          hasWarning: lowConfidenceWarningNeeded,
+          rolloutPercentage: strategyDecision.rolloutPercentage,
+          flagEnabled: strategyDecision.flagEnabled
+        };
+
+        logReconciliationSuccess(monitoringMetrics);
+
+        // Write lightweight metrics to Firestore for admin dashboard (7-day rolling window)
+        await writeReconciliationMetric(conversationId, {
+          strategy: monitoringMetrics.strategy,
+          confidence: reconciliationConfidence,
+          clusterCount: reconciliationDetails.clusterCount,
+          latencyMs: reconciliationDurationMs,
+          hasWarning: lowConfidenceWarningNeeded
+        });
       }
 
       console.log('[ChunkMerge] Speaker reconciliation complete:', {
@@ -622,7 +751,8 @@ export async function mergeChunks(conversationId: string): Promise<void> {
         totalClusters: reconciliationDetails.clusterCount,
         totalOriginalSpeakers: reconciliationDetails.originalSpeakerCount,
         durationMs: reconciliationDurationMs,
-        hasWarnings: warnings.length > 0
+        hasWarnings: warnings.length > 0,
+        strategy: strategyDecision.strategy
       });
     }
   } else {

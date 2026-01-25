@@ -129,6 +129,22 @@ service cloud.firestore {
       allow write: if isAdmin();         // Only admins can update pricing
     }
 
+    // =======================================================================
+    // System Configuration - Admin read, Cloud Functions write
+    // =======================================================================
+
+    // System config (feature flags, etc.) - admin read only
+    match /system/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;  // Only Cloud Functions can write via Admin SDK
+    }
+
+    // Reconciliation metrics - admin read only for Quality tab
+    match /_reconciliation_metrics/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;  // Only Cloud Functions can write via Admin SDK
+    }
+
     // Future: Shares subcollection for collaboration
     // match /conversations/{conversationId}/shares/{shareId} {
     //   allow read: if isAuthenticated()

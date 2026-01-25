@@ -1,5 +1,21 @@
 # What's New
 
+## Version 2.5.1-beta.1 - January 25, 2026
+
+### 🔧 Behind the Scenes
+
+**Smarter Speaker Matching**
+- Speaker identification now considers **audio quality** when matching voices across chunks
+- Speakers who talk close together in time are more likely to be correctly linked
+- The system now automatically adjusts its sensitivity based on how many speakers it detects—fewer duplicate speakers overall
+
+**Safer Rollouts (Admin)**
+- New feature flag system allows gradual rollout of speaker reconciliation improvements
+- Auto-disable kicks in if error rates spike, preventing issues from affecting all users
+- Quality metrics now visible in Admin Dashboard under a new "Quality" tab
+
+---
+
 ## Version 2.5.0 - January 19, 2026
 
 ### ✨ Improvements

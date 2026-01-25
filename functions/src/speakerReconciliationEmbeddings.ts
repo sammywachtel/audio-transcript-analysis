@@ -36,6 +36,10 @@ export interface EmbeddingReconciliationResult {
   overallConfidence: number;
   /** Per-cluster details for debugging */
   clusterDetails: EmbeddingClusterDetails[];
+  /** Threshold metadata for monitoring/observability */
+  edgeThreshold: number;
+  cohesionThreshold: number;
+  qualityExclusions: number;
 }
 
 export interface EmbeddingClusterDetails {
@@ -112,21 +116,25 @@ export function reconcileSpeakersWithEmbeddings(
     chunkCount: chunkArtifacts.length
   });
 
-  // Step 1: Collect all embeddings with metadata
-  const embeddingEntries = collectEmbeddings(chunkArtifacts);
+  // Step 1: Collect all embeddings with metadata (tracks quality exclusions)
+  const { entries: embeddingEntries, qualityExclusions } = collectEmbeddings(chunkArtifacts);
 
   if (embeddingEntries.length === 0) {
     console.warn('[EmbeddingReconciliation] No embeddings found, returning empty result');
     return {
       speakerIdMap: new Map(),
       overallConfidence: 0,
-      clusterDetails: []
+      clusterDetails: [],
+      edgeThreshold: 0,
+      cohesionThreshold: 0,
+      qualityExclusions
     };
   }
 
   console.log('[EmbeddingReconciliation] Collected embeddings:', {
     totalSpeakers: embeddingEntries.length,
-    embeddingDim: embeddingEntries[0].embedding.length
+    embeddingDim: embeddingEntries[0].embedding.length,
+    qualityExclusions
   });
 
   // Step 2: Compute pairwise quality-weighted cosine similarity matrix
@@ -202,16 +210,26 @@ export function reconcileSpeakersWithEmbeddings(
     ? clusters.reduce((sum, c) => sum + c.confidence, 0) / clusters.length
     : 0;
 
+  // Step 7: Compute representative cohesion threshold (based on average quality)
+  const avgQuality = computeClusterAverageQuality(embeddingEntries);
+  const cohesionThreshold = computeClusterCohesionThreshold(avgQuality);
+
   console.log('[EmbeddingReconciliation] Result:', {
     totalMappings: speakerIdMap.size,
     overallConfidence: overallConfidence.toFixed(3),
-    clusterCount: clusters.length
+    clusterCount: clusters.length,
+    edgeThreshold: edgeThreshold.toFixed(3),
+    cohesionThreshold: cohesionThreshold.toFixed(3),
+    qualityExclusions
   });
 
   return {
     speakerIdMap,
     overallConfidence,
-    clusterDetails: clusters
+    clusterDetails: clusters,
+    edgeThreshold,
+    cohesionThreshold,
+    qualityExclusions
   };
 }
 
@@ -221,9 +239,14 @@ export function reconcileSpeakersWithEmbeddings(
 
 /**
  * Collect embeddings from all chunk artifacts.
+ * Tracks quality exclusions for monitoring/observability.
  */
-function collectEmbeddings(chunkArtifacts: ChunkArtifact[]): EmbeddingEntry[] {
+function collectEmbeddings(chunkArtifacts: ChunkArtifact[]): {
+  entries: EmbeddingEntry[];
+  qualityExclusions: number;
+} {
   const entries: EmbeddingEntry[] = [];
+  let qualityExclusions = 0;
 
   for (const artifact of chunkArtifacts) {
     const embeddings = artifact.speakerEmbeddings ?? {};
@@ -245,6 +268,7 @@ function collectEmbeddings(chunkArtifacts: ChunkArtifact[]): EmbeddingEntry[] {
           `[EmbeddingReconciliation] Excluding ${speakerId} from chunk ${artifact.chunkIndex} ` +
           `due to low quality: ${quality.toFixed(3)} < ${EmbeddingReconciliationConfig.QUALITY_FLOOR}`
         );
+        qualityExclusions++;
         continue;
       }
 
@@ -258,7 +282,7 @@ function collectEmbeddings(chunkArtifacts: ChunkArtifact[]): EmbeddingEntry[] {
     }
   }
 
-  return entries;
+  return { entries, qualityExclusions };
 }
 
 /**

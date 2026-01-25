@@ -117,6 +117,22 @@ jest.mock('../transcribe', () => ({
   }
 }));
 
+// Mock featureFlags module to avoid Firebase initialization issues
+jest.mock('../featureFlags', () => ({
+  getFeatureFlags: jest.fn().mockResolvedValue({
+    enableContextAwareReconciliation: false,
+    contextAwareRolloutPercentage: 0,
+    forceEmbeddingOnlyConversationIds: []
+  }),
+  shouldUseContextAware: jest.fn().mockReturnValue({
+    strategy: 'embedding-only',
+    reason: 'Feature flag disabled (mocked)',
+    rolloutPercentage: 0,
+    flagEnabled: false,
+    isOverridden: false
+  })
+}));
+
 // Import after mocking
 import { mergeChunks } from '../chunkMerge';
 

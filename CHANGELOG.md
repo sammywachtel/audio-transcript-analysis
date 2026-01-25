@@ -7,13 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.1-beta.1] - 2026-01-25
+
 ### Added
+- **Speaker Reconciliation Feature Flags** - Controlled rollout system for context-aware reconciliation
+  - Firestore-based feature flag (`enableContextAwareReconciliation`) with rollout percentage and override list
+  - Deterministic rollout using hash-based user bucketing (supports 10%, 25%, 50%, 100% gradual rollout)
+  - Override list allows targeting specific users for testing or exclusion
+- **Reconciliation Observability** - Enhanced monitoring for speaker matching quality
+  - Structured monitoring logs now include threshold metadata: `edgeThreshold`, `cohesionThreshold`, `qualityExclusions`
+  - Cloud Monitoring integration with log-based metrics for reconciliation success/failure rates
+  - Admin Dashboard "Quality" tab displays current flag state and recent reconciliation metrics
+- **Auto-Disable Safety Mechanism** - Automatic rollback when reconciliation errors spike
+  - Pub/Sub handler triggers when critical error rate exceeds 5% in 5 minutes
+  - Records `disabledAt` timestamp and `disableReason` for incident investigation
+  - Prevents cascading failures during rollout of new reconciliation algorithms
 - **Speaker Reconciliation Calibration System** - New tooling to optimize reconciliation thresholds via grid search
   - Calibration script (`scripts/calibrate-reconciliation.ts`) sweeps 1512 parameter combinations
   - Synthetic calibration corpus with 10 labeled conversations exercising edge cases
   - Optimal parameters stored in `functions/src/config/reconciliationConfig.ts`
   - Achieves F1=0.8846 with perfect precision (zero false speaker merges)
   - Calibrates edge threshold, cohesion threshold, temporal half-life, and quality floor
+- **Production Rollout Runbook** - Step-by-step guide at `docs/how-to/speaker-reconciliation-rollout.md`
 
 ### Changed
 - **Quality-Weighted Speaker Reconciliation** - Speaker matching across chunks now considers audio quality signals
