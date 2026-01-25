@@ -240,6 +240,70 @@ export interface PricingConfig {
 }
 
 // =============================================================================
+// Reconciliation Metrics Types (for Quality tab)
+// =============================================================================
+
+/**
+ * Reconciliation metric written by Cloud Functions after each multi-chunk merge.
+ * Used in the Admin Dashboard Quality tab.
+ */
+export interface ReconciliationMetric {
+  id?: string;  // Firestore document ID
+  conversationId: string;
+  strategy: 'context-aware' | 'embedding-only';
+  clusterCount: number;
+  confidence: number;
+  latencyMs: number;
+  edgeThreshold?: number;
+  cohesionThreshold?: number;
+  qualityExclusions?: number;
+  avgClusterQuality?: number;
+  temporalBoosts?: number;
+  boundaryBridges?: number;
+  hasWarning: boolean;
+  rolloutPercentage: number;
+  flagEnabled: boolean;
+  timestamp: Timestamp;
+}
+
+/**
+ * Feature flags state (from /system/feature_flags)
+ */
+export interface FeatureFlagsState {
+  enableContextAwareReconciliation: boolean;
+  contextAwareRolloutPercentage: number;
+  forceEmbeddingOnlyConversationIds: string[];
+  disabledAt?: Timestamp;
+  disableReason?: string;
+  updatedAt?: Timestamp;
+}
+
+/**
+ * Aggregated reconciliation stats for the Quality tab dashboard
+ */
+export interface ReconciliationStats {
+  // Strategy breakdown
+  contextAwareCount: number;
+  embeddingOnlyCount: number;
+  totalCount: number;
+
+  // Confidence stats
+  avgConfidence: number;
+  lowConfidenceCount: number;  // Below 0.65
+  warningCount: number;
+
+  // Performance stats
+  avgLatencyMs: number;
+  p95LatencyMs: number;
+
+  // Feature flag state
+  flagEnabled: boolean;
+  rolloutPercentage: number;
+  isAutoDisabled: boolean;
+  disableReason?: string;
+}
+
+// =============================================================================
 // Query Functions
 // =============================================================================
 
@@ -387,7 +451,7 @@ export async function getRecentMetrics(
     }));
 
     // Filter out chat metrics - they have type='chat', processing metrics don't have type field
-    results = results.filter(m => !('type' in m) || (m as any).type !== 'chat');
+    results = results.filter(m => !('type' in m) || (m as { type?: string }).type !== 'chat');
 
     // Apply status filter client-side (minor optimization potential but keeps code simple)
     if (status) {
@@ -457,6 +521,124 @@ export async function getCurrentPricing(model: string): Promise<PricingConfig | 
     console.error('[MetricsService] Failed to fetch current pricing:', error);
     throw error;
   }
+}
+
+// =============================================================================
+// Reconciliation Metrics Query Functions (for Quality tab)
+// =============================================================================
+
+/**
+ * Get feature flags state (admin only)
+ */
+export async function getFeatureFlagsState(): Promise<FeatureFlagsState | null> {
+  try {
+    const docRef = doc(db, 'system', 'feature_flags');
+    const snapshot = await getDoc(docRef);
+
+    if (!snapshot.exists()) {
+      console.warn('[MetricsService] No feature_flags document found');
+      return null;
+    }
+
+    return snapshot.data() as FeatureFlagsState;
+  } catch (error) {
+    console.error('[MetricsService] Failed to fetch feature flags:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get recent reconciliation metrics (admin only)
+ */
+export async function getReconciliationMetrics(
+  options: {
+    maxResults?: number;
+    strategy?: 'context-aware' | 'embedding-only';
+  } = {}
+): Promise<ReconciliationMetric[]> {
+  const { maxResults = 100, strategy } = options;
+
+  try {
+    let q;
+    if (strategy) {
+      q = query(
+        collection(db, '_reconciliation_metrics'),
+        where('strategy', '==', strategy),
+        orderBy('timestamp', 'desc'),
+        limit(maxResults)
+      );
+    } else {
+      q = query(
+        collection(db, '_reconciliation_metrics'),
+        orderBy('timestamp', 'desc'),
+        limit(maxResults)
+      );
+    }
+
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(doc => ({
+      ...(doc.data() as ReconciliationMetric),
+      id: doc.id
+    }));
+  } catch (error) {
+    console.error('[MetricsService] Failed to fetch reconciliation metrics:', error);
+    throw error;
+  }
+}
+
+/**
+ * Calculate aggregated stats from reconciliation metrics
+ */
+export function calculateReconciliationStats(
+  metrics: ReconciliationMetric[],
+  flagsState: FeatureFlagsState | null
+): ReconciliationStats {
+  if (metrics.length === 0) {
+    return {
+      contextAwareCount: 0,
+      embeddingOnlyCount: 0,
+      totalCount: 0,
+      avgConfidence: 0,
+      lowConfidenceCount: 0,
+      warningCount: 0,
+      avgLatencyMs: 0,
+      p95LatencyMs: 0,
+      flagEnabled: flagsState?.enableContextAwareReconciliation ?? false,
+      rolloutPercentage: flagsState?.contextAwareRolloutPercentage ?? 0,
+      isAutoDisabled: !!flagsState?.disabledAt,
+      disableReason: flagsState?.disableReason
+    };
+  }
+
+  const contextAwareMetrics = metrics.filter(m => m.strategy === 'context-aware');
+  const embeddingOnlyMetrics = metrics.filter(m => m.strategy === 'embedding-only');
+
+  // Calculate confidence stats
+  const confidences = metrics.map(m => m.confidence);
+  const avgConfidence = confidences.reduce((a, b) => a + b, 0) / confidences.length;
+  const lowConfidenceCount = confidences.filter(c => c < 0.65).length;
+  const warningCount = metrics.filter(m => m.hasWarning).length;
+
+  // Calculate latency stats
+  const latencies = metrics.map(m => m.latencyMs).sort((a, b) => a - b);
+  const avgLatencyMs = latencies.reduce((a, b) => a + b, 0) / latencies.length;
+  const p95Index = Math.floor(latencies.length * 0.95);
+  const p95LatencyMs = latencies[p95Index] ?? latencies[latencies.length - 1];
+
+  return {
+    contextAwareCount: contextAwareMetrics.length,
+    embeddingOnlyCount: embeddingOnlyMetrics.length,
+    totalCount: metrics.length,
+    avgConfidence,
+    lowConfidenceCount,
+    warningCount,
+    avgLatencyMs,
+    p95LatencyMs,
+    flagEnabled: flagsState?.enableContextAwareReconciliation ?? false,
+    rolloutPercentage: flagsState?.contextAwareRolloutPercentage ?? 0,
+    isAutoDisabled: !!flagsState?.disabledAt,
+    disableReason: flagsState?.disableReason
+  };
 }
 
 // =============================================================================

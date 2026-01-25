@@ -28,6 +28,10 @@ export interface ReconciliationResult {
   overallConfidence: number;
   /** Per-cluster match details for debugging and transparency */
   clusterDetails: ClusterDetails[];
+  /** Threshold metadata for monitoring/observability */
+  edgeThreshold: number;
+  cohesionThreshold: number;
+  qualityExclusions: number;
 }
 
 /**
@@ -194,10 +198,19 @@ export function reconcileSpeakers(signatures: SpeakerSignature[]): Reconciliatio
     ? Math.min(...clusterDetails.map(c => c.confidence))
     : 1.0; // No clusters = perfect confidence (single speaker or no speakers)
 
+  // Step 5: Compute representative cohesion threshold for observability
+  // Content-based uses quality scores from signatures if available, otherwise assumes neutral quality
+  const avgQuality = signatures.length > 0
+    ? signatures.reduce((sum, s) => sum + (s.quality ?? 1.0), 0) / signatures.length
+    : 1.0;
+  const cohesionThreshold = computeClusterCohesionThreshold(avgQuality);
+
   console.log('[Reconciliation] Result:', {
     totalMappings: speakerIdMap.size,
     overallConfidence,
-    clusterCount: clusterDetails.length
+    clusterCount: clusterDetails.length,
+    edgeThreshold: edgeThreshold.toFixed(3),
+    cohesionThreshold: cohesionThreshold.toFixed(3)
   });
 
   // Note: Threshold enforcement moved to chunkMerge.ts
@@ -206,7 +219,10 @@ export function reconcileSpeakers(signatures: SpeakerSignature[]): Reconciliatio
   return {
     speakerIdMap,
     overallConfidence,
-    clusterDetails
+    clusterDetails,
+    edgeThreshold,
+    cohesionThreshold,
+    qualityExclusions: 0  // Content-based reconciliation doesn't apply quality floor exclusions
   };
 }
 
