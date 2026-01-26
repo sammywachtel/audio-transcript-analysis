@@ -746,6 +746,47 @@ export async function mergeChunks(conversationId: string): Promise<void> {
         });
       }
 
+      // Step 3.5: Run heuristic name resolution on canonical clusters (context-aware only)
+      // This assigns speaker names AFTER embedding reconciliation using full-transcript evidence.
+      // Gated by context-aware flag (already computed above).
+      if (useContextAware && reconciliationDetails) {
+        console.log('[ChunkMerge] Running heuristic name resolution...');
+
+        const { resolveNamesHeuristically } = await import('./speakerNameResolution');
+
+        // Collect all segments from all chunks
+        const allSegments: Segment[] = [];
+        for (const artifact of chunkArtifacts) {
+          allSegments.push(...artifact.segments);
+        }
+
+        const nameResolutionResults = resolveNamesHeuristically(
+          reconciliationDetails.clusters,
+          allSegments,
+          speakerIdRemapping
+        );
+
+        // Update cluster display names based on resolution
+        for (const result of nameResolutionResults) {
+          const cluster = reconciliationDetails.clusters.find(c => c.canonicalId === result.canonicalId);
+          if (cluster && result.nameAssigned) {
+            console.log('[ChunkMerge] Updating cluster display name:', {
+              canonicalId: result.canonicalId,
+              oldName: cluster.displayName,
+              newName: result.resolvedName,
+              confidence: result.confidence,
+              totalWeight: result.totalWeight.toFixed(2)
+            });
+            cluster.displayName = result.resolvedName;
+          }
+        }
+
+        console.log('[ChunkMerge] Name resolution complete:', {
+          resolvedCount: nameResolutionResults.filter(r => r.nameAssigned).length,
+          totalClusters: reconciliationDetails.clusters.length
+        });
+      }
+
       console.log('[ChunkMerge] Speaker reconciliation complete:', {
         overallConfidence: reconciliationConfidence,
         totalClusters: reconciliationDetails.clusterCount,

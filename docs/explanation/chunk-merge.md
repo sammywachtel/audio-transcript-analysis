@@ -259,6 +259,39 @@ for (const [speakerId, speaker] of Object.entries(artifact.speakers)) {
 }
 ```
 
+### Post-Reconciliation Name Resolution
+
+After speakers are clustered, a heuristic name resolution step assigns display names based on evidence from the full transcript. This runs only in parallel mode (gated by `enableContextAwareReconciliation` flag) and makes **zero additional Gemini API calls**.
+
+**Problem**: Per-chunk Gemini guesses may be inconsistent or wrong. A speaker identified as "Host" in chunk 0 might say "I'm Chris" in chunk 5, but by then their display name is already set.
+
+**Solution**: Post-reconciliation name resolution scans all segments belonging to each canonical speaker and collects name evidence:
+
+| Evidence Type | Weight | Example |
+|---------------|--------|---------|
+| Self-introduction | 1.0 | "I'm Chris", "My name is Alice", "Bob here" |
+| Direct address + response | 0.8 | "Thanks, Bob" → Bob responds next |
+| Direct address (unconfirmed) | 0.5 | "Hey Alice" with no immediate response |
+| Per-chunk Gemini guess | 0.3 | Display name from chunk processing (fallback) |
+
+**Algorithm**:
+1. For each canonical speaker, collect all segments they spoke
+2. Scan segments for self-introduction patterns (highest priority)
+3. Look for direct-address patterns where speaker responds immediately after
+4. Fall back to per-chunk Gemini guesses (lowest weight)
+5. Sum weights per candidate name
+6. Assign name only if total weight ≥ 0.5 threshold
+7. Resolve conflicts: if same name matches multiple speakers, highest score wins
+8. Below threshold: preserve role-based labels ("Host", "Participant", etc.)
+
+**Key Design Decisions**:
+- **Self-introductions take absolute priority**: "I'm Chris" beats any indirect evidence
+- **No duplicate names**: Same name cannot be assigned to multiple canonical speakers
+- **Graceful degradation**: Low-confidence speakers keep their role labels
+- **Full logging**: Evidence summaries logged for debugging (`[NameResolution]` prefix)
+
+**Implementation**: `functions/src/speakerNameResolution.ts`
+
 ### Terms & Occurrences
 
 - **Terms**: Deduplicate by `termId` (Gemini generates deterministic IDs)

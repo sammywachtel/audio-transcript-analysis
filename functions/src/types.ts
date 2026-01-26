@@ -494,3 +494,41 @@ export interface ReconciliationMetadata {
   /** Processing duration for reconciliation phase (ms) */
   reconciliationDurationMs?: number;
 }
+
+// =============================================================================
+// Speaker Name Resolution Types (Context-Aware Reconciliation)
+// =============================================================================
+
+/**
+ * Evidence for a name assignment to a canonical speaker.
+ */
+export interface NameEvidence {
+  /** The candidate name */
+  name: string;
+  /** Evidence type that found this name */
+  evidenceType: 'self_introduction' | 'direct_address_confirmed' | 'direct_address_unconfirmed' | 'gemini_guess';
+  /** Weight of this evidence (1.0, 0.8, 0.5, or 0.3) */
+  weight: number;
+  /** Which segment ID this evidence came from */
+  segmentId: string;
+  /** The matched text that yielded this name */
+  matchedText: string;
+}
+
+/**
+ * Name resolution result for a canonical speaker.
+ */
+export interface NameResolutionResult {
+  /** The canonical speaker ID */
+  canonicalId: string;
+  /** The resolved display name (either a name or role label) */
+  resolvedName: string;
+  /** Confidence level: 'high' if weight >= 0.8, 'medium' if >= 0.5, 'low' if < 0.5 */
+  confidence: 'high' | 'medium' | 'low';
+  /** All evidence collected for this speaker */
+  evidence: NameEvidence[];
+  /** Total weight of best candidate name */
+  totalWeight: number;
+  /** Whether a name was actually assigned (vs role label preserved) */
+  nameAssigned: boolean;
+}

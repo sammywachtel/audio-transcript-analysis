@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Heuristic Speaker Name Resolution** - Post-reconciliation name assignment using evidence-based scoring
+  - Self-introductions ("I'm Chris", "My name is Alex") detected via regex take priority (weight 1.0)
+  - Direct-address patterns ("Thanks, Mike") with response adjacency as secondary evidence (weight 0.7)
+  - Per-chunk Gemini guesses used as lowest-priority fallback (weight 0.3)
+  - Names only assigned when total evidence weight exceeds 0.5 threshold
+  - Conflicts resolved deterministically: highest-scoring speaker wins, others revert to role labels
+  - Zero additional Gemini API calls (pure heuristic algorithm)
+  - Gated by existing `enableContextAwareReconciliation` feature flag
+  - Debug logging with `[NameResolution]` prefix shows evidence counts, weights, and conflict resolution
+
 ## [2.5.1-beta.2] - 2026-01-25
 
 ### Added
