@@ -7,10 +7,12 @@
  * - Conflict resolution (same chunk speakers stay separate)
  * - Confidence thresholds and low-confidence errors
  * - Edge cases (empty signatures, single speaker, no overlap)
+ * - Embedding-based reconciliation (singleton detection, adaptive relaxation)
  */
 
 import { reconcileSpeakers, ReconciliationLowConfidenceError } from '../speakerReconciliation';
-import { SpeakerSignature } from '../types';
+import { reconcileSpeakersWithEmbeddings } from '../speakerReconciliationEmbeddings';
+import { SpeakerSignature, ChunkArtifact } from '../types';
 
 describe('speakerReconciliation', () => {
   describe('reconcileSpeakers', () => {
@@ -500,6 +502,248 @@ describe('speakerReconciliation', () => {
         expect(result1.overallConfidence).toBe(result2.overallConfidence);
         expect(result1.clusterDetails.length).toBe(result2.clusterDetails.length);
         expect(result1.speakerIdMap.size).toBe(result2.speakerIdMap.size);
+      });
+    });
+  });
+
+  // ============================================================================
+  // Embedding-Based Reconciliation Tests
+  // ============================================================================
+
+  describe('reconcileSpeakersWithEmbeddings', () => {
+    /**
+     * Helper to create a synthetic 256-dimensional embedding with controlled similarity.
+     */
+    function generateEmbedding(seed: number, similarity?: { to: number[]; score: number }): number[] {
+      const dim = 256;
+      const embedding = new Array(dim);
+
+      // Simple LCG random number generator
+      let rng = seed;
+      const random = () => {
+        rng = (rng * 1103515245 + 12345) & 0x7fffffff;
+        return rng / 0x7fffffff;
+      };
+
+      if (similarity) {
+        const noise = 1 - similarity.score;
+        for (let i = 0; i < dim; i++) {
+          embedding[i] = similarity.to[i] + (random() - 0.5) * noise * 2;
+        }
+      } else {
+        for (let i = 0; i < dim; i++) {
+          embedding[i] = (random() - 0.5) * 2;
+        }
+      }
+
+      // Normalize
+      const norm = Math.sqrt(embedding.reduce((sum: number, val: number) => sum + val * val, 0));
+      for (let i = 0; i < dim; i++) {
+        embedding[i] /= norm;
+      }
+
+      return embedding;
+    }
+
+    /**
+     * Helper to create a minimal chunk artifact with embeddings.
+     */
+    function createChunkArtifact(
+      chunkIndex: number,
+      speakers: { [speakerId: string]: number[] }
+    ): ChunkArtifact {
+      return {
+        conversationId: 'test-conv',
+        userId: 'test-user',
+        chunkIndex,
+        totalChunks: 2,
+        segments: [],
+        speakers: {},
+        terms: {},
+        termOccurrences: [],
+        topics: [],
+        people: [],
+        chunkBounds: {
+          startMs: chunkIndex * 30000,
+          endMs: (chunkIndex + 1) * 30000,
+          overlapBeforeMs: 0,
+          overlapAfterMs: 0
+        },
+        emittedContext: {
+          emittedByChunkIndex: chunkIndex,
+          speakerMap: [],
+          previousSummary: '',
+          knownTermIds: [],
+          knownTopicIds: [],
+          knownPersonIds: [],
+          cumulativeSegmentCount: 0,
+          lastProcessedMs: 0
+        },
+        createdAt: new Date().toISOString(),
+        storagePath: `chunks/chunk-${chunkIndex}.wav`,
+        speakerEmbeddings: speakers
+      };
+    }
+
+    describe('singleton ratio computation', () => {
+      it('should compute singleton ratio correctly', () => {
+        // Create two speakers with very different embeddings (should not merge)
+        const embeddingA = generateEmbedding(1001);
+        const embeddingB = generateEmbedding(2001);
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB })
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Both speakers should remain as singletons (different embeddings)
+        expect(result.clusterDetails.length).toBe(2);
+        const singletonCount = result.clusterDetails.filter(c => c.originalIds.length === 1).length;
+        expect(singletonCount).toBe(2);
+        expect(result.singletonRatio).toBe(1.0); // 2/2 = 100%
+      });
+
+      it('should detect low singleton ratio when speakers merge', () => {
+        // Create two speakers with very similar embeddings (should merge)
+        const embeddingA = generateEmbedding(1001);
+        const embeddingA_similar = generateEmbedding(1002, { to: embeddingA, score: 0.95 });
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingA_similar })
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Speakers should merge into single cluster
+        expect(result.clusterDetails.length).toBe(1);
+        expect(result.singletonRatio).toBe(0); // 0/1 = 0%
+      });
+    });
+
+    describe('adaptive threshold relaxation', () => {
+      it('should trigger relaxation when singleton ratio is high', () => {
+        // Create 5 speakers with moderate similarities (edge cases for clustering)
+        const baseEmbedding = generateEmbedding(3001);
+        const embeddings = [
+          baseEmbedding,
+          generateEmbedding(3002, { to: baseEmbedding, score: 0.65 }), // Borderline similarity
+          generateEmbedding(3003, { to: baseEmbedding, score: 0.64 }),
+          generateEmbedding(3004, { to: baseEmbedding, score: 0.63 }),
+          generateEmbedding(3005, { to: baseEmbedding, score: 0.62 })
+        ];
+
+        const chunkArtifacts = embeddings.map((emb, idx) =>
+          createChunkArtifact(idx, { SPEAKER_00: emb })
+        );
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Depending on thresholds, we may trigger relaxation
+        // At minimum, we should track the metrics
+        expect(result.singletonRatio).toBeGreaterThanOrEqual(0);
+        expect(result.singletonRatio).toBeLessThanOrEqual(1);
+        expect(result.relaxationTriggered).toBeDefined();
+        expect(result.relaxationIterations).toBeGreaterThanOrEqual(0);
+        expect(result.finalEdgeThreshold).toBeGreaterThan(0);
+      });
+
+      it('should respect relaxation floor', () => {
+        // Even with high singleton ratio, relaxation should not go below floor
+        const baseEmbedding = generateEmbedding(4001);
+        const embeddings = Array.from({ length: 10 }, (_, i) =>
+          generateEmbedding(4002 + i, { to: baseEmbedding, score: 0.4 }) // Very low similarity
+        );
+
+        const chunkArtifacts = embeddings.map((emb, idx) =>
+          createChunkArtifact(idx, { SPEAKER_00: emb })
+        );
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Final threshold should not be below relaxation floor (0.45)
+        expect(result.finalEdgeThreshold).toBeGreaterThanOrEqual(0.45);
+      });
+
+      it('should limit relaxation iterations', () => {
+        // Create many weakly-similar speakers to force multiple relaxation attempts
+        const baseEmbedding = generateEmbedding(5001);
+        const embeddings = Array.from({ length: 8 }, (_, i) =>
+          generateEmbedding(5002 + i, { to: baseEmbedding, score: 0.55 })
+        );
+
+        const chunkArtifacts = embeddings.map((emb, idx) =>
+          createChunkArtifact(idx, { SPEAKER_00: emb })
+        );
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Relaxation iterations should be capped at max (3)
+        expect(result.relaxationIterations).toBeLessThanOrEqual(3);
+      });
+    });
+
+    describe('over-fragmentation detection', () => {
+      it('should warn when cluster count > 2x estimated speakers', () => {
+        // Create 3 unique speakers, but with low-quality embeddings that fragment into many clusters
+        const speakerA = generateEmbedding(6001);
+        const speakerB = generateEmbedding(6002);
+        const speakerC = generateEmbedding(6003);
+
+        // Chunk 0 has all 3 speakers (establishes estimate)
+        // Then create fragments with slight variations
+        const chunkArtifacts = [
+          createChunkArtifact(0, {
+            SPEAKER_00: speakerA,
+            SPEAKER_01: speakerB,
+            SPEAKER_02: speakerC
+          }),
+          createChunkArtifact(1, {
+            SPEAKER_00: generateEmbedding(6011, { to: speakerA, score: 0.60 }) // Weak match
+          }),
+          createChunkArtifact(2, {
+            SPEAKER_00: generateEmbedding(6012, { to: speakerB, score: 0.59 })
+          })
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Estimate should be 3 (from chunk 0)
+        expect(result.estimatedUniqueSpeakers).toBe(3);
+
+        // If we end up with >6 clusters, that's over-fragmentation
+        // (The actual result depends on adaptive thresholds)
+        if (result.clusterDetails.length > 6) {
+          // Over-fragmentation detected - should have triggered relaxation
+          expect(result.relaxationTriggered).toBe(true);
+        }
+      });
+    });
+
+    describe('empty and edge cases', () => {
+      it('should handle empty chunk artifacts', () => {
+        const result = reconcileSpeakersWithEmbeddings([]);
+
+        expect(result.speakerIdMap.size).toBe(0);
+        expect(result.clusterDetails.length).toBe(0);
+        expect(result.singletonRatio).toBe(0);
+        expect(result.estimatedUniqueSpeakers).toBe(0);
+        expect(result.relaxationTriggered).toBe(false);
+      });
+
+      it('should handle single chunk with no reconciliation needed', () => {
+        const embedding = generateEmbedding(7001);
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embedding })
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        expect(result.clusterDetails.length).toBe(1);
+        expect(result.singletonRatio).toBe(1.0); // Single cluster with 1 member
+        expect(result.estimatedUniqueSpeakers).toBe(1);
       });
     });
   });

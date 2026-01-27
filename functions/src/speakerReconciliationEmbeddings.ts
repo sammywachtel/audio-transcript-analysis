@@ -40,6 +40,16 @@ export interface EmbeddingReconciliationResult {
   edgeThreshold: number;
   cohesionThreshold: number;
   qualityExclusions: number;
+  /** Singleton ratio: singleton clusters / total clusters */
+  singletonRatio: number;
+  /** Estimated unique speakers from chunk artifacts */
+  estimatedUniqueSpeakers: number;
+  /** Whether adaptive relaxation was triggered */
+  relaxationTriggered: boolean;
+  /** Final edge threshold after relaxation (if triggered) */
+  finalEdgeThreshold: number;
+  /** Number of relaxation iterations performed */
+  relaxationIterations: number;
 }
 
 export interface EmbeddingClusterDetails {
@@ -104,6 +114,25 @@ export const EmbeddingReconciliationConfig = {
 // ============================================================================
 
 /**
+ * Estimate the number of unique speakers based on chunk artifacts.
+ * Conservative heuristic: maximum unique speakers in any single chunk.
+ * This assumes chunks are long enough to capture most/all speakers.
+ */
+function estimateUniqueSpeakers(chunkArtifacts: ChunkArtifact[]): number {
+  let maxUniqueSpeakers = 0;
+
+  for (const artifact of chunkArtifacts) {
+    const embeddings = artifact.speakerEmbeddings ?? {};
+    const uniqueInChunk = Object.keys(embeddings).length;
+    if (uniqueInChunk > maxUniqueSpeakers) {
+      maxUniqueSpeakers = uniqueInChunk;
+    }
+  }
+
+  return maxUniqueSpeakers;
+}
+
+/**
  * Reconcile speakers across chunks using voice embeddings.
  *
  * @param chunkArtifacts - Artifacts from all chunks (must include speakerEmbeddings)
@@ -127,7 +156,12 @@ export function reconcileSpeakersWithEmbeddings(
       clusterDetails: [],
       edgeThreshold: 0,
       cohesionThreshold: 0,
-      qualityExclusions
+      qualityExclusions,
+      singletonRatio: 0,
+      estimatedUniqueSpeakers: 0,
+      relaxationTriggered: false,
+      finalEdgeThreshold: 0,
+      relaxationIterations: 0
     };
   }
 
@@ -137,10 +171,17 @@ export function reconcileSpeakersWithEmbeddings(
     qualityExclusions
   });
 
-  // Step 2: Compute pairwise quality-weighted cosine similarity matrix
+  // Step 2: Estimate unique speakers (conservative heuristic: max unique speakers in any chunk)
+  const estimatedUniqueSpeakers = estimateUniqueSpeakers(chunkArtifacts);
+
+  console.log('[EmbeddingReconciliation] Estimated unique speakers:', {
+    estimatedUniqueSpeakers
+  });
+
+  // Step 3: Compute pairwise quality-weighted cosine similarity matrix
   const similarityMatrix = computeCosineSimilarityMatrix(embeddingEntries);
 
-  // Step 2.5: Apply temporal and boundary boosts to cross-chunk pairs
+  // Step 3.5: Apply temporal and boundary boosts to cross-chunk pairs
   const speakerKeys = embeddingEntries.map(e => e.originalId);
   const speakerAppearances = buildSpeakerAppearanceWindows(chunkArtifacts);
   const chunkBounds = buildChunkBoundsMap(chunkArtifacts);
@@ -152,7 +193,7 @@ export function reconcileSpeakersWithEmbeddings(
     chunkBoundsCount: chunkBounds.size
   });
 
-  // Step 3: Iterative agglomerative clustering with adaptive thresholds
+  // Step 4: Iterative agglomerative clustering with adaptive thresholds
   let clusterLabels = initializeSingletonClusters(embeddingEntries.length);
   let edgeThreshold = computeAdaptiveEdgeThreshold(embeddingEntries.length);
 
@@ -189,15 +230,94 @@ export function reconcileSpeakersWithEmbeddings(
     edgeThreshold = computeAdaptiveEdgeThreshold(newClusterCount);
   }
 
-  // Step 4: Build clusters and compute confidence
-  const clusters = buildClusters(embeddingEntries, clusterLabels, similarityMatrix, chunkArtifacts);
+  // Step 5: Build clusters and compute singleton ratio
+  let clusters = buildClusters(embeddingEntries, clusterLabels, similarityMatrix, chunkArtifacts);
+  let singletonCount = clusters.filter(c => c.originalIds.length === 1).length;
+  let singletonRatio = clusters.length > 0 ? singletonCount / clusters.length : 0;
 
-  console.log('[EmbeddingReconciliation] Clustering complete:', {
+  console.log('[EmbeddingReconciliation] Initial clustering complete:', {
     totalClusters: clusters.length,
+    singletonCount,
+    singletonRatio: singletonRatio.toFixed(3),
     speakersPerCluster: clusters.map(c => c.originalIds.length)
   });
 
-  // Step 5: Build speaker ID mapping
+  // Step 6: Check for over-fragmentation and apply adaptive relaxation if needed
+  let relaxationTriggered = false;
+  let relaxationIterations = 0;
+  const initialEdgeThreshold = edgeThreshold;
+
+  // Check for warning conditions
+  if (singletonRatio > ADAPTIVE_CONFIG.singletonWarningThreshold) {
+    console.warn(`[EmbeddingReconciliation] ⚠️  High singleton ratio detected: ${(singletonRatio * 100).toFixed(1)}% (threshold: ${(ADAPTIVE_CONFIG.singletonWarningThreshold * 100).toFixed(0)}%)`);
+  }
+
+  if (clusters.length > estimatedUniqueSpeakers * 2) {
+    console.warn(`[EmbeddingReconciliation] ⚠️  Over-fragmentation detected: ${clusters.length} clusters vs ${estimatedUniqueSpeakers} estimated speakers (>2x)`);
+  }
+
+  // Trigger adaptive relaxation if singleton ratio is too high
+  if (singletonRatio > ADAPTIVE_CONFIG.singletonWarningThreshold) {
+    relaxationTriggered = true;
+    console.log('[EmbeddingReconciliation] 🔧 Triggering adaptive threshold relaxation');
+
+    for (let relaxIter = 0; relaxIter < ADAPTIVE_CONFIG.maxRelaxationIterations; relaxIter++) {
+      // Relax edge threshold
+      const newThreshold = edgeThreshold - ADAPTIVE_CONFIG.relaxationStepSize;
+
+      // Check if we've hit the floor
+      if (newThreshold < ADAPTIVE_CONFIG.relaxationThresholdFloor) {
+        console.log('[EmbeddingReconciliation] Relaxation floor reached:', {
+          currentThreshold: edgeThreshold.toFixed(3),
+          floor: ADAPTIVE_CONFIG.relaxationThresholdFloor
+        });
+        break;
+      }
+
+      edgeThreshold = newThreshold;
+      relaxationIterations++;
+
+      console.log(`[EmbeddingReconciliation] Relaxation iteration ${relaxIter + 1}:`, {
+        newEdgeThreshold: edgeThreshold.toFixed(3)
+      });
+
+      // Re-run clustering with relaxed threshold
+      clusterLabels = agglomerativeCluster(
+        similarityMatrix,
+        edgeThreshold,
+        embeddingEntries
+      );
+
+      // Rebuild clusters
+      clusters = buildClusters(embeddingEntries, clusterLabels, similarityMatrix, chunkArtifacts);
+      singletonCount = clusters.filter(c => c.originalIds.length === 1).length;
+      singletonRatio = clusters.length > 0 ? singletonCount / clusters.length : 0;
+
+      console.log(`[EmbeddingReconciliation] After relaxation ${relaxIter + 1}:`, {
+        clusterCount: clusters.length,
+        singletonCount,
+        singletonRatio: singletonRatio.toFixed(3)
+      });
+
+      // Check if we've reached target singleton ratio
+      if (singletonRatio < ADAPTIVE_CONFIG.singletonTargetThreshold) {
+        console.log('[EmbeddingReconciliation] ✅ Target singleton ratio achieved');
+        break;
+      }
+    }
+
+    console.log('[EmbeddingReconciliation] Adaptive relaxation complete:', {
+      initialThreshold: initialEdgeThreshold.toFixed(3),
+      finalThreshold: edgeThreshold.toFixed(3),
+      iterations: relaxationIterations,
+      initialSingletonRatio: (singletonCount / clusters.length).toFixed(3),
+      finalSingletonRatio: singletonRatio.toFixed(3),
+      initialClusters: clusters.length,
+      finalClusters: clusters.length
+    });
+  }
+
+  // Step 7: Build speaker ID mapping
   const speakerIdMap = new Map<string, string>();
   for (const cluster of clusters) {
     for (const originalId of cluster.originalIds) {
@@ -205,22 +325,27 @@ export function reconcileSpeakersWithEmbeddings(
     }
   }
 
-  // Step 6: Compute overall confidence (average of cluster confidences)
+  // Step 8: Compute overall confidence (average of cluster confidences)
   const overallConfidence = clusters.length > 0
     ? clusters.reduce((sum, c) => sum + c.confidence, 0) / clusters.length
     : 0;
 
-  // Step 7: Compute representative cohesion threshold (based on average quality)
+  // Step 9: Compute representative cohesion threshold (based on average quality)
   const avgQuality = computeClusterAverageQuality(embeddingEntries);
   const cohesionThreshold = computeClusterCohesionThreshold(avgQuality);
 
-  console.log('[EmbeddingReconciliation] Result:', {
+  console.log('[EmbeddingReconciliation] Final result:', {
     totalMappings: speakerIdMap.size,
     overallConfidence: overallConfidence.toFixed(3),
     clusterCount: clusters.length,
+    singletonCount,
+    singletonRatio: singletonRatio.toFixed(3),
+    estimatedUniqueSpeakers,
     edgeThreshold: edgeThreshold.toFixed(3),
     cohesionThreshold: cohesionThreshold.toFixed(3),
-    qualityExclusions
+    qualityExclusions,
+    relaxationTriggered,
+    relaxationIterations
   });
 
   return {
@@ -229,7 +354,12 @@ export function reconcileSpeakersWithEmbeddings(
     clusterDetails: clusters,
     edgeThreshold,
     cohesionThreshold,
-    qualityExclusions
+    qualityExclusions,
+    singletonRatio,
+    estimatedUniqueSpeakers,
+    relaxationTriggered,
+    finalEdgeThreshold: edgeThreshold,
+    relaxationIterations
   };
 }
 

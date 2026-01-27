@@ -668,7 +668,16 @@ export async function mergeChunks(conversationId: string): Promise<void> {
           canonicalId: c.canonicalId,
           confidence: c.confidence
         })),
-        reconciliationDurationMs
+        reconciliationDurationMs,
+        // Add singleton and relaxation metrics for embedding reconciliation
+        ...(reconciliationMethod === 'embeddings' && {
+          singletonRatio: reconciliationResult.singletonRatio,
+          singletonCount: reconciliationResult.clusterDetails.filter((c: any) => c.originalIds.length === 1).length,
+          estimatedUniqueSpeakers: reconciliationResult.estimatedUniqueSpeakers,
+          relaxationTriggered: reconciliationResult.relaxationTriggered,
+          finalEdgeThreshold: reconciliationResult.finalEdgeThreshold,
+          relaxationIterations: reconciliationResult.relaxationIterations
+        })
       };
 
       // Log which reconciliation method was used
@@ -730,6 +739,15 @@ export async function mergeChunks(conversationId: string): Promise<void> {
           cohesionThreshold: reconciliationResult.cohesionThreshold,
           qualityExclusions: reconciliationResult.qualityExclusions,
           hasWarning: lowConfidenceWarningNeeded,
+          // Add singleton and relaxation metrics for embedding reconciliation
+          ...(reconciliationMethod === 'embeddings' && {
+            singletonRatio: reconciliationResult.singletonRatio,
+            singletonCount: reconciliationResult.clusterDetails.filter((c: any) => c.originalIds.length === 1).length,
+            estimatedUniqueSpeakers: reconciliationResult.estimatedUniqueSpeakers,
+            relaxationTriggered: reconciliationResult.relaxationTriggered,
+            finalEdgeThreshold: reconciliationResult.finalEdgeThreshold,
+            relaxationIterations: reconciliationResult.relaxationIterations
+          }),
           rolloutPercentage: strategyDecision.rolloutPercentage,
           flagEnabled: strategyDecision.flagEnabled
         };

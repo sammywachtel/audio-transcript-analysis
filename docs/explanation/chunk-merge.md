@@ -105,6 +105,47 @@ The reconciliation algorithm matches speakers across chunks using three signals:
 
 **Sequential Mode**: No reconciliation needed - speaker IDs are consistent via context propagation.
 
+### Singleton Detection and Adaptive Relaxation
+
+**Problem**: Embedding-based reconciliation can sometimes create too many "singleton clusters" - speakers that appear in only one chunk instead of being merged with same-speaker instances across chunks. This over-fragmentation produces unnecessarily high speaker counts.
+
+**Detection Heuristics**:
+1. **Singleton Ratio**: Percentage of clusters with only 1 member
+   - Warning threshold: >40% singletons
+   - Target threshold: <30% singletons
+2. **Over-Fragmentation**: Cluster count > 2x estimated unique speakers
+   - Estimated speakers = max unique speakers in any single chunk (conservative heuristic)
+
+**Adaptive Relaxation**:
+When singleton ratio exceeds 40%, the system automatically relaxes the clustering threshold to encourage merging:
+
+```
+Initial clustering → High singleton ratio detected (>40%)
+                              ↓
+                    Relax edge threshold by 0.05
+                              ↓
+                    Re-run clustering
+                              ↓
+         Check singleton ratio: <30%? → Done
+                      ↓ No
+         Relax again (up to 3 iterations, floor: 0.45)
+```
+
+**Safeguards**:
+- **Relaxation floor** (0.45): Prevents over-merging different speakers
+- **Max iterations** (3): Balances accuracy vs. processing time
+- **Logged metrics**: All relaxation events logged for observability
+
+**Metadata Tracked**:
+- `singletonRatio`: Final singleton percentage (0-1)
+- `singletonCount`: Number of singleton clusters
+- `estimatedUniqueSpeakers`: Heuristic speaker count
+- `relaxationTriggered`: Whether adaptive relaxation ran
+- `finalEdgeThreshold`: Edge threshold after relaxation
+- `relaxationIterations`: Number of relaxation loops performed
+
+This adaptive approach reduces false speaker fragmentation while maintaining strict boundaries to prevent incorrect merges.
+
 ## Fallback to Sequential Processing
 
 When speaker reconciliation confidence is too low, the system automatically falls back to sequential reprocessing to ensure consistent speaker identification.
