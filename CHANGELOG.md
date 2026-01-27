@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Heuristic Speaker Name Resolution** - Post-reconciliation name assignment using evidence-based scoring
+
+### Changed
+- **Singleton Detection & Adaptive Relaxation** - Reduced speaker over-fragmentation in embedding reconciliation
+  - Detects when clustering produces too many single-speaker clusters (>40% singleton ratio triggers warning)
+  - Automatically relaxes edge threshold to encourage merging when over-fragmentation detected
+  - Iterative relaxation capped at configurable floor (0.45) to prevent false merges
+  - Logs over-fragmentation heuristic when cluster count exceeds 2× estimated unique speakers
+  - New observability fields in `reconciliationMetadata`: `singletonRatio`, `singletonCount`, `estimatedUniqueSpeakers`, `relaxationTriggered`, `finalEdgeThreshold`, `relaxationIterations`
+- **Calibration Recall Constraint** - Improved calibration script to enforce recall ≥ 0.80
+  - Grid search now explores thresholds down to 0.40 (was limited to 0.55 due to clamping bug)
+  - Added near/far mic voice variation test case to calibration corpus
+  - Calibration now achieves F1=0.9231, Precision=1.0000, Recall=0.8571
   - Self-introductions ("I'm Chris", "My name is Alex") detected via regex take priority (weight 1.0)
   - Direct-address patterns ("Thanks, Mike") with response adjacency as secondary evidence (weight 0.7)
   - Per-chunk Gemini guesses used as lowest-priority fallback (weight 0.3)

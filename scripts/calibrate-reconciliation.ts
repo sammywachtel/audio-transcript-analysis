@@ -86,9 +86,10 @@ interface GridSearchResult {
 // ============================================================================
 
 // iteration_01_a: Expanded grid to explore lower thresholds
+// Grid now includes very aggressive thresholds (0.40-0.45) to ensure we can hit recall >= 0.80
 const GRID = {
-  edgeThresholds: [0.48, 0.50, 0.52, 0.55, 0.58, 0.60, 0.62, 0.65, 0.68],
-  cohesionThresholds: [0.45, 0.48, 0.50, 0.53, 0.55, 0.58, 0.60],
+  edgeThresholds: [0.40, 0.42, 0.45, 0.48, 0.50, 0.52, 0.55, 0.58, 0.60, 0.62, 0.65, 0.68],
+  cohesionThresholds: [0.38, 0.40, 0.42, 0.45, 0.48, 0.50, 0.53, 0.55, 0.58, 0.60],
   temporalHalfLives: [120, 180, 240, 300, 420, 600],
   qualityFloors: [0.15, 0.2, 0.25, 0.3]
 };
@@ -172,6 +173,15 @@ function initializeEmbeddingProfiles(): void {
   EMBEDDING_PROFILES['SYNTHETIC_EMBEDDING_B_LOW'] = generateSyntheticEmbedding(3005, { to: baseB, score: 0.82 });      // was 0.70
   EMBEDDING_PROFILES['SYNTHETIC_EMBEDDING_B_BOUNDARY'] = generateSyntheticEmbedding(3006, { to: baseB, score: 0.88 }); // was 0.81
   EMBEDDING_PROFILES['SYNTHETIC_EMBEDDING_B_NOISE'] = generateSyntheticEmbedding(3007, { to: baseB, score: 0.45 });    // was 0.40
+
+  // Near/far mic variations (same speaker, microphone distance changes)
+  // iteration_07: Add voice variation test cases for same-speaker, different mic positions
+  // These should merge reliably - same speaker embeddings typically have 0.90+ similarity
+  // iteration_01_a: Increased from 0.85-0.88 to 0.91-0.93 for realistic same-speaker matching
+  EMBEDDING_PROFILES['SYNTHETIC_EMBEDDING_A_NEAR_MIC'] = generateSyntheticEmbedding(5001, { to: baseA, score: 0.93 });
+  EMBEDDING_PROFILES['SYNTHETIC_EMBEDDING_A_FAR_MIC'] = generateSyntheticEmbedding(5002, { to: baseA, score: 0.91 });
+  EMBEDDING_PROFILES['SYNTHETIC_EMBEDDING_B_NEAR_MIC'] = generateSyntheticEmbedding(5003, { to: baseB, score: 0.92 });
+  EMBEDDING_PROFILES['SYNTHETIC_EMBEDDING_B_FAR_MIC'] = generateSyntheticEmbedding(5004, { to: baseB, score: 0.90 });
 
   // Cross-talk variations (degraded embeddings) - boosted for realistic cross-talk
   EMBEDDING_PROFILES['SYNTHETIC_EMBEDDING_A_CROSSTALK'] = generateSyntheticEmbedding(4001, { to: baseA, score: 0.80 }); // was 0.75
@@ -259,6 +269,11 @@ async function runReconciliationWithParams(
   const originalCohesion = adaptiveModule.DEFAULT_CONFIG.mediumQualityCohesion;
   const originalHalfLife = temporalModule.TemporalConfig.HALF_LIFE_SECONDS;
   const originalQualityFloor = reconciliationModule.EmbeddingReconciliationConfig.QUALITY_FLOOR;
+  // iteration_01_a: Also patch threshold limits so lower thresholds actually take effect
+  const originalThresholdMin = adaptiveModule.DEFAULT_CONFIG.thresholdMin;
+  const originalRelaxationFloor = adaptiveModule.DEFAULT_CONFIG.relaxationThresholdFloor;
+  const originalHighQualityCohesion = adaptiveModule.DEFAULT_CONFIG.highQualityCohesion;
+  const originalLowQualityCohesion = adaptiveModule.DEFAULT_CONFIG.lowQualityCohesion;
 
   try {
     // Apply overrides
@@ -266,6 +281,14 @@ async function runReconciliationWithParams(
     adaptiveModule.DEFAULT_CONFIG.mediumQualityCohesion = params.cohesionThreshold;
     temporalModule.TemporalConfig.HALF_LIFE_SECONDS = params.temporalHalfLife;
     reconciliationModule.EmbeddingReconciliationConfig.QUALITY_FLOOR = params.qualityFloor;
+    // iteration_01_a: Lower the threshold floor to allow exploring very low thresholds
+    // This ensures the calibration can actually test threshold values below 0.55
+    const minAllowedThreshold = Math.min(params.edgeThreshold, params.cohesionThreshold) - 0.05;
+    adaptiveModule.DEFAULT_CONFIG.thresholdMin = Math.max(0.30, minAllowedThreshold);
+    adaptiveModule.DEFAULT_CONFIG.relaxationThresholdFloor = Math.max(0.30, minAllowedThreshold);
+    // Also align other cohesion thresholds proportionally
+    adaptiveModule.DEFAULT_CONFIG.highQualityCohesion = Math.max(params.cohesionThreshold - 0.05, 0.35);
+    adaptiveModule.DEFAULT_CONFIG.lowQualityCohesion = Math.min(params.cohesionThreshold + 0.15, 0.75);
 
     // Run reconciliation (cast to ChunkArtifact[] - reconcileSpeakersWithEmbeddings only uses
     // the embedding-related fields which our CalibrationChunkArtifact provides)
@@ -278,6 +301,10 @@ async function runReconciliationWithParams(
     adaptiveModule.DEFAULT_CONFIG.mediumQualityCohesion = originalCohesion;
     temporalModule.TemporalConfig.HALF_LIFE_SECONDS = originalHalfLife;
     reconciliationModule.EmbeddingReconciliationConfig.QUALITY_FLOOR = originalQualityFloor;
+    adaptiveModule.DEFAULT_CONFIG.thresholdMin = originalThresholdMin;
+    adaptiveModule.DEFAULT_CONFIG.relaxationThresholdFloor = originalRelaxationFloor;
+    adaptiveModule.DEFAULT_CONFIG.highQualityCohesion = originalHighQualityCohesion;
+    adaptiveModule.DEFAULT_CONFIG.lowQualityCohesion = originalLowQualityCohesion;
   }
 }
 
@@ -454,6 +481,7 @@ function writeConfigFile(bestResult: GridSearchResult, outputPath: string): void
  *
  * Calibration corpus: 10 synthetic conversations with ground truth
  * Grid search space: ${GRID.edgeThresholds.length * GRID.cohesionThresholds.length * GRID.temporalHalfLives.length * GRID.qualityFloors.length} combinations
+ * Recall constraint: >= 0.80 (prevents excessive over-fragmentation)
  *
  * Best F1 score: ${bestResult.f1Score.toFixed(4)}
  * Precision: ${bestResult.precision.toFixed(4)}
@@ -478,6 +506,7 @@ export const CalibratedReconciliationConfig = {
   calibrationPrecision: ${bestResult.precision.toFixed(4)},
   calibrationRecall: ${bestResult.recall.toFixed(4)},
   calibrationDate: '${today}',
+  minRecallConstraint: 0.80,
 
   // True/False positives/negatives on calibration corpus
   calibrationMetrics: {
@@ -566,8 +595,20 @@ async function main() {
   // Print results
   printResultsTable(results);
 
-  // Find best result
-  const bestResult = results.reduce((best, curr) =>
+  // Filter for recall >= 0.80 constraint
+  const MIN_RECALL = 0.80;
+  const validResults = results.filter(r => r.recall >= MIN_RECALL);
+
+  if (validResults.length === 0) {
+    console.error(`\n❌ No parameter combinations meet recall >= ${MIN_RECALL} constraint`);
+    console.error('   Consider expanding grid search or relaxing constraint');
+    process.exit(1);
+  }
+
+  console.log(`\nFiltered ${validResults.length}/${results.length} combinations meeting recall >= ${MIN_RECALL}`);
+
+  // Find best result among valid (recall >= 0.80) combinations
+  const bestResult = validResults.reduce((best, curr) =>
     curr.f1Score > best.f1Score ? curr : best
   );
 

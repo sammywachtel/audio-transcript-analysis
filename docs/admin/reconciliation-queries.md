@@ -146,7 +146,92 @@ db.collection('conversations')
 - 1-5 seconds: Acceptable for complex files
 - >5 seconds: May indicate many speakers or edge cases
 
-### 5. Archived Chunks Analysis
+### 5. Singleton Ratio Analysis (Embedding Reconciliation)
+
+Find conversations with high singleton ratios (potential over-fragmentation):
+
+```javascript
+// Query conversations with high singleton ratio
+db.collection('conversations')
+  .where('status', '==', 'complete')
+  .where('processingMode', '==', 'parallel')
+  .where('reconciliationMetadata.singletonRatio', '>', 0.40)
+  .orderBy('reconciliationMetadata.singletonRatio', 'desc')
+  .limit(20)
+  .get()
+  .then(snapshot => {
+    console.log('High singleton ratio conversations:');
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      const meta = data.reconciliationMetadata || {};
+      console.log({
+        id: doc.id,
+        singletonRatio: (meta.singletonRatio * 100).toFixed(1) + '%',
+        clusterCount: data.reconciliationDetails?.clusterCount || 0,
+        singletonCount: meta.singletonCount || 0,
+        estimatedSpeakers: meta.estimatedUniqueSpeakers || 0,
+        relaxationTriggered: meta.relaxationTriggered || false
+      });
+    });
+  });
+```
+
+**Interpreting results:**
+- Singleton ratio >40%: Warning threshold - adaptive relaxation should have triggered
+- Singleton ratio 30-40%: Borderline - monitor for patterns
+- Singleton ratio <30%: Healthy clustering
+
+### 6. Adaptive Relaxation Events
+
+Find conversations where adaptive threshold relaxation was triggered:
+
+```javascript
+// Query conversations with adaptive relaxation
+db.collection('conversations')
+  .where('status', '==', 'complete')
+  .where('reconciliationMetadata.relaxationTriggered', '==', true)
+  .orderBy('createdAt', 'desc')
+  .limit(50)
+  .get()
+  .then(snapshot => {
+    console.log('Adaptive relaxation events:');
+    const stats = { total: 0, iterationCounts: {} };
+
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      const meta = data.reconciliationMetadata || {};
+
+      stats.total++;
+      const iters = meta.relaxationIterations || 0;
+      stats.iterationCounts[iters] = (stats.iterationCounts[iters] || 0) + 1;
+
+      // Initial threshold = final + (iterations * step size of 0.05)
+      // This derives the initial from the final since we only store finalEdgeThreshold
+      const finalThreshold = meta.finalEdgeThreshold || 0.68;
+      const initialThreshold = finalThreshold + (iters * 0.05);
+
+      console.log({
+        id: doc.id,
+        iterations: iters,
+        initialThreshold: initialThreshold.toFixed(2),
+        finalThreshold: finalThreshold.toFixed(2),
+        singletonRatio: (meta.singletonRatio * 100).toFixed(1) + '%',
+        clusterCount: data.reconciliationDetails?.clusterCount || 0
+      });
+    });
+
+    console.log('\nRelaxation Statistics:', stats);
+  });
+```
+
+**Cloud Logging query for relaxation events:**
+```
+resource.type="cloud_function"
+jsonPayload.message=~"Triggering adaptive threshold relaxation"
+timestamp >= "2026-01-20T00:00:00Z"
+```
+
+### 7. Archived Chunks Analysis
 
 Query archived parallel chunks for post-mortem analysis:
 

@@ -744,17 +744,38 @@ Extended observability data for speaker reconciliation:
 
 ```typescript
 interface ReconciliationMetadata {
-  signalsUsed: string[];           // Matching signals used: ['name', 'topic', 'term']
+  signalsUsed: string[];           // Matching signals used: ['name', 'topic', 'term'] or ['embeddings']
   fallbackTriggered: boolean;      // True if fallback to sequential occurred
   speakerMatchConfidences: Array<{
     canonicalId: string;
     confidence: number;            // Per-speaker confidence (0-1)
   }>;
   reconciliationDurationMs?: number; // Processing time for reconciliation phase
+
+  // Singleton detection and adaptive relaxation (embedding reconciliation only)
+  singletonRatio?: number;         // Singleton clusters / total clusters (0-1)
+  singletonCount?: number;         // Number of singleton clusters
+  estimatedUniqueSpeakers?: number; // Heuristic estimate of unique speakers
+  relaxationTriggered?: boolean;   // Whether adaptive threshold relaxation was triggered
+  finalEdgeThreshold?: number;     // Final edge threshold after relaxation
+  relaxationIterations?: number;   // Number of relaxation iterations performed
 }
 ```
 
 **Purpose**: Provides performance and signal data for reconciliation monitoring. Helps identify slow reconciliations and track which signals contributed to matches.
+
+**Singleton Detection** (embedding reconciliation only):
+- **singletonRatio**: Percentage of clusters with only 1 member (indicates over-fragmentation if >40%)
+- **singletonCount**: Absolute count of singleton clusters
+- **estimatedUniqueSpeakers**: Conservative heuristic (max unique speakers in any chunk)
+
+**Adaptive Relaxation** (embedding reconciliation only):
+When singleton ratio >40%, the system automatically relaxes clustering thresholds to reduce over-fragmentation:
+- **relaxationTriggered**: Whether relaxation was needed
+- **finalEdgeThreshold**: Edge threshold after relaxation (starts at base, relaxes by 0.05 steps, floor: 0.45)
+- **relaxationIterations**: Number of relaxation loops (max: 3)
+
+These metrics enable operators to monitor clustering quality and identify conversations with potential speaker fragmentation issues.
 
 ### FallbackMetadata
 

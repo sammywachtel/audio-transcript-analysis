@@ -41,6 +41,18 @@ export interface AdaptiveThresholdConfig {
   mediumQualityCohesion: number;
   /** Cohesion for low-quality clusters (default 0.70) */
   lowQualityCohesion: number;
+
+  // Singleton ratio adaptive relaxation
+  /** Singleton ratio warning threshold (default 0.40) */
+  singletonWarningThreshold: number;
+  /** Singleton ratio target threshold (default 0.30) */
+  singletonTargetThreshold: number;
+  /** Maximum relaxation iterations (default 3) */
+  maxRelaxationIterations: number;
+  /** Threshold floor for relaxation (default 0.45) */
+  relaxationThresholdFloor: number;
+  /** Relaxation step size (default 0.05) */
+  relaxationStepSize: number;
 }
 
 export const DEFAULT_CONFIG: AdaptiveThresholdConfig = {
@@ -56,7 +68,13 @@ export const DEFAULT_CONFIG: AdaptiveThresholdConfig = {
   lowQualityThreshold: 0.50,
   highQualityCohesion: 0.55,
   mediumQualityCohesion: 0.60,
-  lowQualityCohesion: 0.70
+  lowQualityCohesion: 0.70,
+
+  singletonWarningThreshold: 0.40,
+  singletonTargetThreshold: 0.30,
+  maxRelaxationIterations: 3,
+  relaxationThresholdFloor: 0.45,
+  relaxationStepSize: 0.05
 };
 
 // ============================================================================

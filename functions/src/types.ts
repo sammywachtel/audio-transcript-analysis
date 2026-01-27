@@ -493,6 +493,18 @@ export interface ReconciliationMetadata {
   }>;
   /** Processing duration for reconciliation phase (ms) */
   reconciliationDurationMs?: number;
+  /** Singleton ratio: singleton clusters / total clusters (embedding reconciliation) */
+  singletonRatio?: number;
+  /** Number of singleton clusters (embedding reconciliation) */
+  singletonCount?: number;
+  /** Estimated unique speakers (heuristic from chunk artifacts) */
+  estimatedUniqueSpeakers?: number;
+  /** Whether adaptive relaxation was triggered to reduce over-fragmentation */
+  relaxationTriggered?: boolean;
+  /** Final edge threshold after relaxation (if triggered) */
+  finalEdgeThreshold?: number;
+  /** Number of relaxation iterations performed */
+  relaxationIterations?: number;
 }
 
 // =============================================================================

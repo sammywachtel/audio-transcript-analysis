@@ -259,6 +259,13 @@ export interface ReconciliationMetrics {
   hasWarning: boolean;
   rolloutPercentage: number;
   flagEnabled: boolean;
+  // Singleton detection and adaptive relaxation metrics
+  singletonRatio?: number;
+  singletonCount?: number;
+  estimatedUniqueSpeakers?: number;
+  relaxationTriggered?: boolean;
+  finalEdgeThreshold?: number;
+  relaxationIterations?: number;
 }
 
 /**
