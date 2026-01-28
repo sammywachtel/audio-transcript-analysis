@@ -1,5 +1,21 @@
 # What's New
 
+## Version 2.6.0 - January 28, 2026
+
+### ✨ Smarter Speaker Identification
+
+**Names Assigned from Conversation Context**
+- When someone says "I'm Chris" or "My name is Alex," they're now correctly labeled with that name
+- The system also picks up names from how people address each other ("Thanks, Mike")
+- Names are only assigned when the evidence is strong—uncertain cases keep their role labels (Host, Guest, etc.)
+
+**Fewer Duplicate Speakers**
+- Improved detection of when the same speaker appears across different parts of a long recording
+- The system now automatically adjusts when it detects too many speaker fragments, merging them more aggressively
+- Better calibration means fewer cases where one person is split into multiple speaker IDs
+
+---
+
 ## Version 2.5.1-beta.2 - January 25, 2026
 
 ### 🔧 Behind the Scenes
