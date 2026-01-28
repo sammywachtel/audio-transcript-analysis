@@ -384,3 +384,33 @@ export interface ReconciliationMetadata {
   /** Processing duration for reconciliation phase (ms) */
   reconciliationDurationMs?: number;
 }
+
+// =============================================================================
+// Speaker Correction Types (Manual Merge Feature)
+// =============================================================================
+
+/**
+ * Type of speaker correction operation.
+ * Currently only 'merge' is supported - future: 'split', 'rename', etc.
+ */
+export type SpeakerCorrectionType = 'merge';
+
+/**
+ * User-initiated speaker correction record.
+ * Stored in conversations/{id}/speakerCorrections subcollection.
+ * Applied at read-time to derive corrected speaker list and segment assignments.
+ */
+export interface SpeakerCorrection {
+  /** Unique ID for this correction */
+  correctionId: string;
+  /** Type of correction */
+  type: SpeakerCorrectionType;
+  /** Speaker ID being merged away (will be removed from speaker list) */
+  sourceSpeakerId: string;
+  /** Speaker ID to merge into (all source segments reassigned to this) */
+  targetSpeakerId: string;
+  /** When this correction was created (ISO timestamp) */
+  createdAt: string;
+  /** User who created this correction (for verification) */
+  userId: string;
+}

@@ -8,11 +8,13 @@ import { useAutoScroll } from '../hooks/useAutoScroll';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { useChat } from '../hooks/useChat';
 import { useChatHistory } from '../hooks/useChatHistory';
+import { useSpeakerCorrections } from '../hooks/useSpeakerCorrections';
 import { ViewerHeader } from '../components/viewer/ViewerHeader';
 import { TranscriptView } from '../components/viewer/TranscriptView';
 import { Sidebar } from '../components/viewer/Sidebar';
 import { AudioPlayer } from '../components/viewer/AudioPlayer';
 import { RenameSpeakerModal } from '../components/viewer/RenameSpeakerModal';
+import { SpeakerMergeModal } from '../components/viewer/SpeakerMergeModal';
 import { EditTitleModal } from '../components/viewer/EditTitleModal';
 import { KeyboardShortcutsModal } from '../components/viewer/KeyboardShortcutsModal';
 import { exportTranscript } from '../utils/exportTranscript';
@@ -49,6 +51,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
 
   const [conversation, setConversation] = useState(activeConversation);
   const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
+  const [mergingSpeakerId, setMergingSpeakerId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
@@ -184,6 +187,22 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
     messages: chatMessages
   });
 
+  // Speaker corrections (manual merge)
+  const {
+    correctedSpeakers,
+    correctedSegments,
+    canUndo: canUndoMerge,
+    mergeSpeakers,
+    undoLastMerge,
+    isLoading: _mergeIsLoading,
+    error: _mergeError,
+    clearError: _mergeClearError
+  } = useSpeakerCorrections({
+    conversationId: conversation.conversationId,
+    originalSpeakers: conversation.speakers,
+    originalSegments: conversation.segments
+  });
+
   /**
    * Handle speaker rename
    */
@@ -302,6 +321,40 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
     setHighlightedSegmentId(segmentId);
   }, []);
 
+  /**
+   * Handle speaker merge - open modal to select target
+   */
+  const handleMergeSpeaker = useCallback((speakerId: string) => {
+    setMergingSpeakerId(speakerId);
+  }, []);
+
+  /**
+   * Confirm merge - call Cloud Function via hook
+   */
+  const handleConfirmMerge = useCallback(async (targetSpeakerId: string) => {
+    if (!mergingSpeakerId) return;
+
+    try {
+      await mergeSpeakers(mergingSpeakerId, targetSpeakerId);
+      setMergingSpeakerId(null); // Close modal on success
+    } catch (err) {
+      // Error is handled by the hook and exposed via mergeError
+      console.error('[Viewer] Merge failed:', err);
+    }
+  }, [mergingSpeakerId, mergeSpeakers]);
+
+  /**
+   * Handle undo merge
+   */
+  const handleUndoMerge = useCallback(async () => {
+    try {
+      await undoLastMerge();
+    } catch (err) {
+      // Error is handled by the hook and exposed via mergeError
+      console.error('[Viewer] Undo merge failed:', err);
+    }
+  }, [undoLastMerge]);
+
   return (
     <div className="flex flex-col h-screen-safe bg-slate-50">
       {/* Header */}
@@ -375,9 +428,13 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
 
       {/* Main Content Split */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Transcript Area */}
+        {/* Transcript Area - use corrected speakers/segments */}
         <TranscriptView
-          conversation={conversation}
+          conversation={{
+            ...conversation,
+            speakers: correctedSpeakers,
+            segments: correctedSegments
+          }}
           activeSegmentIndex={activeSegmentIndex}
           selectedTermId={selectedTermId}
           selectedPersonId={selectedPersonId}
@@ -389,7 +446,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
           onReassignSpeaker={handleReassignSpeaker}
         />
 
-        {/* Sidebar (Desktop) */}
+        {/* Sidebar (Desktop) - use corrected speakers */}
         <div className="hidden lg:block w-80 shrink-0 z-10 shadow-xl shadow-slate-200/50">
           <Sidebar
             terms={Object.values(conversation.terms)}
@@ -418,13 +475,17 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
             chatIsLoadingOlder={chatHistoryLoading}
             conversationTitle={conversation.title}
             conversationDurationMs={conversation.durationMs}
-            speakers={conversation.speakers}
+            speakers={correctedSpeakers}
             chatOnSeek={handleChatTimestampSeek}
             chatOnPlay={handleChatTimestampPlay}
             chatOnHighlight={handleChatTimestampHighlight}
             chatSuggestions={chatSuggestions}
             chatCumulativeCostUsd={chatCumulativeCostUsd}
             chatCostWarningLevel={chatCostWarningLevel}
+            // Speaker corrections
+            canUndoMerge={canUndoMerge}
+            onUndoMerge={handleUndoMerge}
+            onMergeSpeaker={handleMergeSpeaker}
           />
         </div>
 
@@ -489,7 +550,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
                 chatIsLoadingOlder={chatHistoryLoading}
                 conversationTitle={conversation.title}
                 conversationDurationMs={conversation.durationMs}
-                speakers={conversation.speakers}
+                speakers={correctedSpeakers}
                 chatOnSeek={(timeMs) => {
                   handleChatTimestampSeek(timeMs);
                   setMobileChatOpen(false); // Close chat when seeking
@@ -499,6 +560,10 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
                 chatSuggestions={chatSuggestions}
                 chatCumulativeCostUsd={chatCumulativeCostUsd}
                 chatCostWarningLevel={chatCostWarningLevel}
+                // Speaker corrections
+                canUndoMerge={canUndoMerge}
+                onUndoMerge={handleUndoMerge}
+                onMergeSpeaker={handleMergeSpeaker}
                 defaultTab="context"
               />
             </div>
@@ -546,6 +611,16 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
           initialName={conversation.speakers[editingSpeakerId].displayName}
           onClose={() => setEditingSpeakerId(null)}
           onSave={saveSpeakerName}
+        />
+      )}
+
+      {/* Speaker Merge Modal */}
+      {mergingSpeakerId && (
+        <SpeakerMergeModal
+          sourceSpeaker={correctedSpeakers[mergingSpeakerId]}
+          targetSpeakers={Object.values(correctedSpeakers).filter(s => s.speakerId !== mergingSpeakerId)}
+          onClose={() => setMergingSpeakerId(null)}
+          onConfirm={handleConfirmMerge}
         />
       )}
 
