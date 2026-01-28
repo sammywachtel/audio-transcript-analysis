@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { Term, Person, Speaker } from '@/config/types';
 import { cn } from '@/utils';
-import { BookOpen, Search, Users, User, StickyNote, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react';
+import { BookOpen, Search, Users, User, StickyNote, ChevronLeft, ChevronRight, MessageSquare, Mic, Undo2 } from 'lucide-react';
 import { ChatSidebar } from './ChatSidebar';
 import { ChatHistoryMessage } from '@/services/chatHistoryService';
+import { Button } from '../Button';
 
 interface SidebarProps {
   terms: Term[];
@@ -40,8 +41,12 @@ interface SidebarProps {
   chatSuggestions?: string[];
   chatCumulativeCostUsd?: number;
   chatCostWarningLevel?: 'none' | 'primary' | 'escalated';
+  // Speaker corrections props
+  canUndoMerge?: boolean;
+  onUndoMerge?: () => void;
+  onMergeSpeaker?: (speakerId: string) => void;
   // Mobile support
-  defaultTab?: 'context' | 'people' | 'chat';
+  defaultTab?: 'context' | 'people' | 'speakers' | 'chat';
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -78,9 +83,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   chatSuggestions = [],
   chatCumulativeCostUsd = 0,
   chatCostWarningLevel = 'none',
+  // Speaker corrections
+  canUndoMerge = false,
+  onUndoMerge = () => {},
+  onMergeSpeaker = () => {},
   defaultTab = 'context'
 }) => {
-  const [activeTab, setActiveTab] = useState<'context' | 'people' | 'chat'>(defaultTab);
+  const [activeTab, setActiveTab] = useState<'context' | 'people' | 'speakers' | 'chat'>(defaultTab);
   const [searchTerm, setSearchTerm] = useState('');
 
   // Filtering based on active tab
@@ -97,8 +106,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   return (
     <div className="h-full flex flex-col bg-white border-l border-slate-200">
 
-      {/* Search Header (hide for chat tab) */}
-      {activeTab !== 'chat' && (
+      {/* Search Header (hide for chat and speakers tabs) */}
+      {activeTab !== 'chat' && activeTab !== 'speakers' && (
         <div className="p-4 border-b border-slate-200 bg-slate-50/50">
           <div className="relative mb-3">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
@@ -112,41 +121,44 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
 
           {/* Tabs */}
-          <div className="flex p-1 bg-slate-200/60 rounded-lg">
+          <div className="grid grid-cols-4 p-1 bg-slate-200/60 rounded-lg gap-1">
             <button
               onClick={() => setActiveTab('context')}
               className={cn(
-                "flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all",
+                "flex items-center justify-center gap-1 py-1.5 text-xs font-medium rounded-md transition-all",
                 activeTab === 'context'
                   ? "bg-white text-blue-600 shadow-sm"
                   : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
               )}
             >
               <BookOpen size={14} />
-              Context
+              <span className="hidden sm:inline">Context</span>
             </button>
             <button
               onClick={() => setActiveTab('people')}
               className={cn(
-                "flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all",
+                "flex items-center justify-center gap-1 py-1.5 text-xs font-medium rounded-md transition-all",
                 activeTab === 'people'
                   ? "bg-white text-blue-600 shadow-sm"
                   : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
               )}
             >
               <Users size={14} />
-              People
+              <span className="hidden sm:inline">People</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('speakers')}
+              className="flex items-center justify-center gap-1 py-1.5 text-xs font-medium rounded-md transition-all text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
+            >
+              <Mic size={14} />
+              <span className="hidden sm:inline">Speakers</span>
             </button>
             <button
               onClick={() => setActiveTab('chat')}
-              className={cn(
-                "flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all relative",
-                // Note: This renders only when activeTab !== 'chat', so chat tab is never active here
-                "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
-              )}
+              className="flex items-center justify-center gap-1 py-1.5 text-xs font-medium rounded-md transition-all relative text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
             >
               <MessageSquare size={14} />
-              Chat
+              <span className="hidden sm:inline">Chat</span>
               {chatMessageCount > 0 && (
                 <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-600 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
                   {chatMessageCount > 9 ? '9+' : chatMessageCount}
@@ -157,39 +169,53 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
 
-      {/* Tab Header for Chat (replaces search header when chat active) */}
-      {activeTab === 'chat' && (
+      {/* Tab Header for Chat and Speakers (replaces search header when active) */}
+      {(activeTab === 'chat' || activeTab === 'speakers') && (
         <div className="p-4 border-b border-slate-200 bg-slate-50/50">
-          <div className="flex p-1 bg-slate-200/60 rounded-lg">
+          <div className="grid grid-cols-4 p-1 bg-slate-200/60 rounded-lg gap-1">
             <button
               onClick={() => setActiveTab('context')}
               className={cn(
-                "flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all",
+                "flex items-center justify-center gap-1 py-1.5 text-xs font-medium rounded-md transition-all",
                 "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
               )}
             >
               <BookOpen size={14} />
-              Context
+              <span className="hidden sm:inline">Context</span>
             </button>
             <button
               onClick={() => setActiveTab('people')}
               className={cn(
-                "flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all",
+                "flex items-center justify-center gap-1 py-1.5 text-xs font-medium rounded-md transition-all",
                 "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
               )}
             >
               <Users size={14} />
-              People
+              <span className="hidden sm:inline">People</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('speakers')}
+              className={cn(
+                "flex items-center justify-center gap-1 py-1.5 text-xs font-medium rounded-md transition-all",
+                activeTab === 'speakers'
+                  ? "bg-white text-blue-600 shadow-sm"
+                  : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
+              )}
+            >
+              <Mic size={14} />
+              <span className="hidden sm:inline">Speakers</span>
             </button>
             <button
               onClick={() => setActiveTab('chat')}
               className={cn(
-                "flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all relative",
-                "bg-white text-blue-600 shadow-sm"
+                "flex items-center justify-center gap-1 py-1.5 text-xs font-medium rounded-md transition-all relative",
+                activeTab === 'chat'
+                  ? "bg-white text-blue-600 shadow-sm"
+                  : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
               )}
             >
               <MessageSquare size={14} />
-              Chat
+              <span className="hidden sm:inline">Chat</span>
               {chatMessageCount > 0 && (
                 <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-600 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
                   {chatMessageCount > 9 ? '9+' : chatMessageCount}
@@ -229,6 +255,40 @@ export const Sidebar: React.FC<SidebarProps> = ({
             cumulativeCostUsd={chatCumulativeCostUsd}
             costWarningLevel={chatCostWarningLevel}
           />
+        </div>
+      ) : activeTab === 'speakers' ? (
+        // --- Speakers Tab ---
+        <div className="flex-1 flex flex-col">
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {Object.values(speakers).length === 0 ? (
+              <div className="text-center text-slate-500 py-8">
+                <Mic size={32} className="mx-auto mb-2 text-slate-300" />
+                <p className="text-sm">No speakers identified.</p>
+              </div>
+            ) : (
+              Object.values(speakers).map(speaker => (
+                <SpeakerCard
+                  key={speaker.speakerId}
+                  speaker={speaker}
+                  onMerge={() => onMergeSpeaker(speaker.speakerId)}
+                />
+              ))
+            )}
+          </div>
+
+          {/* Undo Button at bottom */}
+          {canUndoMerge && (
+            <div className="p-4 border-t border-slate-200 bg-slate-50/50">
+              <Button
+                variant="outline"
+                onClick={onUndoMerge}
+                className="w-full flex items-center justify-center gap-2"
+              >
+                <Undo2 size={14} />
+                Undo Last Merge
+              </Button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
@@ -407,6 +467,61 @@ const PersonCard: React.FC<{
           className="w-full text-xs pl-6 p-2 bg-slate-50 border border-slate-100 rounded focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-300 resize-none text-slate-900 placeholder:text-slate-400"
           rows={2}
         />
+      </div>
+    </div>
+  );
+};
+
+// Sub-component for Speaker Card with merge button
+const SpeakerCard: React.FC<{
+  speaker: Speaker;
+  onMerge: () => void;
+}> = ({ speaker, onMerge }) => {
+  // Get color class for speaker badge
+  const getSpeakerColorClass = (colorIndex: number): string => {
+    const colors = [
+      'bg-blue-100 text-blue-800 border-blue-200',
+      'bg-purple-100 text-purple-800 border-purple-200',
+      'bg-green-100 text-green-800 border-green-200',
+      'bg-orange-100 text-orange-800 border-orange-200',
+      'bg-pink-100 text-pink-800 border-pink-200',
+      'bg-teal-100 text-teal-800 border-teal-200',
+      'bg-yellow-100 text-yellow-800 border-yellow-200',
+      'bg-red-100 text-red-800 border-red-200'
+    ];
+    return colors[colorIndex % colors.length];
+  };
+
+  return (
+    <div className="p-3 rounded-lg border border-slate-200 bg-white shadow-sm hover:shadow-md transition-all">
+      <div className="flex justify-between items-center">
+        {/* Speaker info */}
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 shrink-0">
+            <Mic size={16} />
+          </div>
+          <div>
+            <div className={cn(
+              "px-2 py-1 rounded text-xs font-medium border",
+              getSpeakerColorClass(speaker.colorIndex)
+            )}>
+              {speaker.displayName}
+            </div>
+          </div>
+        </div>
+
+        {/* Merge button */}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={(e) => {
+            e.stopPropagation();
+            onMerge();
+          }}
+          className="text-xs"
+        >
+          Merge
+        </Button>
       </div>
     </div>
   );

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Manual Speaker Merge** - Correct diarization errors by merging speakers in the sidebar
+  - New "Speakers" tab in Viewer sidebar shows all speakers with merge controls
+  - 3-click workflow: Click "Merge" on source speaker → Select target → Confirm
+  - Corrections persist via Firestore subcollection using apply-on-read pattern
+  - "Undo Last Merge" button reverses most recent correction
+  - Original transcript data remains immutable (corrections applied at render time)
+
 ## [2.6.0] - 2026-01-28
 
 ### Added

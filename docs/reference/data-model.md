@@ -107,6 +107,49 @@ interface ChatHistoryDoc {
 
 **Security**: Users can only access chat history for conversations they own. Messages are immutable (no updates allowed).
 
+#### conversations/{conversationId}/speakerCorrections (subcollection)
+
+Manual speaker merge operations. Users can merge incorrectly diarized speakers from the UI (e.g., "Speaker 2" is actually "Tom"). Corrections are applied at read time - original data remains immutable.
+
+**Path**: `conversations/{conversationId}/speakerCorrections/{correctionId}`
+
+```typescript
+interface SpeakerCorrectionDoc {
+  type: 'merge';                 // Correction type (future: 'split', 'rename', etc.)
+  sourceSpeakerId: string;       // Speaker being merged away (removed from speaker list)
+  targetSpeakerId: string;       // Speaker to merge into (all source segments reassigned)
+  userId: string;                // User who created the correction
+  createdAt: Timestamp;          // Server timestamp
+}
+```
+
+**Apply-on-Read Pattern**:
+- Corrections are NOT applied to the stored conversation data
+- Client applies corrections in order when loading conversation:
+  1. Load original speakers and segments from conversation document
+  2. Load corrections from subcollection (ordered by createdAt)
+  3. For each merge correction:
+     - Remove sourceSpeakerId from speaker list
+     - Remap all segments from sourceSpeakerId to targetSpeakerId
+  4. Display corrected data to user
+
+**Undo Support**:
+- Delete the most recent correction document to undo
+- Client re-applies remaining corrections on next read
+- Full correction history is preserved (cannot undo individual merges from middle of sequence)
+
+**Features**:
+- Real-time synchronization (Firestore listener)
+- Persists across reloads and devices
+- 3-click workflow: Click merge button → Select target speaker → Confirm
+- Non-destructive (original data unchanged)
+- Audit trail for debugging diarization issues
+
+**Security**:
+- Users can only read/delete corrections for conversations they own
+- Corrections are created via Cloud Function (not directly by client)
+- Immutable once created (no updates allowed)
+
 ### users
 
 User profile, preferences, and admin status.
