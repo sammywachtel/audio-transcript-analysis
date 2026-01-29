@@ -391,9 +391,10 @@ export interface ReconciliationMetadata {
 
 /**
  * Type of speaker correction operation.
- * Currently only 'merge' is supported - future: 'split', 'rename', etc.
+ * - 'merge': Merge all segments from one speaker into another
+ * - 'reassign': Reassign specific segments to a different speaker
  */
-export type SpeakerCorrectionType = 'merge';
+export type SpeakerCorrectionType = 'merge' | 'reassign';
 
 /**
  * User-initiated speaker correction record.
@@ -405,10 +406,21 @@ export interface SpeakerCorrection {
   correctionId: string;
   /** Type of correction */
   type: SpeakerCorrectionType;
+
+  // Fields for 'merge' corrections
   /** Speaker ID being merged away (will be removed from speaker list) */
-  sourceSpeakerId: string;
+  sourceSpeakerId?: string;
   /** Speaker ID to merge into (all source segments reassigned to this) */
-  targetSpeakerId: string;
+  targetSpeakerId?: string;
+
+  // Fields for 'reassign' corrections
+  /** Segment IDs to reassign (reassign type only) */
+  segmentIds?: string[];
+  /** Speaker ID segments are being moved from (reassign type only) */
+  fromSpeakerId?: string;
+  /** Speaker ID segments are being moved to (reassign type only) */
+  toSpeakerId?: string;
+
   /** When this correction was created (ISO timestamp) */
   createdAt: string;
   /** User who created this correction (for verification) */

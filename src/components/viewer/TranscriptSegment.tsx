@@ -14,6 +14,7 @@ interface TranscriptSegmentProps {
   personOccurrences?: { start: number; end: number; personId: string }[];
   isActive: boolean;
   isHighlighted?: boolean; // True when segment is highlighted from timestamp click
+  isSelected?: boolean; // True when segment is part of multi-select
   showSpeakerChange: boolean; // True when speaker changes from previous segment
   activeTermId?: string;
   activePersonId?: string;
@@ -21,6 +22,7 @@ interface TranscriptSegmentProps {
   onTermClick: (termId: string) => void;
   onRenameSpeaker: (speakerId: string) => void;
   onReassignSpeaker?: (segmentId: string, newSpeakerId: string) => void;
+  onSegmentClick?: (shiftKey: boolean) => void;
 }
 
 export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
@@ -31,13 +33,15 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
   personOccurrences = [],
   isActive,
   isHighlighted = false,
+  isSelected = false,
   showSpeakerChange,
   activeTermId,
   activePersonId,
   onSeek,
   onTermClick,
   onRenameSpeaker,
-  onReassignSpeaker
+  onReassignSpeaker,
+  onSegmentClick
 }) => {
   // State for speaker change header dropdown (bulk reassignment)
   const [showHeaderDropdown, setShowHeaderDropdown] = useState(false);
@@ -224,6 +228,19 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
       {/* Segment with comfortable spacing */}
       <div
         {...(onReassignSpeaker && allSpeakers.length > 1 ? longPressHandlers : {})}
+        onClick={(e) => {
+          // Handle selection with Shift key
+          if (onSegmentClick && e.shiftKey) {
+            e.preventDefault();
+            onSegmentClick(true);
+          } else if (onSegmentClick && !e.shiftKey && !isActive) {
+            // Regular click when not active - toggle selection
+            onSegmentClick(false);
+          } else if (!e.shiftKey) {
+            // No selection handler or active segment - seek to timestamp
+            onSeek(segment.startMs + 1);
+          }
+        }}
         className={cn(
           "group relative flex items-start gap-3 px-3 border-l-[3px] transition-all",
           // Tight vertical spacing - segments flow together
@@ -231,9 +248,12 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
           speakerBorderColor,
           isActive && "bg-blue-50/80 border border-blue-200 shadow-sm",
           isHighlighted && "bg-yellow-50 border border-yellow-300 shadow-md ring-1 ring-yellow-200",
-          !isActive && !isHighlighted && "hover:bg-slate-50/50",
+          isSelected && "bg-purple-50 border border-purple-300 ring-1 ring-purple-200",
+          !isActive && !isHighlighted && !isSelected && "hover:bg-slate-50/50",
           // Long-press visual feedback
-          longPressHandlers.isLongPressing && onReassignSpeaker && allSpeakers.length > 1 && "scale-[1.02] opacity-95 cursor-context-menu"
+          longPressHandlers.isLongPressing && onReassignSpeaker && allSpeakers.length > 1 && "scale-[1.02] opacity-95 cursor-context-menu",
+          // Selection cursor
+          onSegmentClick && "cursor-pointer"
         )}
       >
         {/* Timestamp Button - pill-shaped with proper touch targets */}

@@ -38,6 +38,8 @@ interface UseSpeakerCorrectionsReturn {
   canUndo: boolean;
   /** Merge two speakers (calls Cloud Function) */
   mergeSpeakers: (sourceSpeakerId: string, targetSpeakerId: string) => Promise<void>;
+  /** Reassign specific segments to a different speaker (calls Cloud Function) */
+  reassignSegments: (segmentIds: string[], toSpeakerId: string) => Promise<void>;
   /** Undo the most recent merge */
   undoLastMerge: () => Promise<void>;
   /** Loading state for merge operations */
@@ -85,8 +87,13 @@ export function useSpeakerCorrections({
           return {
             correctionId: doc.id,
             type: data.type,
+            // Merge correction fields
             sourceSpeakerId: data.sourceSpeakerId,
             targetSpeakerId: data.targetSpeakerId,
+            // Reassign correction fields
+            segmentIds: data.segmentIds,
+            fromSpeakerId: data.fromSpeakerId,
+            toSpeakerId: data.toSpeakerId,
             createdAt: data.createdAt.toDate().toISOString(),
             userId: data.userId
           };
@@ -117,6 +124,8 @@ export function useSpeakerCorrections({
       if (correction.type === 'merge') {
         const { sourceSpeakerId, targetSpeakerId } = correction;
 
+        if (!sourceSpeakerId || !targetSpeakerId) continue;
+
         // Remove source speaker from list
         delete speakers[sourceSpeakerId];
 
@@ -126,6 +135,26 @@ export function useSpeakerCorrections({
             ? { ...seg, speakerId: targetSpeakerId }
             : seg
         );
+      } else if (correction.type === 'reassign') {
+        const { segmentIds, toSpeakerId } = correction;
+
+        if (!segmentIds || !toSpeakerId) continue;
+
+        // Reassign only the specified segments to the new speaker
+        const segmentIdSet = new Set(segmentIds);
+        segments = segments.map(seg =>
+          segmentIdSet.has(seg.segmentId)
+            ? { ...seg, speakerId: toSpeakerId }
+            : seg
+        );
+      }
+    }
+
+    // Prune speakers with zero remaining segments
+    const speakersWithSegments = new Set(segments.map(seg => seg.speakerId));
+    for (const speakerId in speakers) {
+      if (!speakersWithSegments.has(speakerId)) {
+        delete speakers[speakerId];
       }
     }
 
@@ -201,6 +230,34 @@ export function useSpeakerCorrections({
   }, [conversationId, corrections, canUndo, isLoading]);
 
   /**
+   * Reassign specific segments to a different speaker by calling Cloud Function.
+   * The function writes to Firestore, and our listener picks it up automatically.
+   */
+  const reassignSegments = useCallback(async (segmentIds: string[], toSpeakerId: string) => {
+    if (isLoading) return;
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const reassignSegmentsFunction = httpsCallable(functions, 'reassignSegments');
+      await reassignSegmentsFunction({
+        conversationId,
+        segmentIds,
+        toSpeakerId
+      });
+
+      // Success - the onSnapshot listener will update our state automatically
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to reassign segments';
+      setError(errorMessage);
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [conversationId, isLoading]);
+
+  /**
    * Clear error state
    */
   const clearError = useCallback(() => {
@@ -212,6 +269,7 @@ export function useSpeakerCorrections({
     correctedSegments,
     canUndo,
     mergeSpeakers,
+    reassignSegments,
     undoLastMerge,
     isLoading,
     error,
