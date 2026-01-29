@@ -109,15 +109,23 @@ interface ChatHistoryDoc {
 
 #### conversations/{conversationId}/speakerCorrections (subcollection)
 
-Manual speaker merge operations. Users can merge incorrectly diarized speakers from the UI (e.g., "Speaker 2" is actually "Tom"). Corrections are applied at read time - original data remains immutable.
+Manual speaker corrections. Users can merge incorrectly diarized speakers or reassign individual segments from the UI. Corrections are applied at read time - original data remains immutable.
 
 **Path**: `conversations/{conversationId}/speakerCorrections/{correctionId}`
 
 ```typescript
 interface SpeakerCorrectionDoc {
-  type: 'merge';                 // Correction type (future: 'split', 'rename', etc.)
-  sourceSpeakerId: string;       // Speaker being merged away (removed from speaker list)
-  targetSpeakerId: string;       // Speaker to merge into (all source segments reassigned)
+  type: 'merge' | 'reassign';    // Correction type
+
+  // For 'merge' corrections
+  sourceSpeakerId?: string;      // Speaker being merged away (removed from speaker list)
+  targetSpeakerId?: string;      // Speaker to merge into (all source segments reassigned)
+
+  // For 'reassign' corrections
+  segmentIds?: string[];         // Specific segments to reassign
+  fromSpeakerId?: string;        // Speaker segments are being moved from
+  toSpeakerId?: string;          // Speaker segments are being moved to
+
   userId: string;                // User who created the correction
   createdAt: Timestamp;          // Server timestamp
 }
@@ -131,23 +139,29 @@ interface SpeakerCorrectionDoc {
   3. For each merge correction:
      - Remove sourceSpeakerId from speaker list
      - Remap all segments from sourceSpeakerId to targetSpeakerId
-  4. Display corrected data to user
+  4. For each reassign correction:
+     - Reassign specified segmentIds to toSpeakerId
+  5. Remove speakers with zero remaining segments from speaker list
+  6. Display corrected data to user
 
 **Undo Support**:
 - Delete the most recent correction document to undo
 - Client re-applies remaining corrections on next read
-- Full correction history is preserved (cannot undo individual merges from middle of sequence)
+- Full correction history is preserved (cannot undo individual corrections from middle of sequence)
 
 **Features**:
 - Real-time synchronization (Firestore listener)
 - Persists across reloads and devices
-- 3-click workflow: Click merge button → Select target speaker → Confirm
+- **Merge workflow**: Click merge button → Select target speaker → Confirm
+- **Reassign workflow (single segment)**: Right-click/long-press segment → Select target speaker
+- **Reassign workflow (multiple segments)**: Shift+Click to select range → Choose target speaker from floating bar
 - Non-destructive (original data unchanged)
 - Audit trail for debugging diarization issues
 
 **Security**:
 - Users can only read/delete corrections for conversations they own
 - Corrections are created via Cloud Function (not directly by client)
+- Cloud Function validates all segments belong to same speaker before reassigning
 - Immutable once created (no updates allowed)
 
 ### users

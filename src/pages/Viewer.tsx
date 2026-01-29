@@ -187,12 +187,13 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
     messages: chatMessages
   });
 
-  // Speaker corrections (manual merge)
+  // Speaker corrections (manual merge and reassignment)
   const {
     correctedSpeakers,
     correctedSegments,
     canUndo: canUndoMerge,
     mergeSpeakers,
+    reassignSegments,
     undoLastMerge,
     isLoading: _mergeIsLoading,
     error: _mergeError,
@@ -211,30 +212,38 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
   }, []);
 
   /**
-   * Handle segment speaker reassignment
-   * Allows user to change which speaker a specific segment is attributed to
+   * Handle segment speaker reassignment (single segment)
+   * Uses the apply-on-read correction pattern via Cloud Function
    */
-  const handleReassignSpeaker = useCallback((segmentId: string, newSpeakerId: string) => {
-    const updatedSegments = conversation.segments.map(seg =>
-      seg.segmentId === segmentId
-        ? { ...seg, speakerId: newSpeakerId }
-        : seg
-    );
+  const handleReassignSpeaker = useCallback(async (segmentId: string, newSpeakerId: string) => {
+    try {
+      await reassignSegments([segmentId], newSpeakerId);
+      console.log('[Viewer] Reassigned segment speaker:', {
+        segmentId,
+        newSpeakerId,
+        newSpeakerName: conversation.speakers[newSpeakerId]?.displayName
+      });
+    } catch (err) {
+      console.error('[Viewer] Reassignment failed:', err);
+    }
+  }, [reassignSegments, conversation.speakers]);
 
-    const updatedConversation = {
-      ...conversation,
-      segments: updatedSegments
-    };
-
-    setConversation(updatedConversation);
-    updateConversation(updatedConversation);
-
-    console.log('[Viewer] Reassigned segment speaker:', {
-      segmentId,
-      newSpeakerId,
-      newSpeakerName: conversation.speakers[newSpeakerId]?.displayName
-    });
-  }, [conversation, updateConversation]);
+  /**
+   * Handle bulk segment reassignment (multiple segments)
+   * Uses the apply-on-read correction pattern via Cloud Function
+   */
+  const handleReassignSegments = useCallback(async (segmentIds: string[], toSpeakerId: string) => {
+    try {
+      await reassignSegments(segmentIds, toSpeakerId);
+      console.log('[Viewer] Bulk reassigned segments:', {
+        segmentCount: segmentIds.length,
+        toSpeakerId,
+        toSpeakerName: conversation.speakers[toSpeakerId]?.displayName
+      });
+    } catch (err) {
+      console.error('[Viewer] Bulk reassignment failed:', err);
+    }
+  }, [reassignSegments, conversation.speakers]);
 
   const saveSpeakerName = useCallback((newName: string) => {
     if (editingSpeakerId && newName.trim()) {
@@ -444,6 +453,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
           onTermClick={handleTermClickInTranscript}
           onRenameSpeaker={handleRenameSpeaker}
           onReassignSpeaker={handleReassignSpeaker}
+          onReassignSegments={handleReassignSegments}
         />
 
         {/* Sidebar (Desktop) - use corrected speakers */}

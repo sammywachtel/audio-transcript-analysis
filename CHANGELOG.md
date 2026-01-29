@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Corrections persist via Firestore subcollection using apply-on-read pattern
   - "Undo Last Merge" button reverses most recent correction
   - Original transcript data remains immutable (corrections applied at render time)
+- **Segment Speaker Reassignment** - Reassign individual or multiple segments to different speakers
+  - Right-click (or long-press on mobile) any segment to reassign via context menu
+  - Shift+Click to select multiple segments, then use floating action bar to bulk reassign
+  - Reassignments persist as correction records and apply on read (original data unchanged)
+  - Speakers with zero remaining segments are automatically hidden from the speaker list
 
 ## [2.6.0] - 2026-01-28
 
