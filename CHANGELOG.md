@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-01-30
+
+### Fixed
+- **Firebase Deploy Permission** - Added missing `serviceusage.serviceUsageConsumer` IAM role to deployment service account
+  - Fixes 403 error when Firebase CLI checks API enablement during deploy
+  - Run `./scripts/gcp-setup.sh` to apply the new permission to existing projects
+- **Export Reflects Speaker Corrections** - Downloaded transcripts now include renamed/merged speakers
+  - Previously, exports used original speaker names even after manual corrections
+  - Now exports use the same corrected speaker names shown in the viewer
+
 ## [2.7.0] - 2026-01-30
 
 ### Added
