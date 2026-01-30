@@ -423,7 +423,11 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
         onBack={onBack}
         onStatsClick={onStatsClick}
         onEditTitle={() => setEditingTitle(true)}
-        onExport={() => exportTranscript(conversation)}
+        onExport={() => exportTranscript({
+          ...conversation,
+          speakers: correctedSpeakers,
+          segments: correctedSegments
+        })}
         driftCorrectionApplied={driftCorrectionApplied}
         driftRatio={driftRatio}
         driftMs={driftMs}
