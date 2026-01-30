@@ -64,7 +64,7 @@ export { processTranscription } from './processTranscription';
 export { processMerge, processReprocessing } from './chunkMerge';
 export { chatWithConversation } from './chat';
 export { retryTranscription } from './retry';
-export { mergeSpeakers, reassignSegments } from './speakerCorrections';
+export { mergeSpeakers, reassignSegments, renameSpeaker, undoCorrection } from './speakerCorrections';
 
 // Export stats tracking triggers
 export { onConversationCreated, onConversationDeleted } from './statsTriggers';

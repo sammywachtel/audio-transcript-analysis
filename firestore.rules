@@ -77,21 +77,22 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
       }
 
-      // Speaker corrections subcollection - manual speaker merge records
+      // Speaker corrections subcollection - manual speaker merge/reassign/rename records
       match /speakerCorrections/{correctionId} {
         // Users can only read corrections for their own conversations
         allow read: if isAuthenticated()
           && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
 
-        // Cloud Functions create corrections (via mergeSpeakers callable)
+        // Cloud Functions create corrections (via callable functions)
         // Users cannot directly create via client SDK
         allow create: if false;
 
-        // Users can delete corrections from their own conversations (for undo)
+        // Users can delete corrections from their own conversations
+        // Note: Prefer undoCorrection callable which sets undoneAt to preserve audit trail
         allow delete: if isAuthenticated()
           && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
 
-        // Corrections are immutable once created (no updates)
+        // Client updates blocked - Cloud Functions (Admin SDK) can update for undo (sets undoneAt)
         allow update: if false;
       }
 

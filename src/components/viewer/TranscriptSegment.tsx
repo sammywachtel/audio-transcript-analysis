@@ -15,6 +15,7 @@ interface TranscriptSegmentProps {
   isActive: boolean;
   isHighlighted?: boolean; // True when segment is highlighted from timestamp click
   isSelected?: boolean; // True when segment is part of multi-select
+  isRecentlyReassigned?: boolean; // True when segment was just reassigned (cleared after 1.5s)
   showSpeakerChange: boolean; // True when speaker changes from previous segment
   activeTermId?: string;
   activePersonId?: string;
@@ -34,6 +35,7 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
   isActive,
   isHighlighted = false,
   isSelected = false,
+  isRecentlyReassigned = false,
   showSpeakerChange,
   activeTermId,
   activePersonId,
@@ -249,7 +251,8 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
           isActive && "bg-blue-50/80 border border-blue-200 shadow-sm",
           isHighlighted && "bg-yellow-50 border border-yellow-300 shadow-md ring-1 ring-yellow-200",
           isSelected && "bg-purple-50 border border-purple-300 ring-1 ring-purple-200",
-          !isActive && !isHighlighted && !isSelected && "hover:bg-slate-50/50",
+          isRecentlyReassigned && "bg-green-50 border border-green-300 ring-1 ring-green-200",
+          !isActive && !isHighlighted && !isSelected && !isRecentlyReassigned && "hover:bg-slate-50/50",
           // Long-press visual feedback
           longPressHandlers.isLongPressing && onReassignSpeaker && allSpeakers.length > 1 && "scale-[1.02] opacity-95 cursor-context-menu",
           // Selection cursor

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-01-30
+
 ### Added
 - **Manual Speaker Merge** - Correct diarization errors by merging speakers in the sidebar
   - New "Speakers" tab in Viewer sidebar shows all speakers with merge controls
@@ -19,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Shift+Click to select multiple segments, then use floating action bar to bulk reassign
   - Reassignments persist as correction records and apply on read (original data unchanged)
   - Speakers with zero remaining segments are automatically hidden from the speaker list
+- **Inline Speaker Renaming** - Double-click any speaker name to edit directly in place
+  - Enter to save, Escape to cancel, with validation (non-empty, <50 chars)
+  - Renames stored as correction records using apply-on-read pattern (no direct mutation)
+- **Multi-Step Undo Stack** - Undo merge, reassign, and rename corrections with a ~20 action in-memory stack
+  - Toast-based undo appears after each correction with 10-second undo window
+  - "Undo Last Change" button available in edit mode
+  - Correction history preserved for audit (undo marks records inactive, doesn't delete)
+- **Visual Feedback for Speaker Edits** - Merge fade/shrink animation, segment count animation on target, reassignment highlight
 
 ## [2.6.0] - 2026-01-28
 

@@ -11,6 +11,7 @@ interface TranscriptViewProps {
   selectedPersonId?: string;
   personOccurrences: Record<string, { start: number; end: number; personId: string }[]>;
   highlightedSegmentId?: string | null;
+  recentReassignSegmentIds?: string[];
   onSeek: (ms: number) => void;
   onTermClick: (termId: string) => void;
   onRenameSpeaker: (speakerId: string) => void;
@@ -34,6 +35,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   selectedPersonId,
   personOccurrences,
   highlightedSegmentId,
+  recentReassignSegmentIds = [],
   onSeek,
   onTermClick,
   onRenameSpeaker,
@@ -110,6 +112,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
           const isActive = idx === activeSegmentIndex;
           const isHighlighted = highlightedSegmentId === seg.segmentId;
           const isSelected = selectedSegmentIds.has(seg.segmentId);
+          const isRecentlyReassigned = recentReassignSegmentIds.includes(seg.segmentId);
 
           // Find term occurrences for this segment
           const segmentOccurrences = conversation.termOccurrences.filter(
@@ -142,6 +145,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                 isActive={isActive}
                 isHighlighted={isHighlighted}
                 isSelected={isSelected}
+                isRecentlyReassigned={isRecentlyReassigned}
                 activeTermId={selectedTermId}
                 activePersonId={selectedPersonId}
                 showSpeakerChange={showSpeakerChange}

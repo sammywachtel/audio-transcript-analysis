@@ -393,8 +393,9 @@ export interface ReconciliationMetadata {
  * Type of speaker correction operation.
  * - 'merge': Merge all segments from one speaker into another
  * - 'reassign': Reassign specific segments to a different speaker
+ * - 'rename': Rename a speaker's display name
  */
-export type SpeakerCorrectionType = 'merge' | 'reassign';
+export type SpeakerCorrectionType = 'merge' | 'reassign' | 'rename';
 
 /**
  * User-initiated speaker correction record.
@@ -421,8 +422,20 @@ export interface SpeakerCorrection {
   /** Speaker ID segments are being moved to (reassign type only) */
   toSpeakerId?: string;
 
+  // Fields for 'rename' corrections
+  /** Speaker ID being renamed (rename type only) */
+  speakerId?: string;
+  /** New display name for the speaker (rename type only) */
+  newDisplayName?: string;
+  /** Previous display name for undo display purposes (rename type only) */
+  previousDisplayName?: string;
+
   /** When this correction was created (ISO timestamp) */
   createdAt: string;
   /** User who created this correction (for verification) */
   userId: string;
+
+  /** If set, this correction has been undone and should be ignored in apply-on-read.
+   *  Preserves audit trail - we don't delete corrections on undo. */
+  undoneAt?: string;
 }

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { Person } from '@/config/types';
 import { useConversations } from '../contexts/ConversationContext';
 import { useAudioPlayer } from '../hooks/useAudioPlayer';
@@ -17,6 +17,7 @@ import { RenameSpeakerModal } from '../components/viewer/RenameSpeakerModal';
 import { SpeakerMergeModal } from '../components/viewer/SpeakerMergeModal';
 import { EditTitleModal } from '../components/viewer/EditTitleModal';
 import { KeyboardShortcutsModal } from '../components/viewer/KeyboardShortcutsModal';
+import { ToastContainer, useToasts } from '../components/shared/Toast';
 import { exportTranscript } from '../utils/exportTranscript';
 import { HelpCircle, X, PanelRight, AlertTriangle } from 'lucide-react';
 
@@ -187,22 +188,60 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
     messages: chatMessages
   });
 
-  // Speaker corrections (manual merge and reassignment)
+  // Toast notifications for speaker corrections
+  const { toasts, addToast, dismissToast } = useToasts();
+
+  // Speaker corrections (manual merge, reassign, and rename)
   const {
     correctedSpeakers,
     correctedSegments,
-    canUndo: canUndoMerge,
+    canUndo,
+    undoStackSize,
     mergeSpeakers,
     reassignSegments,
-    undoLastMerge,
-    isLoading: _mergeIsLoading,
-    error: _mergeError,
-    clearError: _mergeClearError
+    renameSpeaker,
+    undoLastCorrection,
+    isLoading: correctionsLoading,
+    error: _correctionsError,
+    clearError: _clearCorrectionsError,
+    pendingToast,
+    clearPendingToast,
+    recentMerge,
+    recentReassignSegmentIds
   } = useSpeakerCorrections({
     conversationId: conversation.conversationId,
     originalSpeakers: conversation.speakers,
     originalSegments: conversation.segments
   });
+
+  // Compute segment counts per speaker from corrected segments
+  const speakerSegmentCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const segment of correctedSegments) {
+      counts[segment.speakerId] = (counts[segment.speakerId] || 0) + 1;
+    }
+    return counts;
+  }, [correctedSegments]);
+
+  // Display toast when a correction is made
+  useEffect(() => {
+    if (pendingToast) {
+      addToast({
+        message: pendingToast.message,
+        type: 'info',
+        duration: 10000,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            undoLastCorrection().catch(err => {
+              console.error('[Viewer] Undo failed:', err);
+            });
+          }
+        }
+      });
+      clearPendingToast();
+    }
+  }, [pendingToast, addToast, clearPendingToast, undoLastCorrection]);
 
   /**
    * Handle speaker rename
@@ -245,24 +284,16 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
     }
   }, [reassignSegments, conversation.speakers]);
 
-  const saveSpeakerName = useCallback((newName: string) => {
+  const saveSpeakerName = useCallback(async (newName: string) => {
     if (editingSpeakerId && newName.trim()) {
-      const updatedConversation = {
-        ...conversation,
-        speakers: {
-          ...conversation.speakers,
-          [editingSpeakerId]: {
-            ...conversation.speakers[editingSpeakerId],
-            displayName: newName.trim()
-          }
-        }
-      };
-
-      setConversation(updatedConversation);
-      updateConversation(updatedConversation);
+      try {
+        await renameSpeaker(editingSpeakerId, newName.trim());
+      } catch (err) {
+        console.error('[Viewer] Rename via modal failed:', err);
+      }
     }
     setEditingSpeakerId(null);
-  }, [editingSpeakerId, conversation, updateConversation]);
+  }, [editingSpeakerId, renameSpeaker]);
 
   /**
    * Handle title edit - update local state and persist to Firestore
@@ -353,16 +384,33 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
   }, [mergingSpeakerId, mergeSpeakers]);
 
   /**
-   * Handle undo merge
+   * Handle undo (for any correction type)
    */
-  const handleUndoMerge = useCallback(async () => {
+  const handleUndo = useCallback(async () => {
     try {
-      await undoLastMerge();
+      await undoLastCorrection();
     } catch (err) {
-      // Error is handled by the hook and exposed via mergeError
-      console.error('[Viewer] Undo merge failed:', err);
+      // Error is handled by the hook and exposed via correctionsError
+      console.error('[Viewer] Undo correction failed:', err);
     }
-  }, [undoLastMerge]);
+  }, [undoLastCorrection]);
+
+  /**
+   * Handle speaker rename via correction (inline edit in sidebar)
+   * Uses the apply-on-read correction pattern via Cloud Function
+   */
+  const handleRenameSpeakerCorrection = useCallback(async (speakerId: string, newName: string) => {
+    try {
+      await renameSpeaker(speakerId, newName);
+      console.log('[Viewer] Renamed speaker via correction:', {
+        speakerId,
+        newName
+      });
+    } catch (err) {
+      console.error('[Viewer] Rename failed:', err);
+      throw err; // Re-throw so SpeakerCard can show validation error
+    }
+  }, [renameSpeaker]);
 
   return (
     <div className="flex flex-col h-screen-safe bg-slate-50">
@@ -449,6 +497,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
           selectedPersonId={selectedPersonId}
           personOccurrences={personOccurrences}
           highlightedSegmentId={highlightedSegmentId}
+          recentReassignSegmentIds={recentReassignSegmentIds}
           onSeek={seek}
           onTermClick={handleTermClickInTranscript}
           onRenameSpeaker={handleRenameSpeaker}
@@ -493,9 +542,14 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
             chatCumulativeCostUsd={chatCumulativeCostUsd}
             chatCostWarningLevel={chatCostWarningLevel}
             // Speaker corrections
-            canUndoMerge={canUndoMerge}
-            onUndoMerge={handleUndoMerge}
+            canUndo={canUndo}
+            undoStackSize={undoStackSize}
+            onUndo={handleUndo}
             onMergeSpeaker={handleMergeSpeaker}
+            onRenameSpeaker={handleRenameSpeakerCorrection}
+            isCorrectionsLoading={correctionsLoading}
+            recentMerge={recentMerge}
+            speakerSegmentCounts={speakerSegmentCounts}
           />
         </div>
 
@@ -571,9 +625,14 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
                 chatCumulativeCostUsd={chatCumulativeCostUsd}
                 chatCostWarningLevel={chatCostWarningLevel}
                 // Speaker corrections
-                canUndoMerge={canUndoMerge}
-                onUndoMerge={handleUndoMerge}
+                canUndo={canUndo}
+                undoStackSize={undoStackSize}
+                onUndo={handleUndo}
                 onMergeSpeaker={handleMergeSpeaker}
+                onRenameSpeaker={handleRenameSpeakerCorrection}
+                isCorrectionsLoading={correctionsLoading}
+                recentMerge={recentMerge}
+                speakerSegmentCounts={speakerSegmentCounts}
                 defaultTab="context"
               />
             </div>
@@ -648,6 +707,9 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
         isOpen={helpModalOpen}
         onClose={closeHelpModal}
       />
+
+      {/* Toast Notifications */}
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 };
