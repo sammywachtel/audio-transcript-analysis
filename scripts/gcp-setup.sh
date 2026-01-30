@@ -471,6 +471,7 @@ DEPLOYMENT_ROLES=(
     "roles/datastore.user"
     "roles/iam.serviceAccountUser"
     "roles/secretmanager.admin"
+    "roles/serviceusage.serviceUsageConsumer"  # Required for Firebase to check/enable APIs during deploy
 )
 
 for role in "${DEPLOYMENT_ROLES[@]}"; do
