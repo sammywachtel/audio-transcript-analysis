@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Term, Person, Speaker } from '@/config/types';
 import { cn } from '@/utils';
-import { BookOpen, Search, Users, User, StickyNote, ChevronLeft, ChevronRight, MessageSquare, Mic, Undo2 } from 'lucide-react';
+import { BookOpen, Search, Users, User, StickyNote, ChevronLeft, ChevronRight, MessageSquare, Mic, Undo2, Check, X } from 'lucide-react';
 import { ChatSidebar } from './ChatSidebar';
 import { ChatHistoryMessage } from '@/services/chatHistoryService';
 import { Button } from '../Button';
@@ -42,9 +42,14 @@ interface SidebarProps {
   chatCumulativeCostUsd?: number;
   chatCostWarningLevel?: 'none' | 'primary' | 'escalated';
   // Speaker corrections props
-  canUndoMerge?: boolean;
-  onUndoMerge?: () => void;
+  canUndo?: boolean;
+  undoStackSize?: number;
+  onUndo?: () => void;
   onMergeSpeaker?: (speakerId: string) => void;
+  onRenameSpeaker?: (speakerId: string, newName: string) => Promise<void>;
+  isCorrectionsLoading?: boolean;
+  recentMerge?: { sourceSpeakerId: string; targetSpeakerId: string } | null;
+  speakerSegmentCounts?: Record<string, number>;
   // Mobile support
   defaultTab?: 'context' | 'people' | 'speakers' | 'chat';
 }
@@ -84,9 +89,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
   chatCumulativeCostUsd = 0,
   chatCostWarningLevel = 'none',
   // Speaker corrections
-  canUndoMerge = false,
-  onUndoMerge = () => {},
+  canUndo = false,
+  undoStackSize = 0,
+  onUndo = () => {},
   onMergeSpeaker = () => {},
+  onRenameSpeaker,
+  isCorrectionsLoading = false,
+  recentMerge = null,
+  speakerSegmentCounts = {},
   defaultTab = 'context'
 }) => {
   const [activeTab, setActiveTab] = useState<'context' | 'people' | 'speakers' | 'chat'>(defaultTab);
@@ -270,22 +280,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <SpeakerCard
                   key={speaker.speakerId}
                   speaker={speaker}
+                  segmentCount={speakerSegmentCounts[speaker.speakerId] || 0}
                   onMerge={() => onMergeSpeaker(speaker.speakerId)}
+                  onRename={onRenameSpeaker}
+                  isLoading={isCorrectionsLoading}
+                  isMergeSource={recentMerge?.sourceSpeakerId === speaker.speakerId}
+                  isMergeTarget={recentMerge?.targetSpeakerId === speaker.speakerId}
                 />
               ))
             )}
           </div>
 
           {/* Undo Button at bottom */}
-          {canUndoMerge && (
+          {canUndo && (
             <div className="p-4 border-t border-slate-200 bg-slate-50/50">
               <Button
                 variant="outline"
-                onClick={onUndoMerge}
+                onClick={onUndo}
+                disabled={isCorrectionsLoading}
                 className="w-full flex items-center justify-center gap-2"
               >
                 <Undo2 size={14} />
-                Undo Last Merge
+                Undo Last Change{undoStackSize > 1 ? ` (${undoStackSize})` : ''}
               </Button>
             </div>
           )}
@@ -472,11 +488,46 @@ const PersonCard: React.FC<{
   );
 };
 
-// Sub-component for Speaker Card with merge button
+// Sub-component for Speaker Card with merge button and inline rename
 const SpeakerCard: React.FC<{
   speaker: Speaker;
+  segmentCount: number;
   onMerge: () => void;
-}> = ({ speaker, onMerge }) => {
+  onRename?: (speakerId: string, newName: string) => Promise<void>;
+  isLoading?: boolean;
+  isMergeSource?: boolean;
+  isMergeTarget?: boolean;
+}> = ({ speaker, segmentCount, onMerge, onRename, isLoading = false, isMergeSource = false, isMergeTarget = false }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editValue, setEditValue] = useState(speaker.displayName);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [animatingCount, setAnimatingCount] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Focus input when entering edit mode
+  useEffect(() => {
+    if (isEditing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [isEditing]);
+
+  // Reset edit value when speaker changes (e.g., after undo)
+  useEffect(() => {
+    if (!isEditing) {
+      setEditValue(speaker.displayName);
+    }
+  }, [speaker.displayName, isEditing]);
+
+  // Animate segment count when this speaker is the merge target
+  useEffect(() => {
+    if (isMergeTarget) {
+      setAnimatingCount(true);
+      const timer = setTimeout(() => setAnimatingCount(false), 300);
+      return () => clearTimeout(timer);
+    }
+  }, [isMergeTarget, segmentCount]);
+
   // Get color class for speaker badge
   const getSpeakerColorClass = (colorIndex: number): string => {
     const colors = [
@@ -492,36 +543,171 @@ const SpeakerCard: React.FC<{
     return colors[colorIndex % colors.length];
   };
 
+  const handleDoubleClick = () => {
+    if (onRename && !isLoading) {
+      setIsEditing(true);
+      setEditValue(speaker.displayName);
+      setValidationError(null);
+    }
+  };
+
+  const validateName = (name: string): string | null => {
+    const trimmed = name.trim();
+    if (!trimmed) return 'Name cannot be empty';
+    if (trimmed.length >= 50) return 'Name must be less than 50 characters';
+    return null;
+  };
+
+  const handleSave = async () => {
+    const trimmed = editValue.trim();
+    const error = validateName(trimmed);
+
+    if (error) {
+      setValidationError(error);
+      return;
+    }
+
+    // Don't save if name hasn't changed
+    if (trimmed === speaker.displayName) {
+      setIsEditing(false);
+      return;
+    }
+
+    try {
+      await onRename?.(speaker.speakerId, trimmed);
+      setIsEditing(false);
+      setValidationError(null);
+    } catch (_err) {
+      setValidationError('Failed to rename speaker');
+    }
+  };
+
+  const handleCancel = () => {
+    setIsEditing(false);
+    setEditValue(speaker.displayName);
+    setValidationError(null);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleSave();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      handleCancel();
+    }
+  };
+
   return (
-    <div className="p-3 rounded-lg border border-slate-200 bg-white shadow-sm hover:shadow-md transition-all">
-      <div className="flex justify-between items-center">
+    <div className={cn(
+      "p-3 rounded-lg border border-slate-200 bg-white shadow-sm hover:shadow-md transition-all",
+      isMergeSource && "opacity-50 scale-95",
+      isMergeTarget && "ring-2 ring-green-400 animate-pulse"
+    )}>
+      <div className="flex justify-between items-center gap-2">
         {/* Speaker info */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-1 min-w-0">
           <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 shrink-0">
             <Mic size={16} />
           </div>
-          <div>
-            <div className={cn(
-              "px-2 py-1 rounded text-xs font-medium border",
-              getSpeakerColorClass(speaker.colorIndex)
-            )}>
-              {speaker.displayName}
-            </div>
+          <div className="flex-1 min-w-0">
+            {isEditing ? (
+              // Inline edit mode
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center gap-1">
+                  <input
+                    ref={inputRef}
+                    type="text"
+                    value={editValue}
+                    onChange={(e) => {
+                      setEditValue(e.target.value);
+                      setValidationError(null);
+                    }}
+                    onKeyDown={handleKeyDown}
+                    onBlur={() => {
+                      // Small delay to allow button clicks to register
+                      setTimeout(() => {
+                        if (isEditing) handleCancel();
+                      }, 150);
+                    }}
+                    maxLength={50}
+                    className={cn(
+                      "flex-1 px-2 py-1 text-xs font-medium border rounded focus:outline-none focus:ring-2",
+                      validationError
+                        ? "border-red-300 focus:ring-red-500"
+                        : "border-slate-300 focus:ring-blue-500"
+                    )}
+                    disabled={isLoading}
+                  />
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSave();
+                    }}
+                    disabled={isLoading}
+                    className="p-1 text-green-600 hover:bg-green-50 rounded transition-colors"
+                    title="Save (Enter)"
+                  >
+                    <Check size={14} />
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCancel();
+                    }}
+                    disabled={isLoading}
+                    className="p-1 text-slate-500 hover:bg-slate-100 rounded transition-colors"
+                    title="Cancel (Escape)"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+                {validationError && (
+                  <p className="text-[10px] text-red-500">{validationError}</p>
+                )}
+              </div>
+            ) : (
+              // Display mode - double-click to edit
+              <div className="flex items-center gap-2">
+                <div
+                  onDoubleClick={handleDoubleClick}
+                  className={cn(
+                    "px-2 py-1 rounded text-xs font-medium border truncate",
+                    getSpeakerColorClass(speaker.colorIndex),
+                    onRename && "cursor-text hover:ring-1 hover:ring-blue-300"
+                  )}
+                  title={onRename ? "Double-click to rename" : undefined}
+                >
+                  {speaker.displayName}
+                </div>
+                <span
+                  className={cn(
+                    "text-[10px] text-slate-400 tabular-nums whitespace-nowrap transition-all duration-300",
+                    animatingCount && "text-green-600 font-semibold scale-110"
+                  )}
+                >
+                  {segmentCount} {segmentCount === 1 ? 'segment' : 'segments'}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Merge button */}
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={(e) => {
-            e.stopPropagation();
-            onMerge();
-          }}
-          className="text-xs"
-        >
-          Merge
-        </Button>
+        {/* Merge button - hide during editing */}
+        {!isEditing && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={(e) => {
+              e.stopPropagation();
+              onMerge();
+            }}
+            disabled={isLoading}
+            className="text-xs shrink-0"
+          >
+            Merge
+          </Button>
+        )}
       </div>
     </div>
   );

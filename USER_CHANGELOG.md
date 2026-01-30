@@ -1,5 +1,31 @@
 # What's New
 
+## Version 2.7.0 - January 30, 2026
+
+### ✨ Manual Speaker Correction
+
+**Fix Diarization Mistakes Yourself**
+- When the system incorrectly splits one person into multiple speakers, you can now **merge them** with a simple 3-click workflow
+- New "Speakers" tab in the sidebar shows all speakers with merge controls
+- Click "Merge" on the wrong speaker → Select the correct speaker → Confirm
+- Your changes are saved automatically and apply instantly—no need to re-process
+
+**Reassign Individual Segments**
+- Right-click (or long-press on mobile) any transcript segment to move it to a different speaker
+- Shift+Click to select multiple segments, then bulk-reassign them all at once
+- Speakers with no remaining segments automatically hide from the list
+
+**Inline Speaker Renaming**
+- Double-click any speaker name to rename them directly
+- Names update everywhere instantly—no modal dialogs needed
+
+**Full Undo Support**
+- Every change (merge, reassign, rename) can be undone with the Undo button
+- Toast notifications appear after each action with a 10-second undo window
+- Your original transcript is never modified—all corrections are applied on top
+
+---
+
 ## Version 2.6.0 - January 28, 2026
 
 ### ✨ Smarter Speaker Identification

@@ -1,13 +1,14 @@
 /**
- * Speaker Corrections Cloud Function
+ * Speaker Corrections Cloud Functions
  *
- * Handles manual speaker merge operations.
- * Users can merge incorrectly diarized speakers from the UI.
+ * Handles manual speaker corrections: merge, reassign, and rename.
+ * Users can fix incorrectly diarized speakers from the UI.
  *
  * Features:
  * - Requires authentication and ownership verification
  * - Writes correction records to speakerCorrections subcollection
  * - Client applies corrections at read time (apply-on-read pattern)
+ * - Undo preserves audit trail (sets undoneAt instead of deleting)
  */
 
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
@@ -34,6 +35,26 @@ interface ReassignSegmentsRequest {
 interface ReassignSegmentsResponse {
   success: boolean;
   correctionId: string;
+}
+
+interface RenameSpeakerRequest {
+  conversationId: string;
+  speakerId: string;       // Speaker to rename
+  newDisplayName: string;  // New name (validated: non-empty, <50 chars)
+}
+
+interface RenameSpeakerResponse {
+  success: boolean;
+  correctionId: string;
+}
+
+interface UndoCorrectionRequest {
+  conversationId: string;
+  correctionId: string;    // Correction to undo
+}
+
+interface UndoCorrectionResponse {
+  success: boolean;
 }
 
 /**
@@ -320,6 +341,258 @@ export const reassignSegments = onCall<ReassignSegmentsRequest>(
       throw new HttpsError(
         'internal',
         'Failed to reassign segments: ' + (error instanceof Error ? error.message : String(error))
+      );
+    }
+  }
+);
+
+/**
+ * Rename a speaker by writing a correction record.
+ *
+ * Security:
+ * - Requires authentication
+ * - Verifies user owns the conversation
+ * - Validates speaker exists
+ * - Validates name: non-empty, <50 characters
+ *
+ * The correction is stored in the speakerCorrections subcollection
+ * and applied at read time by the client.
+ */
+export const renameSpeaker = onCall<RenameSpeakerRequest>(
+  {
+    region: 'us-central1',
+    memory: '256MiB',
+    timeoutSeconds: 30,
+    cors: true
+  },
+  async (request): Promise<RenameSpeakerResponse> => {
+    // Require authentication
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Must be signed in to rename speaker');
+    }
+
+    const { conversationId, speakerId, newDisplayName } = request.data;
+    const userId = request.auth.uid;
+
+    // Validate input
+    if (!conversationId) {
+      throw new HttpsError('invalid-argument', 'conversationId is required');
+    }
+    if (!speakerId) {
+      throw new HttpsError('invalid-argument', 'speakerId is required');
+    }
+
+    // Validate name: non-empty and <50 characters
+    const trimmedName = newDisplayName?.trim();
+    if (!trimmedName) {
+      throw new HttpsError('invalid-argument', 'newDisplayName cannot be empty');
+    }
+    if (trimmedName.length >= 50) {
+      throw new HttpsError('invalid-argument', 'newDisplayName must be less than 50 characters');
+    }
+
+    log.info('Speaker rename request received', {
+      conversationId,
+      userId,
+      speakerId,
+      newDisplayName: trimmedName
+    });
+
+    try {
+      // Fetch conversation and verify ownership
+      const conversationDoc = await db.collection('conversations').doc(conversationId).get();
+
+      if (!conversationDoc.exists) {
+        throw new HttpsError('not-found', 'Conversation not found');
+      }
+
+      const conversation = conversationDoc.data();
+      if (!conversation) {
+        throw new HttpsError('not-found', 'Conversation data not found');
+      }
+
+      if (conversation.userId !== userId) {
+        throw new HttpsError('permission-denied', 'You do not have access to this conversation');
+      }
+
+      // Validate speaker exists
+      const speakers = conversation.speakers || {};
+      if (!speakers[speakerId]) {
+        throw new HttpsError('invalid-argument', `Speaker '${speakerId}' not found`);
+      }
+
+      const previousDisplayName = speakers[speakerId].displayName;
+
+      // Write correction record to subcollection
+      const correctionRef = db
+        .collection('conversations')
+        .doc(conversationId)
+        .collection('speakerCorrections')
+        .doc(); // Auto-generate ID
+
+      const correctionData = {
+        type: 'rename',
+        speakerId,
+        newDisplayName: trimmedName,
+        previousDisplayName,
+        userId,
+        createdAt: new Date() // Firestore will convert to Timestamp
+      };
+
+      await correctionRef.set(correctionData);
+
+      log.info('Speaker rename correction saved', {
+        conversationId,
+        userId,
+        correctionId: correctionRef.id,
+        speakerId,
+        previousDisplayName,
+        newDisplayName: trimmedName
+      });
+
+      return {
+        success: true,
+        correctionId: correctionRef.id
+      };
+
+    } catch (error) {
+      log.error('Speaker rename request failed', {
+        conversationId,
+        userId,
+        speakerId,
+        newDisplayName: trimmedName,
+        error: error instanceof Error ? error.message : String(error)
+      });
+
+      // Re-throw HttpsErrors as-is
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      // Wrap other errors
+      throw new HttpsError(
+        'internal',
+        'Failed to rename speaker: ' + (error instanceof Error ? error.message : String(error))
+      );
+    }
+  }
+);
+
+/**
+ * Undo a correction by setting its undoneAt timestamp.
+ * This preserves the audit trail - we don't delete corrections.
+ *
+ * Security:
+ * - Requires authentication
+ * - Verifies user owns the conversation
+ * - Validates correction exists and is not already undone
+ *
+ * After undo, the correction still exists but apply-on-read
+ * logic filters it out based on undoneAt being set.
+ */
+export const undoCorrection = onCall<UndoCorrectionRequest>(
+  {
+    region: 'us-central1',
+    memory: '256MiB',
+    timeoutSeconds: 30,
+    cors: true
+  },
+  async (request): Promise<UndoCorrectionResponse> => {
+    // Require authentication
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Must be signed in to undo correction');
+    }
+
+    const { conversationId, correctionId } = request.data;
+    const userId = request.auth.uid;
+
+    // Validate input
+    if (!conversationId) {
+      throw new HttpsError('invalid-argument', 'conversationId is required');
+    }
+    if (!correctionId) {
+      throw new HttpsError('invalid-argument', 'correctionId is required');
+    }
+
+    log.info('Undo correction request received', {
+      conversationId,
+      userId,
+      correctionId
+    });
+
+    try {
+      // Fetch conversation and verify ownership
+      const conversationDoc = await db.collection('conversations').doc(conversationId).get();
+
+      if (!conversationDoc.exists) {
+        throw new HttpsError('not-found', 'Conversation not found');
+      }
+
+      const conversation = conversationDoc.data();
+      if (!conversation) {
+        throw new HttpsError('not-found', 'Conversation data not found');
+      }
+
+      if (conversation.userId !== userId) {
+        throw new HttpsError('permission-denied', 'You do not have access to this conversation');
+      }
+
+      // Fetch the correction and validate
+      const correctionRef = db
+        .collection('conversations')
+        .doc(conversationId)
+        .collection('speakerCorrections')
+        .doc(correctionId);
+
+      const correctionDoc = await correctionRef.get();
+
+      if (!correctionDoc.exists) {
+        throw new HttpsError('not-found', 'Correction not found');
+      }
+
+      const correction = correctionDoc.data();
+      if (!correction) {
+        throw new HttpsError('not-found', 'Correction data not found');
+      }
+
+      // Check if already undone
+      if (correction.undoneAt) {
+        throw new HttpsError('failed-precondition', 'Correction has already been undone');
+      }
+
+      // Set undoneAt to preserve audit trail (don't delete)
+      await correctionRef.update({
+        undoneAt: new Date()
+      });
+
+      log.info('Correction undone (audit preserved)', {
+        conversationId,
+        userId,
+        correctionId,
+        correctionType: correction.type
+      });
+
+      return {
+        success: true
+      };
+
+    } catch (error) {
+      log.error('Undo correction request failed', {
+        conversationId,
+        userId,
+        correctionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+
+      // Re-throw HttpsErrors as-is
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      // Wrap other errors
+      throw new HttpsError(
+        'internal',
+        'Failed to undo correction: ' + (error instanceof Error ? error.message : String(error))
       );
     }
   }

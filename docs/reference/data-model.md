@@ -109,13 +109,13 @@ interface ChatHistoryDoc {
 
 #### conversations/{conversationId}/speakerCorrections (subcollection)
 
-Manual speaker corrections. Users can merge incorrectly diarized speakers or reassign individual segments from the UI. Corrections are applied at read time - original data remains immutable.
+Manual speaker corrections. Users can merge incorrectly diarized speakers, reassign individual segments, or rename speakers from the UI. Corrections are applied at read time - original data remains immutable.
 
 **Path**: `conversations/{conversationId}/speakerCorrections/{correctionId}`
 
 ```typescript
 interface SpeakerCorrectionDoc {
-  type: 'merge' | 'reassign';    // Correction type
+  type: 'merge' | 'reassign' | 'rename';  // Correction type
 
   // For 'merge' corrections
   sourceSpeakerId?: string;      // Speaker being merged away (removed from speaker list)
@@ -126,28 +126,42 @@ interface SpeakerCorrectionDoc {
   fromSpeakerId?: string;        // Speaker segments are being moved from
   toSpeakerId?: string;          // Speaker segments are being moved to
 
+  // For 'rename' corrections
+  speakerId?: string;            // Speaker being renamed
+  newDisplayName?: string;       // New display name for the speaker
+  previousDisplayName?: string;  // Previous name (for undo display purposes)
+
   userId: string;                // User who created the correction
   createdAt: Timestamp;          // Server timestamp
+
+  // Undo support (audit-preserving)
+  undoneAt?: Timestamp;          // If set, this correction has been undone
 }
 ```
 
 **Apply-on-Read Pattern**:
 - Corrections are NOT applied to the stored conversation data
-- Client applies corrections in order when loading conversation:
+- Client applies **active** corrections (where `undoneAt` is not set) in chronological order:
   1. Load original speakers and segments from conversation document
   2. Load corrections from subcollection (ordered by createdAt)
-  3. For each merge correction:
+  3. Filter to active corrections only (where `undoneAt` is null/undefined)
+  4. For each merge correction:
      - Remove sourceSpeakerId from speaker list
      - Remap all segments from sourceSpeakerId to targetSpeakerId
-  4. For each reassign correction:
+  5. For each reassign correction:
      - Reassign specified segmentIds to toSpeakerId
-  5. Remove speakers with zero remaining segments from speaker list
-  6. Display corrected data to user
+  6. For each rename correction:
+     - Update speaker's displayName (preserves colorIndex)
+  7. Remove speakers with zero remaining segments from speaker list
+  8. Display corrected data to user
 
-**Undo Support**:
-- Delete the most recent correction document to undo
-- Client re-applies remaining corrections on next read
-- Full correction history is preserved (cannot undo individual corrections from middle of sequence)
+**Undo Support (Audit-Preserving)**:
+- Undo sets the `undoneAt` timestamp via Cloud Function (does NOT delete the document)
+- This preserves the full audit trail for debugging and compliance
+- Client re-applies active corrections (filtering out undone ones) on next read
+- Toast notification with 10-second undo window appears after each correction
+- "Undo Last Change" button available in Speakers tab (covers all correction types)
+- Maximum ~20 corrections tracked in in-memory undo stack (per session)
 
 **Features**:
 - Real-time synchronization (Firestore listener)
@@ -155,14 +169,20 @@ interface SpeakerCorrectionDoc {
 - **Merge workflow**: Click merge button → Select target speaker → Confirm
 - **Reassign workflow (single segment)**: Right-click/long-press segment → Select target speaker
 - **Reassign workflow (multiple segments)**: Shift+Click to select range → Choose target speaker from floating bar
+- **Rename workflow**: Double-click speaker name in sidebar → Edit inline → Enter to save, Escape to cancel
 - Non-destructive (original data unchanged)
-- Audit trail for debugging diarization issues
+- Audit trail preserved even after undo
+
+**Validation (rename corrections)**:
+- Name must be non-empty
+- Name must be less than 50 characters
+- Validated server-side by Cloud Function
 
 **Security**:
-- Users can only read/delete corrections for conversations they own
-- Corrections are created via Cloud Function (not directly by client)
-- Cloud Function validates all segments belong to same speaker before reassigning
-- Immutable once created (no updates allowed)
+- Users can only read corrections for conversations they own
+- Corrections are created/undone via Cloud Functions (not directly by client)
+- Cloud Function validates ownership, speaker existence, and input constraints
+- Cloud Function sets `undoneAt` for undo (Admin SDK bypasses Firestore rules)
 
 ### users
 
