@@ -18,7 +18,31 @@ import fuzz from 'fuzzball';
 // Whisper diarization model on Replicate - provides word/sentence-level timestamps + speaker diarization
 // Using forked model with speaker embeddings for cross-chunk reconciliation
 // Original: thomasmol/whisper-diarization, Fork adds: 256-dim speaker embeddings per speaker
-const WHISPERX_MODEL = 'sammywachtel/whisper-diarization-embeddings-01:cc41ceb74b866a2e649862a7e2187724b38f6fb2581a80d0f9bcbc6ebcb49eb3';
+// No version hash = always use latest (pin hash for production stability)
+const WHISPERX_MODEL = 'sammywachtel/whisper-diarization-embeddings-01';
+
+/**
+ * Get model name and version for Replicate API calls.
+ * If WHISPERX_MODEL includes a version hash, use it directly.
+ * Otherwise, fetch the latest version from Replicate (no caching during dev).
+ */
+async function getModelAndVersion(client: Replicate): Promise<{ model: `${string}/${string}`, version: string }> {
+  const parts = WHISPERX_MODEL.split(':');
+  const modelName = parts[0] as `${string}/${string}`;
+
+  if (parts[1]) {
+    // Version hash provided in constant
+    return { model: modelName, version: parts[1] };
+  }
+
+  // No version hash - always fetch latest (no caching for dev flexibility)
+  console.log(`[WhisperX] Fetching latest version for ${modelName}...`);
+  const model = await client.models.get(modelName.split('/')[0], modelName.split('/')[1]);
+  const latestVersion = model.latest_version?.id || '';
+  console.log(`[WhisperX] Latest version: ${latestVersion}`);
+
+  return { model: modelName, version: latestVersion };
+}
 
 // =============================================================================
 // Configuration
@@ -1547,7 +1571,10 @@ export async function transcribeWithWhisperX(
     // Build input params - rafaelgalle/whisper-diarization-advanced has built-in diarization
     const inputParams: Record<string, unknown> = {
       file_string: audioBase64,  // Base64 encoded audio (not data URI)
-      language: 'en'
+      language: 'en',
+      // Lower value preserves quick speaker switches (acknowledgments like "Yeah")
+      // Default is 1.0, we use 0.3 to avoid merging short interjections
+      group_segments_gap: 0.3
     };
 
     // Add diarization hints if provided (from Gemini pre-analysis)
@@ -1560,6 +1587,7 @@ export async function transcribeWithWhisperX(
       inputParams.prompt = hints.speakerNames.join(', ');
       console.log(`[WhisperX] Using speaker names hint: ${hints.speakerNames.join(', ')}`);
     }
+    console.log(`[WhisperX] Using group_segments_gap: ${inputParams.group_segments_gap}s`);
 
     // Note: huggingfaceToken is no longer needed - diarization is built-in
     if (huggingfaceToken) {
@@ -1572,10 +1600,13 @@ export async function transcribeWithWhisperX(
 
     const startTime = Date.now();
 
+    // Get model and version (fetches latest if no version hash in constant)
+    const { model, version } = await getModelAndVersion(client);
+
     // Use predictions API instead of run() to get predictionId for cost tracking
     const prediction = await client.predictions.create({
-      model: WHISPERX_MODEL.split(':')[0] as `${string}/${string}`,
-      version: WHISPERX_MODEL.split(':')[1],
+      model,
+      version,
       input: inputParams
     });
 
@@ -1806,7 +1837,10 @@ export async function transcribeWithWhisperXRobust(
 
       const inputParams: Record<string, unknown> = {
         file_string: audioBase64,
-        language: 'en'
+        language: 'en',
+        // Lower value preserves quick speaker switches (acknowledgments like "Yeah")
+        // Default is 1.0, we use 0.3 to avoid merging short interjections
+        group_segments_gap: 0.3
       };
 
       // Add diarization hints if provided (from Gemini pre-analysis)
@@ -1818,13 +1852,17 @@ export async function transcribeWithWhisperXRobust(
         inputParams.prompt = hints.speakerNames.join(', ');
         console.log(`[WhisperX-Robust] Using speaker names hint: ${hints.speakerNames.join(', ')}`);
       }
+      console.log(`[WhisperX-Robust] Using group_segments_gap: ${inputParams.group_segments_gap}s`);
 
       const startTime = Date.now();
 
+      // Get model and version (fetches latest if no version hash in constant)
+      const { model, version } = await getModelAndVersion(client);
+
       // Create prediction (doesn't wait for completion)
       const prediction = await client.predictions.create({
-        model: WHISPERX_MODEL.split(':')[0] as `${string}/${string}`,
-        version: WHISPERX_MODEL.split(':')[1],
+        model,
+        version,
         input: inputParams
       });
 

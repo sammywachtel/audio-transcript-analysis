@@ -1,0 +1,19 @@
+# Core ML dependencies - pinned to match Cog container for reproducibility
+torch==2.3.1
+faster-whisper==1.1.1
+ctranslate2==4.5.0
+pyannote.audio>=3.3.1
+torchaudio>=2.3.1
+numpy==1.26.4
+pandas
+
+# Pin huggingface_hub to version that still supports use_auth_token
+# (pyannote internally uses deprecated API, fixed in huggingface_hub<0.24)
+huggingface_hub<0.24
+
+# FastAPI server
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# GPU monitoring - nvidia-smi wrapper for structured utilization logging
+pynvml>=11.5.0

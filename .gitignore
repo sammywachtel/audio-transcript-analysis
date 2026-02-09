@@ -51,11 +51,12 @@ coverage/
 htmlcov/
 .pytest_cache/
 .mypy_cache/
-__pycache__
+__pycache__/
+.venv/
 /.agent_process
 /.agent_process/
 /.claude/
 CLAUDE.md
 /.local_docs/
-\n# Forked Replicate model (deployed separately)\ncog-whisper-diarization/
+# Forked Replicate model (local copy, deployed separately)
 cog-whisper-diarization/
