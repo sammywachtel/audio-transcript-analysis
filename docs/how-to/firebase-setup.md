@@ -275,8 +275,7 @@ Secrets are **automatically set during deployment** from GitHub Secrets. Add the
 | GitHub Secret | Description | Get it from |
 |---------------|-------------|-------------|
 | `GEMINI_API_KEY` | Transcription analysis | [GCP Credentials](https://console.cloud.google.com/apis/credentials) (same project) |
-| `REPLICATE_API_TOKEN` | WhisperX transcription | [Replicate Account](https://replicate.com/account/api-tokens) |
-| `HUGGINGFACE_ACCESS_TOKEN` | Speaker diarization | [Hugging Face Settings](https://huggingface.co/settings/tokens) |
+| `WHISPER_SERVICE_URL` | WhisperX transcription | Cloud Run service URL (deployed from scope 05-02-01) |
 
 The deploy workflows automatically sync these to Firebase Secrets before deploying functions.
 
@@ -315,8 +314,7 @@ npx firebase use your-project-id
 
 # Set secrets (you'll be prompted for each value)
 npx firebase functions:secrets:set GEMINI_API_KEY
-npx firebase functions:secrets:set REPLICATE_API_TOKEN
-npx firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN
+npx firebase functions:secrets:set WHISPER_SERVICE_URL
 ```
 
 ### Hugging Face Setup for Speaker Diarization
@@ -343,8 +341,7 @@ Speaker diarization (detecting multiple speakers) requires a Hugging Face token 
 **Verify secrets are configured:**
 ```bash
 npx firebase functions:secrets:access GEMINI_API_KEY
-npx firebase functions:secrets:access REPLICATE_API_TOKEN
-npx firebase functions:secrets:access HUGGINGFACE_ACCESS_TOKEN
+npx firebase functions:secrets:access WHISPER_SERVICE_URL
 ```
 
 ## Step 9: Deploy Security Rules
@@ -521,8 +518,7 @@ In your repository: **Settings** → **Secrets and variables** → **Actions**
 |--------|-------|
 | `FIREBASE_SERVICE_ACCOUNT` | Contents of the service account JSON file |
 | `GEMINI_API_KEY` | Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey) |
-| `REPLICATE_API_TOKEN` | Replicate API token from [Replicate Account](https://replicate.com/account/api-tokens) |
-| `HUGGINGFACE_ACCESS_TOKEN` | Hugging Face token from [HF Settings](https://huggingface.co/settings/tokens) |
+| `WHISPER_SERVICE_URL` | Cloud Run WhisperX service URL (deployed from scope 05-02-01) |
 
 > **Note**: The API secrets are automatically synced to Firebase Secrets during deployment. You don't need to set them manually via `firebase functions:secrets:set`.
 

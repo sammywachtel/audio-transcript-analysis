@@ -204,10 +204,10 @@ export class CircuitBreaker {
 }
 
 /**
- * Circuit breaker for Replicate (WhisperX) API
+ * Circuit breaker for Cloud Run WhisperX service
  * Conservative settings - 2 failures triggers open
  */
-export const replicateCircuit = new CircuitBreaker('replicate', {
+export const cloudRunWhisperCircuit = new CircuitBreaker('cloud-run-whisper', {
   failureThreshold: 2,
   resetTimeout: 60000,      // 1 minute
   halfOpenRequests: 1

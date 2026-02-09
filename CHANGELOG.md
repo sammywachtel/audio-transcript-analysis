@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Cloud Run GPU Migration** - WhisperX transcription now runs on self-hosted Cloud Run with NVIDIA L4 GPU instead of Replicate
+  - Replaced Replicate SDK polling with direct HTTP calls to Cloud Run `/predict` endpoint
+  - OIDC-based IAM authentication replaces API token auth
+  - 180-second client-side timeout via `AbortController` with no-retry-on-timeout policy
+  - Cost tracking captures `X-Predict-Time` and request ID from Cloud Run response headers
+  - Circuit breaker and metrics renamed from `replicate` to `cloud-run-whisper`
+  - Removed `replicate` npm dependency (~108 net lines removed)
+
 ## [2.7.1] - 2026-01-30
 
 ### Fixed

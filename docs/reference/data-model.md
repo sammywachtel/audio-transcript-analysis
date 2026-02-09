@@ -264,8 +264,8 @@ interface TranscriptionMetricsDoc {
       model: string;
     };
     whisperx: {
-      predictionId?: string;  // Replicate prediction ID for cost traceability
-      computeTimeSeconds: number;  // Actual GPU compute time from Replicate metrics.predict_time (not wall-clock)
+      predictionId?: string;  // Cloud Run request ID for cost traceability
+      computeTimeSeconds: number;  // Actual GPU compute time from X-Predict-Time header (not wall-clock)
       model: string;  // 'whisperx-diarization' - includes speaker diarization
     };
     // Note: diarization field removed in v2.2.0 - now bundled with whisperx
@@ -517,13 +517,13 @@ LLM pricing configuration for cost estimation.
 ```typescript
 interface PricingDoc {
   model: string;  // 'gemini-2.5-flash', 'gemini-2.5-flash-text', 'whisperx'
-  service: 'gemini' | 'replicate';
+  service: 'gemini' | 'cloud-run';
 
   // Token-based pricing (for Gemini)
   inputPricePerMillion?: number;   // USD per 1M input tokens
   outputPricePerMillion?: number;  // USD per 1M output tokens
 
-  // Time-based pricing (for Replicate/WhisperX)
+  // Time-based pricing (for Cloud Run WhisperX)
   pricePerSecond?: number;         // USD per compute second
 
   // Validity period
