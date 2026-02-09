@@ -91,8 +91,7 @@ async function enqueueMergeTask(conversationId: string): Promise<void> {
 }
 
 // Define secrets (same as transcribeAudio - needed for heavy processing)
-const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
-const huggingfaceAccessToken = defineSecret('HUGGINGFACE_ACCESS_TOKEN');
+const whisperServiceUrl = defineSecret('WHISPER_SERVICE_URL');
 
 /**
  * Cloud Tasks payload for transcription job.
@@ -144,7 +143,7 @@ export const processTranscription = onRequest(
     timeoutSeconds: 3600, // 60 minutes (enough for large files)
     region: 'us-central1',
     invoker: 'private', // Only Cloud Tasks can call this
-    secrets: [replicateApiToken, huggingfaceAccessToken]
+    secrets: [whisperServiceUrl]
   },
   async (req, res) => {
     // Validate Cloud Tasks header (security check - prevents direct invocation)
@@ -296,8 +295,7 @@ export const processTranscription = onRequest(
         conversationId,
         userId,
         filePath,
-        replicateApiToken: replicateApiToken.value(),
-        huggingfaceAccessToken: huggingfaceAccessToken.value(),
+        whisperServiceUrl: whisperServiceUrl.value(),
         chunkContext: chunkContext ?? undefined,
         chunkMetadata: isChunk ? {
           chunkIndex,

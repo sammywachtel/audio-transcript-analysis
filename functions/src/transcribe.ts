@@ -52,8 +52,7 @@ import {
 import { computeSpeakerQualityMapFromWhisperXSegments } from './speakerQuality';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
-const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
-const huggingfaceAccessToken = defineSecret('HUGGINGFACE_ACCESS_TOKEN');  // For speaker diarization
+const whisperServiceUrl = defineSecret('WHISPER_SERVICE_URL');
 
 // =============================================================================
 // Timeout Configuration
@@ -773,8 +772,7 @@ export interface TranscriptionPipelineParams {
   conversationId: string;
   userId: string;
   filePath: string;
-  replicateApiToken: string;
-  huggingfaceAccessToken: string;
+  whisperServiceUrl: string;
   audioSizeBytes?: number; // Optional - for logging only
   /** Optional chunk context for context-aware chunk processing */
   chunkContext?: ChunkContext;
@@ -809,7 +807,7 @@ export interface TranscriptionPipelineParams {
  * On abort, updates status to 'aborted' and records partial metrics.
  */
 export async function executeTranscriptionPipeline(params: TranscriptionPipelineParams): Promise<ChunkPipelineResult> {
-  const { conversationId, userId, filePath, replicateApiToken, huggingfaceAccessToken, audioSizeBytes, chunkContext, chunkMetadata } = params;
+  const { conversationId, userId, filePath, whisperServiceUrl, audioSizeBytes, chunkContext, chunkMetadata } = params;
   const isChunkTask = !!chunkMetadata;
 
   // Initialize progress tracking (with chunk info for aggregate progress calculation)
@@ -916,16 +914,10 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     console.log('[Pipeline] Step 2: Calling WhisperX for transcription with hints...');
     const whisperxStartTime = Date.now();
 
-    const hfToken = huggingfaceAccessToken || undefined;
-    if (!hfToken) {
-      console.warn('[Pipeline] HUGGINGFACE_ACCESS_TOKEN not set - speaker diarization will be disabled');
-    }
-
     // Try robust WhisperX first
     let whisperxResult = await transcribeWithWhisperXRobust(
       audioBuffer,
-      replicateApiToken,
-      hfToken,
+      whisperServiceUrl,
       2,
       whisperxHints
     );
@@ -935,8 +927,7 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
       console.warn('[Pipeline] Robust WhisperX failed, trying standard method...');
       whisperxResult = await transcribeWithWhisperX(
         audioBuffer,
-        replicateApiToken,
-        hfToken,
+        whisperServiceUrl,
         whisperxHints
       );
     }
@@ -976,7 +967,7 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     const computeSeconds = actualComputeSeconds ?? (whisperxDurationMs / 1000);
 
     if (actualComputeSeconds) {
-      console.log(`[Pipeline] Using actual Replicate compute time: ${actualComputeSeconds}s`);
+      console.log(`[Pipeline] Using actual Cloud Run compute time: ${actualComputeSeconds}s`);
     } else {
       console.warn(`[Pipeline] Estimating compute time from wall-clock: ${(whisperxDurationMs / 1000).toFixed(1)}s`);
     }
@@ -1299,7 +1290,7 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     });
 
     // Build LLM usage breakdown for cost tracking
-    // Use the compute times from partialMetrics (which has actual Replicate compute time if available)
+    // Use the compute times from partialMetrics (which has actual Cloud Run compute time if available)
     const llmUsage: LLMUsage = {
       geminiAnalysis: geminiAnalysisTokens,
       geminiSpeakerCorrection: geminiCorrectionTokens,
@@ -1551,7 +1542,7 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
  */
 export const transcribeAudio = onObjectFinalized(
   {
-    secrets: [replicateApiToken, huggingfaceAccessToken],
+    secrets: [whisperServiceUrl],
     memory: '2GiB', // Large audio files need more memory for chunking
     timeoutSeconds: 540, // 9 minutes (max for event-driven triggers, even 2nd gen)
     region: 'us-central1'
@@ -1689,8 +1680,7 @@ export const transcribeAudio = onObjectFinalized(
           conversationId,
           userId,
           filePath,
-          replicateApiToken: replicateApiToken.value(),
-          huggingfaceAccessToken: huggingfaceAccessToken.value(),
+          whisperServiceUrl: whisperServiceUrl.value(),
           audioSizeBytes: event.data.size
         });
 

@@ -32,11 +32,11 @@ export interface GeminiUsage {
 }
 
 /**
- * Replicate API usage metrics (compute-time pricing)
+ * Cloud Run WhisperX API usage metrics (compute-time pricing)
  * The whisper-diarization model handles both transcription AND speaker diarization in one call.
  */
-export interface ReplicateUsage {
-  predictionId?: string;  // Replicate prediction ID for audit trail
+export interface CloudRunWhisperUsage {
+  predictionId?: string;  // Cloud Run request ID for audit trail
   computeTimeSeconds: number;
   model: string;  // e.g., 'whisperx' (includes diarization)
 }
@@ -49,8 +49,8 @@ export interface LLMUsage {
   geminiAnalysis: GeminiUsage;
   // Gemini Speaker Reassignment Call
   geminiSpeakerCorrection: GeminiUsage;
-  // WhisperX via Replicate (transcription + timestamps + speaker diarization)
-  whisperx: ReplicateUsage;
+  // WhisperX via Cloud Run (transcription + timestamps + speaker diarization)
+  whisperx: CloudRunWhisperUsage;
 }
 
 /**
@@ -174,13 +174,13 @@ export interface ProcessingMetrics {
 export interface PricingConfig {
   pricingId: string;
   model: string;              // 'gemini-2.5-flash', 'gemini-2.5-flash-text', 'whisperx'
-  service: 'gemini' | 'replicate';
+  service: 'gemini' | 'cloud-run';
 
   // Token-based pricing (for Gemini)
   inputPricePerMillion?: number;   // USD per 1M input tokens
   outputPricePerMillion?: number;  // USD per 1M output tokens
 
-  // Time-based pricing (for Replicate)
+  // Time-based pricing (for Cloud Run WhisperX)
   pricePerSecond?: number;         // USD per compute second
 
   // Validity period (allows price changes over time)
