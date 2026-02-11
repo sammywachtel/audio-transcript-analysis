@@ -559,7 +559,7 @@ interface PricingDoc {
 // whisperx (includes diarization)
 {
   "model": "whisperx",
-  "service": "replicate",
+  "service": "cloud-run",
   "pricePerSecond": 0.0023,         // ~$0.14/min
   "effectiveFrom": "2026-01-01T00:00:00Z"
 }

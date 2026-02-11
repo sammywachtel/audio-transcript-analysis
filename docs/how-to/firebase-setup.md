@@ -317,26 +317,11 @@ npx firebase functions:secrets:set GEMINI_API_KEY
 npx firebase functions:secrets:set WHISPER_SERVICE_URL
 ```
 
-### Hugging Face Setup for Speaker Diarization
+### Speaker Diarization (Cloud Run WhisperX)
 
-Speaker diarization (detecting multiple speakers) requires a Hugging Face token because WhisperX uses [pyannote/speaker-diarization](https://huggingface.co/pyannote/speaker-diarization-3.1), which is a gated model.
+Speaker diarization (detecting multiple speakers) is handled by the Cloud Run WhisperX service. The pyannote diarization models are bundled directly in the container — no separate Hugging Face token is required.
 
-**Required steps:**
-
-1. Create a [Hugging Face account](https://huggingface.co/join) if you don't have one
-
-2. **Accept terms for ALL required pyannote models** (this is critical):
-   - https://huggingface.co/pyannote/speaker-diarization-3.1 — Main diarization model
-   - https://huggingface.co/pyannote/segmentation — Required dependency (used internally)
-   - https://huggingface.co/pyannote/segmentation-3.0 — Alternative segmentation version
-
-   > ⚠️ **Common Error**: If you see `'NoneType' object has no attribute 'eval'` in Cloud Function logs, it means you haven't accepted terms for all required models. The error is cryptic but it's just a model access issue.
-
-3. Generate an access token at: https://huggingface.co/settings/tokens (select "Read" access)
-
-4. Add the token to GitHub Secrets as `HUGGINGFACE_ACCESS_TOKEN`
-
-> **Note**: Without the Hugging Face token, transcription will still work but all audio will be attributed to a single speaker (SPEAKER_00).
+The Cloud Run service URL is configured via the `WHISPER_SERVICE_URL` secret (see table above).
 
 **Verify secrets are configured:**
 ```bash
@@ -554,14 +539,14 @@ npx firebase deploy --only firestore:rules --project=$PROJECT_ID
 
 ### WhisperX fails with "'NoneType' object has no attribute 'eval'"
 
-**Cause**: The Hugging Face token doesn't have access to all required pyannote models. The pyannote speaker diarization model internally depends on the segmentation model, which is also gated.
+**Cause**: The Cloud Run WhisperX container's pyannote models failed to load. This typically indicates a container build issue.
 
-**Solution**: Accept terms for ALL pyannote models:
-1. https://huggingface.co/pyannote/speaker-diarization-3.1
-2. https://huggingface.co/pyannote/segmentation
-3. https://huggingface.co/pyannote/segmentation-3.0
-
-Then retry the upload. No redeployment needed - the existing HF token will now work.
+**Solution**: Verify the Cloud Run WhisperX service is healthy:
+```bash
+# Check service status
+gcloud run services describe whisperx-service --region=REGION --format="value(status.conditions)"
+```
+If the service is unhealthy, redeploy the WhisperX container (see infrastructure scope 05-02-01).
 
 ### "secretmanager.secrets.get" or "setIamPolicy" permission denied
 
