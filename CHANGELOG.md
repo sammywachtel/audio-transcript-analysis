@@ -17,9 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `/health` endpoint for Cloud Run readiness probes
 
 ### Changed
-- **WhisperX Model Version Resolution** - Model version is now fetched dynamically from Replicate when no hash is pinned
-  - Enables rapid iteration on the forked Whisper model without redeploying Cloud Functions
-  - Pin a version hash in `WHISPERX_MODEL` constant for production stability
+- **Cloud Run GPU Migration** - WhisperX transcription now runs on self-hosted Cloud Run with NVIDIA L4 GPU instead of Replicate
+  - Replaced Replicate SDK polling with direct HTTP calls to Cloud Run `/predict` endpoint
+  - OIDC-based IAM authentication replaces API token auth
+  - 180-second client-side timeout via `AbortController` with no-retry-on-timeout policy
+  - Cost tracking captures `X-Predict-Time` and request ID from Cloud Run response headers
+  - Circuit breaker and metrics renamed from `replicate` to `cloud-run-whisper`
+  - Removed `replicate` npm dependency (~108 net lines removed)
 - **Segment Gap Tuning** - `group_segments_gap` set to 0.3s (down from 1.0s default)
   - Preserves short speaker switches like acknowledgments ("Yeah", "Mm-hmm") that were being merged into adjacent segments
 

@@ -28,7 +28,6 @@
     "firebase-functions": "^7.0.2",
     "fuzzball": "^2.0.0",
     "jsonrepair": "^3.11.2",
-    "replicate": "^0.29.0",
     "undici": "^6.21.0"
   },
   "devDependencies": {

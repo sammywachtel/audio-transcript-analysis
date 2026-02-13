@@ -52,8 +52,8 @@ Transform audio recordings into interactive, navigable transcripts with AI-power
                 ▼                        ▼
         ┌──────────────┐         ┌──────────────────────────┐
         │  Gemini API  │         │   Alignment Service      │
-        │  (Google AI) │         │   WhisperX via Replicate │
-        └──────────────┘         │   pyannote diarization   │
+        │  (Google AI) │         │   WhisperX via Cloud Run │
+        └──────────────┘         │   GPU (pyannote built-in)│
                                  └──────────────────────────┘
 ```
 
@@ -65,7 +65,7 @@ Transform audio recordings into interactive, navigable transcripts with AI-power
 - Firebase project ([Firebase Setup Guide](docs/how-to/firebase-setup.md))
 - API Keys:
   - [Gemini API Key](https://makersuite.google.com/app/apikey)
-  - [Replicate API Token](https://replicate.com/account/api-tokens) (for WhisperX alignment)
+  - Cloud Run Whisper Service URL (deployed from scope 05-02-01)
 
 ### Installation
 
@@ -93,8 +93,7 @@ npx firebase use your-project-id
 
 # Set API keys as Firebase secrets
 npx firebase functions:secrets:set GEMINI_API_KEY
-npx firebase functions:secrets:set REPLICATE_API_TOKEN
-npx firebase functions:secrets:set ALIGNMENT_SERVICE_URL
+npx firebase functions:secrets:set WHISPER_SERVICE_URL
 ```
 
 ### Deploy Backend
@@ -133,8 +132,7 @@ Firebase secrets (stored via Firebase Secret Manager):
 | Secret | Description |
 |--------|-------------|
 | `GEMINI_API_KEY` | Google AI Studio API key |
-| `REPLICATE_API_TOKEN` | Replicate API token for WhisperX |
-| `ALIGNMENT_SERVICE_URL` | WhisperX alignment service URL |
+| `WHISPER_SERVICE_URL` | Cloud Run WhisperX service URL (deployed separately) |
 
 ## Usage
 
@@ -189,7 +187,7 @@ audio-transcript-analysis-app/
 │   └── src/
 │       ├── index.ts       # Function exports
 │       ├── transcribe.ts  # WhisperX + Gemini analysis + speaker corrections
-│       ├── alignment.ts   # WhisperX integration via Replicate
+│       ├── alignment.ts   # WhisperX integration via Cloud Run
 │       ├── metrics.ts     # Processing metrics recording
 │       └── logger.ts      # Structured logging utility
 ├── docs/                  # Documentation (Diátaxis structure)
@@ -204,7 +202,7 @@ audio-transcript-analysis-app/
 
 The app uses a "WhisperX-first" architecture for precise timestamps:
 
-1. **WhisperX Transcription** - Word-level forced alignment via Replicate + pyannote speaker diarization (~$0.02/10min)
+1. **WhisperX Transcription** - Word-level forced alignment via Cloud Run GPU + pyannote speaker diarization
 2. **Gemini Analysis** - Analyzes WhisperX transcript for topics, terms, people, and speaker corrections
 3. **Client Drift Correction** - For legacy data without server alignment, applies linear timestamp scaling
 
@@ -231,8 +229,8 @@ See [docs/how-to/deploy.md](docs/how-to/deploy.md) for full deployment guide.
 - **Frontend**: React 18, TypeScript, Vite, Tailwind CSS
 - **Backend**: Firebase (Firestore, Storage, Cloud Functions, Auth)
 - **AI**: Google Gemini 2.5 Flash
-- **Alignment**: WhisperX via Replicate, pyannote for diarization
-- **Deployment**: Cloud Run (frontend), Firebase Functions (backend)
+- **Alignment**: WhisperX via Cloud Run GPU with NVIDIA L4, pyannote diarization built-in
+- **Deployment**: Cloud Run (frontend + WhisperX), Firebase Functions (backend)
 - **CI/CD**: GitHub Actions
 
 ## Documentation

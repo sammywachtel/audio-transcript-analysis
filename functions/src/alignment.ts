@@ -12,37 +12,8 @@
  *    Level 4: Validation & Fallback (quality gates, graceful degradation)
  */
 
-import Replicate from 'replicate';
+import { GoogleAuth } from 'google-auth-library';
 import fuzz from 'fuzzball';
-
-// Whisper diarization model on Replicate - provides word/sentence-level timestamps + speaker diarization
-// Using forked model with speaker embeddings for cross-chunk reconciliation
-// Original: thomasmol/whisper-diarization, Fork adds: 256-dim speaker embeddings per speaker
-// No version hash = always use latest (pin hash for production stability)
-const WHISPERX_MODEL = 'sammywachtel/whisper-diarization-embeddings-01';
-
-/**
- * Get model name and version for Replicate API calls.
- * If WHISPERX_MODEL includes a version hash, use it directly.
- * Otherwise, fetch the latest version from Replicate (no caching during dev).
- */
-async function getModelAndVersion(client: Replicate): Promise<{ model: `${string}/${string}`, version: string }> {
-  const parts = WHISPERX_MODEL.split(':');
-  const modelName = parts[0] as `${string}/${string}`;
-
-  if (parts[1]) {
-    // Version hash provided in constant
-    return { model: modelName, version: parts[1] };
-  }
-
-  // No version hash - always fetch latest (no caching for dev flexibility)
-  console.log(`[WhisperX] Fetching latest version for ${modelName}...`);
-  const model = await client.models.get(modelName.split('/')[0], modelName.split('/')[1]);
-  const latestVersion = model.latest_version?.id || '';
-  console.log(`[WhisperX] Latest version: ${latestVersion}`);
-
-  return { model: modelName, version: latestVersion };
-}
 
 // =============================================================================
 // Configuration
@@ -70,28 +41,28 @@ const MAX_OVERLAP_MS = 2000;  // Max overlap between consecutive segments (raise
 const MIN_MS_PER_WORD = 20;  // Minimum milliseconds per word (lowered from 30)
 const MAX_MS_PER_WORD = 800;  // Maximum milliseconds per word (raised from 600)
 
-// Replicate API timeout (3 minutes) - large audio uploads need time
-const REPLICATE_TIMEOUT_MS = 180_000;
+// Cloud Run request timeout (3 minutes) - aligned with Cloud Run server hard kill
+const CLOUD_RUN_TIMEOUT_MS = 180_000;
+
+// Lazy-initialized Google Auth client for Cloud Run IAM auth
+let _authClient: GoogleAuth | null = null;
+function getAuthClient(): GoogleAuth {
+  if (!_authClient) {
+    _authClient = new GoogleAuth();
+  }
+  return _authClient;
+}
 
 /**
- * Create a fetch wrapper with timeout support for Replicate client.
- * The Replicate SDK v1.x doesn't have built-in timeout, so we use AbortController.
+ * Fetch an OIDC identity token for service-to-service auth with Cloud Run.
+ * Cloud Functions → Cloud Run uses IAM-based auth: we get an ID token
+ * scoped to the target audience (the Cloud Run service URL).
  */
-function createTimeoutFetch(timeoutMs: number): typeof globalThis.fetch {
-  return async (input: RequestInfo | URL, init?: RequestInit) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const response = await globalThis.fetch(input, {
-        ...init,
-        signal: controller.signal,
-      });
-      return response;
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  };
+async function getIdToken(targetAudience: string): Promise<string> {
+  const auth = getAuthClient();
+  const client = await auth.getIdTokenClient(targetAudience);
+  const headers = await client.getRequestHeaders();
+  return headers.Authorization?.replace('Bearer ', '') || '';
 }
 
 // =============================================================================
@@ -1310,16 +1281,16 @@ function alignSegmentsHardy(
 
 async function getWhisperxTimestamps(
   audioBase64: string,
-  replicateToken: string
+  serviceUrl: string
 ): Promise<Word[]> {
   /**
-   * Call Replicate's WhisperX model to get word-level timestamps.
+   * Call Cloud Run WhisperX service to get word-level timestamps.
    *
-   * Uses victor-upmeet/whisperx which provides word-level timestamps
+   * Uses self-hosted WhisperX which provides word-level timestamps
    * and speaker diarization.
    */
-  if (!replicateToken) {
-    throw new AlignmentError('REPLICATE_API_TOKEN not provided');
+  if (!serviceUrl) {
+    throw new AlignmentError('WHISPER_SERVICE_URL not provided');
   }
 
   // Decode base64 to get audio bytes
@@ -1327,32 +1298,60 @@ async function getWhisperxTimestamps(
   const audioSizeMb = audioBytes.length / (1024 * 1024);
 
   console.log(
-    `[WhisperX] Calling Replicate API: ` +
+    `[WhisperX] Calling Cloud Run service: ` +
     `audio_size=${audioSizeMb.toFixed(2)}MB, ` +
     `base64_length=${audioBase64.length}`
   );
 
   console.debug(
     `[WhisperX] Request parameters: ` +
-    `model=${WHISPERX_MODEL.substring(0, 50)}..., ` +
+    `service_url=${serviceUrl}, ` +
     `language=en`
   );
 
   try {
-    // Call whisper-diarization-advanced via Replicate
-    const client = new Replicate({ auth: replicateToken, fetch: createTimeoutFetch(REPLICATE_TIMEOUT_MS) });
+    // Call Cloud Run /predict endpoint
+    const idToken = await getIdToken(serviceUrl);
+
+    // Set up AbortController for timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CLOUD_RUN_TIMEOUT_MS);
 
     const startTime = Date.now();
-    const output = await client.run(
-      WHISPERX_MODEL as `${string}/${string}:${string}`,
-      {
-        input: {
-          file_string: audioBase64,  // Base64 encoded audio (not data URI)
-          language: 'en'
-        }
-      }
-    );
+    const response = await fetch(`${serviceUrl}/predict`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${idToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        file_string: audioBase64,
+        language: 'en'
+      }),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`Cloud Run request failed: ${response.status} ${response.statusText}`);
+    }
+
+    const output = await response.json();
     const duration = ((Date.now() - startTime) / 1000).toFixed(3);
+
+    // Capture compute time from header
+    const predictTime = response.headers.get('X-Predict-Time');
+    if (predictTime) {
+      console.debug(`[WhisperX] Compute time: ${predictTime}s`);
+    }
+
+    // Capture request ID from headers
+    const requestId = response.headers.get('X-Request-Id') ||
+                     response.headers.get('X-Cloud-Trace-Context') ||
+                     'unknown';
+    console.debug(`[WhisperX] Request ID: ${requestId}`);
+
     console.debug(`[Timer] WhisperX API call: ${duration}s`);
 
     // DIAGNOSTIC: Log raw output structure
@@ -1508,9 +1507,9 @@ export interface WhisperXResult {
   segments: WhisperXSegment[];
   status: 'success' | 'error';
   error?: string;
-  /** Replicate prediction ID for cost traceability */
+  /** Cloud Run request ID for cost traceability */
   predictionId?: string;
-  /** Actual GPU compute time in seconds (from Replicate metrics.predict_time) */
+  /** Actual GPU compute time in seconds (from X-Predict-Time header) */
   actualComputeSeconds?: number;
   /** Speaker embeddings from pyannote/embedding (256-dim vectors per speaker) */
   speakerEmbeddings?: {
@@ -1525,9 +1524,7 @@ export interface WhisperXResult {
  * the transcript text AND accurate timestamps in one call.
  *
  * @param audioBuffer - The audio file as a Buffer
- * @param replicateToken - Replicate API token
- * @param huggingfaceToken - Optional Hugging Face token for speaker diarization
- *                           (pyannote.audio is a gated model that requires HF auth)
+ * @param serviceUrl - Cloud Run Whisper service URL
  */
 /**
  * Optional hints to improve WhisperX diarization accuracy.
@@ -1540,17 +1537,16 @@ export interface WhisperXDiarizationHints {
 
 export async function transcribeWithWhisperX(
   audioBuffer: Buffer,
-  replicateToken: string,
-  huggingfaceToken?: string,
+  serviceUrl: string,
   hints?: WhisperXDiarizationHints
 ): Promise<WhisperXResult> {
   console.log('[WhisperX] Starting transcription (primary method)', hints ? { hints } : {});
 
-  if (!replicateToken) {
+  if (!serviceUrl) {
     return {
       segments: [],
       status: 'error',
-      error: 'REPLICATE_API_TOKEN not provided'
+      error: 'WHISPER_SERVICE_URL not provided'
     };
   }
 
@@ -1560,94 +1556,73 @@ export async function transcribeWithWhisperX(
     const audioSizeMb = audioBuffer.length / (1024 * 1024);
 
     console.log(
-      `[WhisperX] Calling Replicate API: ` +
+      `[WhisperX] Calling Cloud Run service: ` +
       `audio_size=${audioSizeMb.toFixed(2)}MB`
     );
 
-    // Call whisper-diarization-advanced via Replicate
-    const Replicate = (await import('replicate')).default;
-    const client = new Replicate({ auth: replicateToken, fetch: createTimeoutFetch(REPLICATE_TIMEOUT_MS) });
+    // Get OIDC token for IAM auth
+    const idToken = await getIdToken(serviceUrl);
 
-    // Build input params - rafaelgalle/whisper-diarization-advanced has built-in diarization
-    const inputParams: Record<string, unknown> = {
-      file_string: audioBase64,  // Base64 encoded audio (not data URI)
+    // Build request body
+    const requestBody: Record<string, unknown> = {
+      file_string: audioBase64,
       language: 'en',
-      // Lower value preserves quick speaker switches (acknowledgments like "Yeah")
-      // Default is 1.0, we use 0.3 to avoid merging short interjections
       group_segments_gap: 0.3
     };
 
     // Add diarization hints if provided (from Gemini pre-analysis)
     if (hints?.numSpeakers && hints.numSpeakers > 0) {
-      inputParams.num_speakers = hints.numSpeakers;
+      requestBody.num_speakers = hints.numSpeakers;
       console.log(`[WhisperX] Using num_speakers hint: ${hints.numSpeakers}`);
     }
     if (hints?.speakerNames && hints.speakerNames.length > 0) {
       // The prompt parameter accepts speaker names/acronyms separated by punctuation
-      inputParams.prompt = hints.speakerNames.join(', ');
+      requestBody.prompt = hints.speakerNames.join(', ');
       console.log(`[WhisperX] Using speaker names hint: ${hints.speakerNames.join(', ')}`);
     }
-    console.log(`[WhisperX] Using group_segments_gap: ${inputParams.group_segments_gap}s`);
+    console.log(`[WhisperX] Using group_segments_gap: ${requestBody.group_segments_gap}s`);
 
-    // Note: huggingfaceToken is no longer needed - diarization is built-in
-    if (huggingfaceToken) {
-      console.log('[WhisperX] Note: HF token provided but not needed - diarization is built-in');
-    }
     console.log('[WhisperX] Speaker diarization enabled (built-in)', {
-      numSpeakers: inputParams.num_speakers || 'auto-detect',
-      prompt: inputParams.prompt || 'none'
+      numSpeakers: requestBody.num_speakers || 'auto-detect',
+      prompt: requestBody.prompt || 'none'
     });
+
+    // Set up AbortController for timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CLOUD_RUN_TIMEOUT_MS);
 
     const startTime = Date.now();
 
-    // Get model and version (fetches latest if no version hash in constant)
-    const { model, version } = await getModelAndVersion(client);
-
-    // Use predictions API instead of run() to get predictionId for cost tracking
-    const prediction = await client.predictions.create({
-      model,
-      version,
-      input: inputParams
+    // Call Cloud Run /predict endpoint (synchronous, no polling needed)
+    const response = await fetch(`${serviceUrl}/predict`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${idToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal
     });
 
-    console.log(`[WhisperX] Prediction created: ${prediction.id}`);
+    clearTimeout(timeoutId);
 
-    // Poll for completion
-    const maxWaitMs = 8 * 60 * 1000; // 8 minutes max
-    const pollIntervalMs = 5000; // Poll every 5 seconds
-    let elapsedMs = 0;
-
-    let output: unknown;
-    let actualComputeSeconds: number | undefined;
-    while (elapsedMs < maxWaitMs) {
-      const status = await client.predictions.get(prediction.id);
-
-      if (status.status === 'succeeded') {
-        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-        // Extract actual GPU compute time from Replicate metrics
-        actualComputeSeconds = (status as any).metrics?.predict_time;
-        console.log(`[WhisperX] Prediction succeeded in ${duration}s wall-clock (${actualComputeSeconds || 'unknown'}s compute, id: ${prediction.id})`);
-        output = status.output;
-        break;
-      } else if (status.status === 'failed' || status.status === 'canceled') {
-        throw new Error(`Prediction ${status.status}: ${status.error || 'Unknown error'}`);
-      }
-
-      // Still processing, wait and poll again
-      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-      elapsedMs += pollIntervalMs;
-
-      if (elapsedMs % 30000 === 0) { // Log every 30 seconds
-        console.log(`[WhisperX] Still waiting... (${elapsedMs / 1000}s elapsed)`);
-      }
+    if (!response.ok) {
+      throw new Error(`Cloud Run request failed: ${response.status} ${response.statusText}`);
     }
 
-    if (!output) {
-      throw new Error(`Prediction timed out after ${maxWaitMs / 1000}s`);
-    }
-
+    const output = await response.json();
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[WhisperX] API call completed in ${duration}s`);
+
+    // Extract compute time from header
+    const predictTimeStr = response.headers.get('X-Predict-Time');
+    const actualComputeSeconds = predictTimeStr ? parseFloat(predictTimeStr) : undefined;
+
+    // Extract request ID from headers
+    const requestId = response.headers.get('X-Request-Id') ||
+                     response.headers.get('X-Cloud-Trace-Context') ||
+                     crypto.randomUUID();
+
+    console.log(`[WhisperX] Request completed in ${duration}s wall-clock (${actualComputeSeconds || 'unknown'}s compute, id: ${requestId})`);
 
     // Parse the output to extract segments and speaker embeddings
     const segments: WhisperXSegment[] = [];
@@ -1765,7 +1740,7 @@ export async function transcribeWithWhisperX(
     return {
       segments,
       status: 'success',
-      predictionId: prediction.id,
+      predictionId: requestId,
       actualComputeSeconds,
       speakerEmbeddings
     };
@@ -1799,23 +1774,22 @@ export async function transcribeWithWhisperX(
 }
 
 /**
- * Alternative WhisperX transcription using predictions API with manual polling.
- * More robust for large responses - handles streaming and retries.
+ * Alternative WhisperX transcription with retry logic for transient failures.
+ * More robust for large responses - handles retries but NOT timeout errors.
  */
 export async function transcribeWithWhisperXRobust(
   audioBuffer: Buffer,
-  replicateToken: string,
-  huggingfaceToken?: string,
+  serviceUrl: string,
   maxRetries: number = 2,
   hints?: WhisperXDiarizationHints
 ): Promise<WhisperXResult> {
   console.log('[WhisperX-Robust] Starting transcription with enhanced error handling', hints ? { hints } : {});
 
-  if (!replicateToken) {
+  if (!serviceUrl) {
     return {
       segments: [],
       status: 'error',
-      error: 'REPLICATE_API_TOKEN not provided'
+      error: 'WHISPER_SERVICE_URL not provided'
     };
   }
 
@@ -1831,94 +1805,93 @@ export async function transcribeWithWhisperXRobust(
         `audio_size=${audioSizeMb.toFixed(2)}MB`
       );
 
-      // Use predictions API for more control
-      const Replicate = (await import('replicate')).default;
-      const client = new Replicate({ auth: replicateToken, fetch: createTimeoutFetch(REPLICATE_TIMEOUT_MS) });
+      // Get OIDC token for IAM auth
+      const idToken = await getIdToken(serviceUrl);
 
-      const inputParams: Record<string, unknown> = {
+      const requestBody: Record<string, unknown> = {
         file_string: audioBase64,
         language: 'en',
-        // Lower value preserves quick speaker switches (acknowledgments like "Yeah")
-        // Default is 1.0, we use 0.3 to avoid merging short interjections
         group_segments_gap: 0.3
       };
 
       // Add diarization hints if provided (from Gemini pre-analysis)
       if (hints?.numSpeakers && hints.numSpeakers > 0) {
-        inputParams.num_speakers = hints.numSpeakers;
+        requestBody.num_speakers = hints.numSpeakers;
         console.log(`[WhisperX-Robust] Using num_speakers hint: ${hints.numSpeakers}`);
       }
       if (hints?.speakerNames && hints.speakerNames.length > 0) {
-        inputParams.prompt = hints.speakerNames.join(', ');
+        requestBody.prompt = hints.speakerNames.join(', ');
         console.log(`[WhisperX-Robust] Using speaker names hint: ${hints.speakerNames.join(', ')}`);
       }
-      console.log(`[WhisperX-Robust] Using group_segments_gap: ${inputParams.group_segments_gap}s`);
+      console.log(`[WhisperX-Robust] Using group_segments_gap: ${requestBody.group_segments_gap}s`);
+
+      // Set up AbortController for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), CLOUD_RUN_TIMEOUT_MS);
 
       const startTime = Date.now();
 
-      // Get model and version (fetches latest if no version hash in constant)
-      const { model, version } = await getModelAndVersion(client);
-
-      // Create prediction (doesn't wait for completion)
-      const prediction = await client.predictions.create({
-        model,
-        version,
-        input: inputParams
+      // Call Cloud Run /predict endpoint (synchronous)
+      const response = await fetch(`${serviceUrl}/predict`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
       });
 
-      console.log(`[WhisperX-Robust] Prediction created: ${prediction.id}`);
+      clearTimeout(timeoutId);
 
-      // Poll for completion with timeout
-      const maxWaitMs = 8 * 60 * 1000; // 8 minutes max
-      const pollIntervalMs = 5000; // Poll every 5 seconds
-      let elapsedMs = 0;
-
-      while (elapsedMs < maxWaitMs) {
-        const status = await client.predictions.get(prediction.id);
-
-        if (status.status === 'succeeded') {
-          const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-          // Extract actual GPU compute time from Replicate metrics
-          const actualComputeSeconds = (status as any).metrics?.predict_time;
-          console.log(`[WhisperX-Robust] Prediction succeeded in ${duration}s wall-clock (${actualComputeSeconds || 'unknown'}s compute, id: ${prediction.id})`);
-
-          // Parse output
-          const { segments, speakerEmbeddings } = parseWhisperXOutput(status.output);
-
-          if (segments.length === 0) {
-            throw new Error('WhisperX returned no segments');
-          }
-
-          // Return with prediction ID, actual compute time, and embeddings
-          return { segments, status: 'success', predictionId: prediction.id, actualComputeSeconds, speakerEmbeddings };
-
-        } else if (status.status === 'failed' || status.status === 'canceled') {
-          throw new Error(`Prediction ${status.status}: ${status.error || 'Unknown error'}`);
-        }
-
-        // Still processing, wait and poll again
-        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-        elapsedMs += pollIntervalMs;
-
-        if (elapsedMs % 30000 === 0) { // Log every 30 seconds
-          console.log(`[WhisperX-Robust] Still waiting... (${elapsedMs / 1000}s elapsed)`);
-        }
+      if (!response.ok) {
+        throw new Error(`Cloud Run request failed: ${response.status} ${response.statusText}`);
       }
 
-      throw new Error(`Prediction timed out after ${maxWaitMs / 1000}s`);
+      const output = await response.json();
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+      // Extract compute time from header
+      const predictTimeStr = response.headers.get('X-Predict-Time');
+      const actualComputeSeconds = predictTimeStr ? parseFloat(predictTimeStr) : undefined;
+
+      // Extract request ID from headers
+      const requestId = response.headers.get('X-Request-Id') ||
+                       response.headers.get('X-Cloud-Trace-Context') ||
+                       crypto.randomUUID();
+
+      console.log(`[WhisperX-Robust] Request succeeded in ${duration}s wall-clock (${actualComputeSeconds || 'unknown'}s compute, id: ${requestId})`);
+
+      // Parse output
+      const { segments, speakerEmbeddings } = parseWhisperXOutput(output);
+
+      if (segments.length === 0) {
+        throw new Error('WhisperX returned no segments');
+      }
+
+      // Return with request ID, actual compute time, and embeddings
+      return { segments, status: 'success', predictionId: requestId, actualComputeSeconds, speakerEmbeddings };
 
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorName = error instanceof Error ? error.name : '';
       lastError = errorMsg;
 
-      // Check if error is retryable - includes gateway errors for large payloads
-      const isRetryable = errorMsg.includes('JSON') ||
-                          errorMsg.includes('timeout') ||
-                          errorMsg.includes('ETIMEDOUT') ||
-                          errorMsg.includes('ECONNRESET') ||
-                          errorMsg.includes('502') ||
+      // CRITICAL: Do NOT retry timeout errors (AbortError)
+      const isTimeoutError = errorName === 'AbortError' ||
+                            errorMsg.includes('aborted') ||
+                            errorMsg.includes('timeout');
+
+      if (isTimeoutError) {
+        console.error(`[WhisperX-Robust] Timeout error - not retrying: ${errorMsg}`);
+        break;
+      }
+
+      // Check if error is retryable - only transient 5xx/network errors
+      const isRetryable = errorMsg.includes('502') ||
                           errorMsg.includes('503') ||
                           errorMsg.includes('504') ||
+                          errorMsg.includes('ECONNRESET') ||
                           errorMsg.includes('Bad Gateway') ||
                           errorMsg.includes('Service Unavailable') ||
                           errorMsg.includes('Gateway Timeout');
@@ -2046,7 +2019,7 @@ function parseWhisperXOutput(output: unknown): {
 export async function alignTimestamps(
   audioBuffer: Buffer,
   segments: { speakerId: string; text: string; startMs: number; endMs: number }[],
-  replicateToken: string
+  serviceUrl: string
 ): Promise<AlignmentResult> {
   /**
    * DEPRECATED: This function implements the OLD Gemini-first approach.
@@ -2090,7 +2063,7 @@ export async function alignTimestamps(
     // Get word-level timestamps from WhisperX
     const startTimeWhisper = Date.now();
     const audioBase64 = audioBuffer.toString('base64');
-    const words = await getWhisperxTimestamps(audioBase64, replicateToken);
+    const words = await getWhisperxTimestamps(audioBase64, serviceUrl);
     const durationWhisper = ((Date.now() - startTimeWhisper) / 1000).toFixed(3);
     console.debug(`[Timer] get_whisperx_timestamps: ${durationWhisper}s`);
 
