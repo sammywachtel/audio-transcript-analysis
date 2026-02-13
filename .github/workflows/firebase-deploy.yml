@@ -12,8 +12,7 @@
 #   - GCP_PROJECT_ID: Firebase/GCP project ID (same as Cloud Run deploy)
 #   - FIREBASE_SERVICE_ACCOUNT: JSON key for Firebase service account
 #   - GEMINI_API_KEY: API key for Gemini transcription analysis
-#   - REPLICATE_API_TOKEN: API token for WhisperX transcription
-#   - HUGGINGFACE_ACCESS_TOKEN: Token for speaker diarization (pyannote.audio)
+#   - WHISPER_SERVICE_URL: Cloud Run WhisperX service URL
 #
 # See docs/how-to/firebase-setup.md for setup instructions.
 # =============================================================================
@@ -153,8 +152,7 @@ jobs:
         if: github.event_name == 'push' || github.event.inputs.deploy_target != 'rules-only'
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
-          REPLICATE_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
-          HF_TOKEN: ${{ secrets.HUGGINGFACE_ACCESS_TOKEN }}
+          WHISPER_URL: ${{ secrets.WHISPER_SERVICE_URL }}
         run: |  # pragma: allowlist secret
           echo "Checking Firebase Function secrets..."
           KEEP_VERSIONS=2  # Keep current + previous for rollback safety
@@ -196,8 +194,7 @@ jobs:
           }
 
           update_secret_if_changed "GEMINI_API_KEY" "$GEMINI_KEY"
-          update_secret_if_changed "REPLICATE_API_TOKEN" "$REPLICATE_TOKEN"
-          update_secret_if_changed "HUGGINGFACE_ACCESS_TOKEN" "$HF_TOKEN"
+          update_secret_if_changed "WHISPER_SERVICE_URL" "$WHISPER_URL"
           echo "✅ Firebase secrets checked"
 
       # Deploy based on target
