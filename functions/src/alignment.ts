@@ -1580,6 +1580,7 @@ export async function transcribeWithWhisperX(
       requestBody.prompt = hints.speakerNames.join(', ');
       console.log(`[WhisperX] Using speaker names hint: ${hints.speakerNames.join(', ')}`);
     }
+    console.log(`[WhisperX] Using group_segments_gap: ${requestBody.group_segments_gap}s`);
 
     console.log('[WhisperX] Speaker diarization enabled (built-in)', {
       numSpeakers: requestBody.num_speakers || 'auto-detect',
@@ -1822,6 +1823,7 @@ export async function transcribeWithWhisperXRobust(
         requestBody.prompt = hints.speakerNames.join(', ');
         console.log(`[WhisperX-Robust] Using speaker names hint: ${hints.speakerNames.join(', ')}`);
       }
+      console.log(`[WhisperX-Robust] Using group_segments_gap: ${requestBody.group_segments_gap}s`);
 
       // Set up AbortController for timeout
       const controller = new AbortController();

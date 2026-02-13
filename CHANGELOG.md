@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Cloud Run GPU Whisper Service** - Standalone FastAPI container for Whisper diarization on Cloud Run with GPU
+  - CUDA 12 + cuDNN 9 base image with pre-cached models (~20GB) for offline inference
+  - `/predict` endpoint mirrors existing Cog/Replicate API: accepts `file_string`, `num_speakers`, `language`, `prompt`, `group_segments_gap`
+  - Output JSON matches current Cog format (segments, words, speaker_embeddings) for drop-in compatibility
+  - 180-second hard timeout returns HTTP 504 with structured logging
+  - `X-Predict-Time` header on all response paths (200, 503, 504, 500)
+  - `/health` endpoint for Cloud Run readiness probes
+
 ### Changed
 - **Cloud Run GPU Migration** - WhisperX transcription now runs on self-hosted Cloud Run with NVIDIA L4 GPU instead of Replicate
   - Replaced Replicate SDK polling with direct HTTP calls to Cloud Run `/predict` endpoint
@@ -15,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Cost tracking captures `X-Predict-Time` and request ID from Cloud Run response headers
   - Circuit breaker and metrics renamed from `replicate` to `cloud-run-whisper`
   - Removed `replicate` npm dependency (~108 net lines removed)
+- **Segment Gap Tuning** - `group_segments_gap` set to 0.3s (down from 1.0s default)
+  - Preserves short speaker switches like acknowledgments ("Yeah", "Mm-hmm") that were being merged into adjacent segments
 
 ## [2.7.1] - 2026-01-30
 
