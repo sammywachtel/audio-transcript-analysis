@@ -996,7 +996,7 @@ fi
 
 log_step "Whisper Cloud Run service URL..."
 
-WHISPER_SERVICE_NAME="whisperx-gpu"
+WHISPER_SERVICE_NAME="whisperx-service"
 WHISPER_SERVICE_URL=""
 
 # Try to auto-detect the service URL from Cloud Run
@@ -1013,7 +1013,7 @@ else
     log_info "Deploy the WhisperX container first, then rerun this script or set manually:"
     log_info "  npx firebase functions:secrets:set WHISPER_SERVICE_URL"
     prompt_and_manage_secret "WHISPER_SERVICE_URL" "Whisper Service URL" \
-        "Cloud Run WhisperX service URL (e.g. https://whisperx-gpu-XXXXX-uw.a.run.app)"
+        "Cloud Run WhisperX service URL (e.g. https://whisperx-service-XXXXX.us-east4.run.app)"
 fi
 
 # -----------------------------------------------------------------------------
