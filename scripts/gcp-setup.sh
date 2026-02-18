@@ -38,6 +38,10 @@ BILLING_ACCOUNT="${2:?❌ Usage: $0 <project-id> <billing-account-id> [github-re
 GITHUB_REPO="${3:-}"  # Optional: org/repo for Workload Identity Federation
 REGION="${4:-us-central1}"
 
+# Whisper GPU region — separate from main region because GPU quota
+# may only be available in specific regions (us-east4 as of Feb 2026)
+WHISPER_GPU_REGION="${WHISPER_GPU_REGION:-us-east4}"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -273,6 +277,7 @@ echo "  Project ID:      $PROJECT_ID"
 echo "  Billing Account: $BILLING_ACCOUNT"
 echo "  GitHub Repo:     ${GITHUB_REPO:-<not specified - skipping Workload Identity>}"
 echo "  Region:          $REGION"
+echo "  Whisper GPU:     $WHISPER_GPU_REGION (GPU quota region)"
 echo ""
 
 log_step "Checking prerequisites..."
@@ -644,6 +649,61 @@ if [[ -n "$BQ_ERRORS" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
+# Step 10c: Create Artifact Registry Repository for Whisper GPU Images
+# -----------------------------------------------------------------------------
+
+log_step "Artifact Registry repository for Whisper GPU images..."
+
+WHISPER_AR_REPO="whisper-gpu"
+
+log_info "Whisper GPU region: $WHISPER_GPU_REGION (override with WHISPER_GPU_REGION env var)"
+
+if gcloud artifacts repositories describe "$WHISPER_AR_REPO" \
+    --location="$WHISPER_GPU_REGION" \
+    --project="$PROJECT_ID" &>/dev/null; then
+    log_skip "Artifact Registry repo '$WHISPER_AR_REPO' already exists in $WHISPER_GPU_REGION"
+else
+    gcloud artifacts repositories create "$WHISPER_AR_REPO" \
+        --repository-format=docker \
+        --location="$WHISPER_GPU_REGION" \
+        --description="WhisperX GPU transcription service images" \
+        --project="$PROJECT_ID"
+    log_success "Created Artifact Registry repo: $WHISPER_AR_REPO ($WHISPER_GPU_REGION)"
+fi
+
+# Grant the current gcloud user write access so local `docker push` works.
+# Without this, only the Cloud Build SA can push — which doesn't help
+# when you're building and pushing from your own machine.
+CURRENT_USER=$(gcloud config get-value account 2>/dev/null)
+if [ -n "$CURRENT_USER" ]; then
+    add_iam_binding "user:$CURRENT_USER" "roles/artifactregistry.writer" "$CURRENT_USER → Artifact Registry Writer"
+fi
+
+# -----------------------------------------------------------------------------
+# Step 10d: IAM Grants for Whisper Cloud Run GPU Service
+# -----------------------------------------------------------------------------
+
+log_step "IAM grants for Whisper Cloud Run GPU service..."
+
+# Runtime SA needs roles/run.invoker so Cloud Functions can call the
+# Whisper Cloud Run service with IAM authentication
+if sa_exists "$RUNTIME_SA"; then
+    add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/run.invoker" "$RUNTIME_SA → Cloud Run Invoker"
+else
+    log_info "Cloud Run Invoker binding - skipped (runtime SA not yet created)"
+fi
+
+# Cloud Build SA needs permission to push images to Artifact Registry
+# and deploy to Cloud Run with GPU. The default Cloud Build SA is
+# PROJECT_NUMBER@cloudbuild.gserviceaccount.com
+CLOUDBUILD_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
+
+add_service_agent_binding "$CLOUDBUILD_SA" "roles/artifactregistry.writer" "Cloud Build → Artifact Registry Writer"
+add_service_agent_binding "$CLOUDBUILD_SA" "roles/run.admin" "Cloud Build → Cloud Run Admin"
+add_service_agent_binding "$CLOUDBUILD_SA" "roles/iam.serviceAccountUser" "Cloud Build → Service Account User"
+
+
+# -----------------------------------------------------------------------------
 # Step 11: Initialize Firebase Storage and Configure Bucket Access
 # -----------------------------------------------------------------------------
 
@@ -929,24 +989,32 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 15b: Replicate API Token (for WhisperX transcription)
+# Step 15b: Whisper Service URL (Cloud Run WhisperX)
 # -----------------------------------------------------------------------------
+# Diarization models (pyannote) are bundled in the Cloud Run container,
+# so no separate Hugging Face or Replicate tokens are needed.
 
-log_step "Replicate API token (for WhisperX)..."
-log_info "Get your token from: https://replicate.com/account/api-tokens"
-prompt_and_manage_secret "REPLICATE_API_TOKEN" "Replicate API Token" \
-    "Required for WhisperX transcription service"
+log_step "Whisper Cloud Run service URL..."
 
-# -----------------------------------------------------------------------------
-# Step 15c: HuggingFace Access Token (for speaker diarization)
-# -----------------------------------------------------------------------------
+WHISPER_SERVICE_NAME="whisperx-service"
+WHISPER_SERVICE_URL=""
 
-log_step "HuggingFace access token (for speaker diarization)..."
-log_info "Get your token from: https://huggingface.co/settings/tokens"
-log_info "Requires accepting pyannote model terms at:"
-log_info "  https://huggingface.co/pyannote/speaker-diarization-3.1"
-prompt_and_manage_secret "HUGGINGFACE_ACCESS_TOKEN" "HuggingFace Access Token" \
-    "Required for speaker diarization (pyannote)"
+# Try to auto-detect the service URL from Cloud Run
+WHISPER_SERVICE_URL=$(gcloud run services describe "$WHISPER_SERVICE_NAME" \
+    --region="$WHISPER_GPU_REGION" \
+    --project="$PROJECT_ID" \
+    --format="value(status.url)" 2>/dev/null || echo "")
+
+if [[ -n "$WHISPER_SERVICE_URL" ]]; then
+    log_info "Auto-detected Whisper service: $WHISPER_SERVICE_URL"
+    manage_secret "WHISPER_SERVICE_URL" "$WHISPER_SERVICE_URL"
+else
+    log_info "Whisper Cloud Run service not yet deployed in $WHISPER_GPU_REGION"
+    log_info "Deploy the WhisperX container first, then rerun this script or set manually:"
+    log_info "  npx firebase functions:secrets:set WHISPER_SERVICE_URL"
+    prompt_and_manage_secret "WHISPER_SERVICE_URL" "Whisper Service URL" \
+        "Cloud Run WhisperX service URL (e.g. https://whisperx-service-XXXXX.us-east4.run.app)"
+fi
 
 # -----------------------------------------------------------------------------
 # Step 16: Enable Firebase Authentication
@@ -1030,6 +1098,8 @@ echo "  │  Required GitHub Secrets for CI/CD (Single Project)                 
 echo "  ├─────────────────────────────────────────────────────────────────────────┤"
 echo "  │  Firebase Deploy Workflow (.github/workflows/firebase-deploy.yml):      │"
 echo "  │    • FIREBASE_SERVICE_ACCOUNT     - Contents of $KEY_FILE               │"
+echo "  │    • GEMINI_API_KEY               - From Secret Manager or AI Studio    │"
+echo "  │    • WHISPER_SERVICE_URL          - Cloud Run WhisperX service URL      │"
 echo "  │                                                                         │"
 echo "  │  Cloud Run Deploy Workflow (.github/workflows/deploy.yml):              │"
 echo "  │    • GCP_PROJECT_ID               - $PROJECT_ID"
