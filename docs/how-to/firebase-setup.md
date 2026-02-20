@@ -45,14 +45,17 @@ The script is **idempotent** - safe to rerun if it fails partway through. It wil
 4. Enables all required APIs (including Generative Language API for Gemini)
 5. Configures IAM bindings (deployment SA, runtime SA)
 6. Initializes Firestore database
-7. Detects Firebase Storage bucket (provides setup instructions if not found)
-8. Configures Storage bucket permissions for Eventarc triggers (if bucket exists)
-9. Configures CORS for audio file access (if bucket exists)
-10. Sets up Workload Identity Federation for GitHub Actions (if `github-repo` provided)
-11. Creates GitHub Actions service account with Cloud Run permissions
-12. Optionally creates service account key for Firebase CI/CD (interactive prompt)
-13. Optionally creates Gemini API key in-project and stores in Secret Manager (interactive prompt)
-14. Optionally registers Firebase Web App (interactive prompt)
+7. Creates Cloud Tasks queue for transcription
+8. Creates Artifact Registry repository for Whisper GPU container images
+9. Grants IAM roles for Whisper Cloud Run GPU service (runtime SA → `roles/run.invoker`, Cloud Build SA → Artifact Registry + Cloud Run permissions)
+10. Detects Firebase Storage bucket (provides setup instructions if not found)
+11. Configures Storage bucket permissions for Eventarc triggers (if bucket exists)
+12. Configures CORS for audio file access (if bucket exists)
+13. Sets up Workload Identity Federation for GitHub Actions (if `github-repo` provided)
+14. Creates GitHub Actions service account with Cloud Run permissions
+15. Optionally creates service account key for Firebase CI/CD (interactive prompt)
+16. Optionally creates Gemini API key in-project and stores in Secret Manager (interactive prompt)
+17. Optionally registers Firebase Web App (interactive prompt)
 
 > **Note:** The Gemini API key is created within your GCP project (not via AI Studio), keeping all resources in one place. Service agent IAM bindings are configured automatically by the GitHub Actions workflow on each deployment.
 

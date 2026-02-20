@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-02-20
+
 ### Added
 - **Cloud Run GPU Whisper Service** - Standalone FastAPI container for Whisper diarization on Cloud Run with GPU
   - CUDA 12 + cuDNN 9 base image with pre-cached models (~20GB) for offline inference
@@ -15,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 180-second hard timeout returns HTTP 504 with structured logging
   - `X-Predict-Time` header on all response paths (200, 503, 504, 500)
   - `/health` endpoint for Cloud Run readiness probes
+- **Whisper GPU deploy script** (`scripts/deploy-whisper.sh`) - One-command build + deploy with `--build-only`, `--deploy-only`, `--no-cache`, and `--tag` options
 
 ### Changed
 - **Cloud Run GPU Migration** - WhisperX transcription now runs on self-hosted Cloud Run with NVIDIA L4 GPU instead of Replicate
@@ -26,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Removed `replicate` npm dependency (~108 net lines removed)
 - **Segment Gap Tuning** - `group_segments_gap` set to 0.3s (down from 1.0s default)
   - Preserves short speaker switches like acknowledgments ("Yeah", "Mm-hmm") that were being merged into adjacent segments
+- **GCP setup script** - Added Artifact Registry, Cloud Run GPU IAM, and Whisper service URL auto-detection; replaced Replicate/HuggingFace token prompts
+- **CI pipeline** - Replaced `REPLICATE_API_TOKEN` and `HUGGINGFACE_ACCESS_TOKEN` secrets with single `WHISPER_SERVICE_URL`
+- **Dockerfile security** - HuggingFace token now passed via BuildKit secret mount instead of `ARG` (never baked into image layers)
+
+### Fixed
+- **Speaker corrections validation** - Backend `reassignSegments` and `mergeSpeakers` now validate against effective state (with prior corrections applied) instead of raw Firestore data
+  - Previously, reassigning a segment A→B then back B→A would fail with "already belongs to target speaker" because the backend still saw the raw ownership
+  - New `computeEffectiveState()` helper replays active corrections server-side, mirroring the client's apply-on-read logic
 
 ## [2.7.1] - 2026-01-30
 

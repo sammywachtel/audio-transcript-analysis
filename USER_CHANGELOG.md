@@ -1,5 +1,22 @@
 # What's New
 
+## Version 2.8.0 - February 20, 2026
+
+### 🚀 Faster Transcription with Dedicated GPU
+
+**Self-Hosted Whisper Processing**
+- Transcription now runs on a dedicated GPU server instead of a third-party API
+- The same Whisper Large v3 Turbo + pyannote speaker diarization you know, now faster and more reliable
+- Finer gap detection (0.3s) preserves quick acknowledgments like "Yeah" and "Mm-hmm" that were previously merged into neighboring segments
+
+### 🐛 Bug Fix: Speaker Corrections
+
+**Reassign-Then-Undo No Longer Breaks**
+- Fixed a bug where reassigning a segment to a different speaker and then trying to move it back would fail
+- The backend now correctly tracks your corrections, so multi-step speaker edits work as expected
+
+---
+
 ## Version 2.7.0 - January 30, 2026
 
 ### ✨ Manual Speaker Correction

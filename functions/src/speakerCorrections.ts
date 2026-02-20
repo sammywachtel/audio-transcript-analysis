@@ -57,6 +57,114 @@ interface UndoCorrectionResponse {
   success: boolean;
 }
 
+/** Minimal shape of a correction doc — only fields the replay helper cares about */
+interface ActiveCorrection {
+  type: 'merge' | 'reassign' | 'rename';
+  // merge
+  sourceSpeakerId?: string;
+  targetSpeakerId?: string;
+  // reassign
+  segmentIds?: string[];
+  toSpeakerId?: string;
+  // rename
+  speakerId?: string;
+  newDisplayName?: string;
+}
+
+/**
+ * Replay active corrections to derive the effective speaker map and
+ * segment-to-speaker mapping. Mirrors the client-side apply-on-read
+ * logic in useSpeakerCorrections.ts (the useMemo at ~line 172).
+ *
+ * We need this because raw Firestore data doesn't reflect prior
+ * corrections — a segment reassigned A→B still shows speakerId=A
+ * in the raw doc. Without replay, the backend rejects valid moves
+ * like B→A ("already belongs to target speaker").
+ */
+async function computeEffectiveState(
+  conversationId: string,
+  rawSpeakers: Record<string, any>,
+  rawSegments: Array<{ segmentId: string; speakerId: string; [key: string]: any }>
+): Promise<{
+  effectiveSpeakers: Record<string, any>;
+  effectiveSegmentSpeaker: Map<string, string>;
+}> {
+  // Fetch all corrections, ordered chronologically
+  const correctionsSnap = await db
+    .collection('conversations')
+    .doc(conversationId)
+    .collection('speakerCorrections')
+    .orderBy('createdAt', 'asc')
+    .get();
+
+  // Filter to active only (not undone)
+  const active: ActiveCorrection[] = [];
+  for (const doc of correctionsSnap.docs) {
+    const data = doc.data();
+    if (data.undoneAt) continue;
+    active.push({
+      type: data.type,
+      sourceSpeakerId: data.sourceSpeakerId,
+      targetSpeakerId: data.targetSpeakerId,
+      segmentIds: data.segmentIds,
+      toSpeakerId: data.toSpeakerId,
+      speakerId: data.speakerId,
+      newDisplayName: data.newDisplayName,
+    });
+  }
+
+  // Deep-copy speakers so we don't mutate the raw data
+  const speakers: Record<string, any> = {};
+  for (const [id, speaker] of Object.entries(rawSpeakers)) {
+    speakers[id] = { ...speaker };
+  }
+
+  // Build mutable segment-to-speaker map
+  const segSpeaker = new Map<string, string>();
+  for (const seg of rawSegments) {
+    segSpeaker.set(seg.segmentId, seg.speakerId);
+  }
+
+  // Replay corrections in order — same logic as client hook
+  for (const c of active) {
+    if (c.type === 'merge') {
+      if (!c.sourceSpeakerId || !c.targetSpeakerId) continue;
+      if (!speakers[c.sourceSpeakerId] || !speakers[c.targetSpeakerId]) continue;
+
+      delete speakers[c.sourceSpeakerId];
+      for (const [segId, spkId] of segSpeaker) {
+        if (spkId === c.sourceSpeakerId) {
+          segSpeaker.set(segId, c.targetSpeakerId);
+        }
+      }
+    } else if (c.type === 'reassign') {
+      if (!c.segmentIds || !c.toSpeakerId) continue;
+      for (const segId of c.segmentIds) {
+        if (segSpeaker.has(segId)) {
+          segSpeaker.set(segId, c.toSpeakerId);
+        }
+      }
+    } else if (c.type === 'rename') {
+      if (!c.speakerId || !c.newDisplayName) continue;
+      if (!speakers[c.speakerId]) continue;
+      speakers[c.speakerId] = {
+        ...speakers[c.speakerId],
+        displayName: c.newDisplayName,
+      };
+    }
+  }
+
+  // Prune speakers with zero segments (matches client behavior)
+  const speakersWithSegments = new Set(segSpeaker.values());
+  for (const speakerId of Object.keys(speakers)) {
+    if (!speakersWithSegments.has(speakerId)) {
+      delete speakers[speakerId];
+    }
+  }
+
+  return { effectiveSpeakers: speakers, effectiveSegmentSpeaker: segSpeaker };
+}
+
 /**
  * Merge two speakers by writing a correction record.
  *
@@ -119,12 +227,16 @@ export const mergeSpeakers = onCall<MergeSpeakersRequest>(
         throw new HttpsError('permission-denied', 'You do not have access to this conversation');
       }
 
-      // Validate that both speakers exist in the conversation
-      const speakers = conversation.speakers || {};
-      if (!speakers[sourceSpeakerId]) {
+      // Validate against effective state (raw data doesn't reflect prior corrections)
+      const { effectiveSpeakers } = await computeEffectiveState(
+        conversationId,
+        conversation.speakers || {},
+        conversation.segments || []
+      );
+      if (!effectiveSpeakers[sourceSpeakerId]) {
         throw new HttpsError('invalid-argument', `Source speaker '${sourceSpeakerId}' not found`);
       }
-      if (!speakers[targetSpeakerId]) {
+      if (!effectiveSpeakers[targetSpeakerId]) {
         throw new HttpsError('invalid-argument', `Target speaker '${targetSpeakerId}' not found`);
       }
 
@@ -244,31 +356,30 @@ export const reassignSegments = onCall<ReassignSegmentsRequest>(
         throw new HttpsError('permission-denied', 'You do not have access to this conversation');
       }
 
-      // Validate segments exist and all belong to the same speaker
-      const segments = conversation.segments || [];
-
-      interface SegmentData {
-        segmentId: string;
-        speakerId: string;
-        [key: string]: any;
-      }
-
-      const segmentMap = new Map<string, SegmentData>(
-        segments.map((s: any) => [s.segmentId, s as SegmentData])
+      // Validate against effective state (raw data doesn't reflect prior corrections)
+      const { effectiveSpeakers, effectiveSegmentSpeaker } = await computeEffectiveState(
+        conversationId,
+        conversation.speakers || {},
+        conversation.segments || []
       );
 
+      // Validate target speaker exists in effective state
+      if (!effectiveSpeakers[toSpeakerId]) {
+        throw new HttpsError('invalid-argument', `Target speaker '${toSpeakerId}' not found`);
+      }
+
+      // Validate segments exist and all effectively belong to the same speaker
       let fromSpeakerId: string | null = null;
 
       for (const segmentId of segmentIds) {
-        const segment = segmentMap.get(segmentId);
-        if (!segment) {
+        const effectiveOwner = effectiveSegmentSpeaker.get(segmentId);
+        if (!effectiveOwner) {
           throw new HttpsError('invalid-argument', `Segment '${segmentId}' not found`);
         }
 
-        // All segments must belong to the same speaker
         if (fromSpeakerId === null) {
-          fromSpeakerId = segment.speakerId;
-        } else if (segment.speakerId !== fromSpeakerId) {
+          fromSpeakerId = effectiveOwner;
+        } else if (effectiveOwner !== fromSpeakerId) {
           throw new HttpsError(
             'invalid-argument',
             'All segments must belong to the same speaker'
@@ -278,12 +389,6 @@ export const reassignSegments = onCall<ReassignSegmentsRequest>(
 
       if (!fromSpeakerId) {
         throw new HttpsError('invalid-argument', 'Could not determine source speaker');
-      }
-
-      // Validate target speaker exists
-      const speakers = conversation.speakers || {};
-      if (!speakers[toSpeakerId]) {
-        throw new HttpsError('invalid-argument', `Target speaker '${toSpeakerId}' not found`);
       }
 
       // Don't allow reassigning to the same speaker

@@ -50,12 +50,16 @@ print(f'Whisper cached to {path}')" && \
     test -f /models/faster-whisper-large-v3-turbo/model.bin
 
 # pyannote diarization + speaker embedding models
-# HF_TOKEN needed at build time to access gated models
-ARG HF_TOKEN
-RUN HF_HOME=/models HF_TOKEN=${HF_TOKEN} python3 -c "\
+# Token passed via BuildKit secret mount — never baked into image layers.
+# Build with: docker build --secret id=hf_token,env=HF_TOKEN ...
+RUN --mount=type=secret,id=hf_token \
+    HF_HOME=/models \
+    HF_TOKEN=$(cat /run/secrets/hf_token) \
+    python3 -c "\
+import os; token = os.environ['HF_TOKEN']; \
 from pyannote.audio import Pipeline, Model; \
-Pipeline.from_pretrained('pyannote/speaker-diarization-3.1', use_auth_token='${HF_TOKEN}'); \
-Model.from_pretrained('pyannote/wespeaker-voxceleb-resnet34-LM', use_auth_token='${HF_TOKEN}'); \
+Pipeline.from_pretrained('pyannote/speaker-diarization-3.1', use_auth_token=token); \
+Model.from_pretrained('pyannote/wespeaker-voxceleb-resnet34-LM', use_auth_token=token); \
 print('Pyannote models cached')" && \
     echo "=== Model cache contents ===" && \
     ls -la /models/ && \
