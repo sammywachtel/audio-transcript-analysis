@@ -259,6 +259,147 @@ gcloud tasks list \
   --project=$PROJECT_ID
 ```
 
+## Whisper GPU Service (Cloud Run)
+
+The WhisperX transcription service runs on Cloud Run with an NVIDIA L4 GPU for fast audio transcription and speaker diarization.
+
+### Quick Deploy
+
+```bash
+# Full build + deploy (reads GCP_PROJECT_ID from .env)
+./scripts/deploy-whisper.sh
+
+# Build and push image only (no deploy)
+./scripts/deploy-whisper.sh --build-only
+
+# Deploy an already-pushed image (no build)
+./scripts/deploy-whisper.sh --deploy-only
+
+# Rebuild without Docker cache (after Dockerfile changes)
+./scripts/deploy-whisper.sh --no-cache
+
+# Deploy with a specific image tag
+./scripts/deploy-whisper.sh --tag v1.2.3
+```
+
+The script reads configuration from `.env` (or environment variables):
+- `GCP_PROJECT_ID` (required)
+- `WHISPER_REGION` (default: `us-east4`)
+- `WHISPER_SERVICE_NAME` (default: `whisperx-service`)
+
+### Manual Build and Push
+
+```bash
+PROJECT_ID="your-project-id"
+REGION="us-east4"  # GPU quota region — may differ from main project region
+IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/whisper-gpu/whisperx:latest"
+
+# Authenticate Docker with Artifact Registry
+gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+
+# Build for linux/amd64 (required by Cloud Run, even if building on ARM Mac)
+# HF_TOKEN needed for gated pyannote models — passed via BuildKit secret (not baked into layers)
+export HF_TOKEN="hf_..."  # your HuggingFace access token
+DOCKER_BUILDKIT=1 docker build --platform linux/amd64 \
+  --secret id=hf_token,env=HF_TOKEN \
+  -t "$IMAGE" cloud-run-whisper/
+
+# Push to Artifact Registry
+docker push "$IMAGE"
+```
+
+> **Note:** The Artifact Registry repository `whisper-gpu` is created automatically by `gcp-setup.sh`. If it doesn't exist, run the setup script first.
+
+### Deploy to Cloud Run with GPU
+
+```bash
+PROJECT_ID="your-project-id"
+REGION="us-east4"  # GPU quota region — may differ from main project region
+IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/whisper-gpu/whisperx:latest"
+
+gcloud run deploy whisperx-service \
+  --project=$PROJECT_ID \
+  --region=$REGION \
+  --image=$IMAGE \
+  --gpu=1 \
+  --gpu-type=nvidia-l4 \
+  --no-gpu-zonal-redundancy \
+  --memory=16Gi \
+  --timeout=300 \
+  --concurrency=1 \
+  --min-instances=0 \
+  --max-instances=3 \
+  --no-allow-unauthenticated
+```
+
+**Flag Breakdown:**
+
+| Flag | Value | Why |
+|------|-------|-----|
+| `--gpu=1` | 1 GPU | WhisperX needs GPU for inference |
+| `--gpu-type=nvidia-l4` | NVIDIA L4 | Cost-effective inference GPU |
+| `--no-gpu-zonal-redundancy` | Single zone | Lower quota requirement, fine for batch workloads |
+| `--memory=16Gi` | 16 GiB | WhisperX + pyannote models need headroom |
+| `--timeout=300` | 5 min | Hard limit per request (Cloud Run backstop) |
+| `--concurrency=1` | 1 req/instance | GPU can't safely share across concurrent requests |
+| `--min-instances=0` | Scale to zero | No cost when idle |
+| `--max-instances=3` | Max 3 instances | Cost safeguard — caps GPU spend |
+| `--no-allow-unauthenticated` | IAM auth | Only Cloud Functions runtime SA can invoke |
+
+### Verify the Deployment
+
+```bash
+PROJECT_ID="your-project-id"
+REGION="us-central1"
+
+# Check service status
+gcloud run services describe whisperx-service \
+  --project=$PROJECT_ID \
+  --region=$REGION \
+  --format="value(status.url)"
+
+# Check revisions
+gcloud run revisions list \
+  --service=whisperx-service \
+  --project=$PROJECT_ID \
+  --region=$REGION
+```
+
+### Set Up Monitoring Alert (Request Duration > 120s)
+
+Create a Cloud Monitoring alert policy that fires when Whisper Cloud Run requests exceed 120 seconds. This provides an early warning before the 300s hard timeout:
+
+```bash
+PROJECT_ID="your-project-id"
+
+gcloud alpha monitoring policies create \
+  --project=$PROJECT_ID \
+  --display-name="Whisper Cloud Run: Request duration > 120s" \
+  --condition-display-name="Request latency exceeds 120s" \
+  --condition-filter='resource.type="cloud_run_revision" AND resource.labels.service_name="whisperx-service" AND metric.type="run.googleapis.com/request_latencies"' \
+  --condition-threshold-value=120000 \
+  --condition-threshold-duration=0s \
+  --condition-threshold-comparison=COMPARISON_GT \
+  --aggregation-alignment-period=60s \
+  --aggregation-per-series-aligner=ALIGN_PERCENTILE_99 \
+  --notification-channels=[] \
+  --documentation="Whisper Cloud Run p99 request latency exceeded 120s. Investigate whether audio files are unusually large or if GPU performance has degraded. The hard timeout is 300s."
+```
+
+> **Note:** Replace `--notification-channels=[]` with your notification channel ID to receive alerts. Create a notification channel in the [Cloud Console](https://console.cloud.google.com/monitoring/alerting/notifications) first, then reference it by ID.
+
+Alternatively, create the alert via the Cloud Console:
+
+1. Go to **Cloud Console** → **Monitoring** → **Alerting** → **Create Policy**
+2. **Add Condition:**
+   - Resource type: `Cloud Run Revision`
+   - Metric: `Request Latencies` (`run.googleapis.com/request_latencies`)
+   - Filter: `service_name = "whisperx-service"`
+   - Aggregation: 99th percentile, 1-minute alignment
+   - Threshold: Above 120,000 ms
+3. **Add Notification Channel** (email, Slack, PagerDuty, etc.)
+4. **Name:** "Whisper Cloud Run: Request duration > 120s"
+
 ## Workload Identity Federation Setup
 
 Cloud Run deployment uses Workload Identity Federation for secure, keyless authentication from GitHub Actions. This must be configured in the **same project** as your Firebase backend.
