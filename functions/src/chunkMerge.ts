@@ -659,9 +659,14 @@ export async function mergeChunks(conversationId: string): Promise<void> {
       };
 
       // Build extended reconciliation metadata for observability
+      const embeddingSignals: string[] = ['embeddings'];
+      if (reconciliationMethod === 'embeddings' && reconciliationResult.nameBoostCount > 0) {
+        embeddingSignals.push('names');
+      }
+
       reconciliationMetadata = {
         signalsUsed: reconciliationMethod === 'embeddings'
-          ? ['embeddings']
+          ? embeddingSignals
           : ['name', 'topic', 'term'],
         fallbackTriggered: false,
         speakerMatchConfidences: reconciliationResult.clusterDetails.map((c: any) => ({
@@ -676,7 +681,8 @@ export async function mergeChunks(conversationId: string): Promise<void> {
           estimatedUniqueSpeakers: reconciliationResult.estimatedUniqueSpeakers,
           relaxationTriggered: reconciliationResult.relaxationTriggered,
           finalEdgeThreshold: reconciliationResult.finalEdgeThreshold,
-          relaxationIterations: reconciliationResult.relaxationIterations
+          relaxationIterations: reconciliationResult.relaxationIterations,
+          nameBoostCount: reconciliationResult.nameBoostCount
         })
       };
 

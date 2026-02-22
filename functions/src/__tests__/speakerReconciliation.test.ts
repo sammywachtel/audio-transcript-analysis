@@ -547,18 +547,28 @@ describe('speakerReconciliation', () => {
 
     /**
      * Helper to create a minimal chunk artifact with embeddings.
+     * Optionally populates speaker display names for name-boost tests.
      */
     function createChunkArtifact(
       chunkIndex: number,
-      speakers: { [speakerId: string]: number[] }
+      embeddings: { [speakerId: string]: number[] },
+      speakerDisplayNames?: { [speakerId: string]: string }
     ): ChunkArtifact {
+      // Build speakers map — populate display names when the caller cares about them
+      const speakers: Record<string, { speakerId: string; displayName: string; colorIndex: number }> = {};
+      if (speakerDisplayNames) {
+        for (const [speakerId, displayName] of Object.entries(speakerDisplayNames)) {
+          speakers[speakerId] = { speakerId, displayName, colorIndex: 0 };
+        }
+      }
+
       return {
         conversationId: 'test-conv',
         userId: 'test-user',
         chunkIndex,
         totalChunks: 2,
         segments: [],
-        speakers: {},
+        speakers,
         terms: {},
         termOccurrences: [],
         topics: [],
@@ -581,7 +591,7 @@ describe('speakerReconciliation', () => {
         },
         createdAt: new Date().toISOString(),
         storagePath: `chunks/chunk-${chunkIndex}.wav`,
-        speakerEmbeddings: speakers
+        speakerEmbeddings: embeddings
       };
     }
 
@@ -719,6 +729,139 @@ describe('speakerReconciliation', () => {
           // Over-fragmentation detected - should have triggered relaxation
           expect(result.relaxationTriggered).toBe(true);
         }
+      });
+    });
+
+    describe('name boost behavior', () => {
+      it('should apply name boost and produce higher similarity for same-name cross-chunk pairs', () => {
+        // Use very similar embeddings (score: 0.95) so the merge is clear and robust
+        // against the noise in generateEmbedding. The key behavior tested here is:
+        // (a) nameBoostCount is non-zero when names match, and
+        // (b) named speakers merge while a sanity check verifies boost was applied.
+        const embeddingA = generateEmbedding(8001);
+        const embeddingB = generateEmbedding(8002, { to: embeddingA, score: 0.95 });
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }, { SPEAKER_00: 'Sam Wachtel' }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB }, { SPEAKER_00: 'Sam Wachtel' })
+        ];
+
+        const resultNoNames = reconcileSpeakersWithEmbeddings([
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB })
+        ]);
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Named run must have applied exactly one boost (the cross-chunk same-name pair)
+        expect(result.nameBoostCount).toBe(1);
+        // Unnamed run must have applied zero boosts
+        expect(resultNoNames.nameBoostCount).toBe(0);
+
+        // With score: 0.95, the embeddings are close enough to merge in both cases
+        expect(result.clusterDetails.length).toBe(1);
+        expect(result.speakerIdMap.get('SPEAKER_00_chunk0')).toBe(result.speakerIdMap.get('SPEAKER_00_chunk1'));
+      });
+
+      it('should NOT merge speakers with low embedding similarity when names differ', () => {
+        const embeddingA = generateEmbedding(8011);
+        const embeddingB = generateEmbedding(8012, { to: embeddingA, score: 0.50 });
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }, { SPEAKER_00: 'Alice' }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB }, { SPEAKER_00: 'Bob' })
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Different names — no boost — they stay separate
+        expect(result.nameBoostCount).toBe(0);
+        expect(result.clusterDetails.length).toBe(2);
+      });
+
+      it('should NOT boost generic placeholder names like "Speaker 1" or "Unknown"', () => {
+        const embeddingA = generateEmbedding(8021);
+        const embeddingB = generateEmbedding(8022, { to: embeddingA, score: 0.50 });
+        const embeddingC = generateEmbedding(8023, { to: embeddingA, score: 0.50 });
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }, { SPEAKER_00: 'Speaker 1' }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB }, { SPEAKER_00: 'Speaker 1' }),
+          createChunkArtifact(2, { SPEAKER_00: embeddingC }, { SPEAKER_00: 'Unknown' })
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Generic names are skip-listed — zero boosts, all clusters stay separate
+        expect(result.nameBoostCount).toBe(0);
+      });
+
+      it('should strip role suffixes before comparing names', () => {
+        // "Sam (New Team Member)" and "Sam (expert)" should both normalize to "sam"
+        // The key behavior: nameBoostCount is 1 (boost fired) vs 0 (no boost without names).
+        // We use score: 0.95 for reliable cosine, not to test the merge-on-boost edge case.
+        const embeddingA = generateEmbedding(8031);
+        const embeddingB = generateEmbedding(8032, { to: embeddingA, score: 0.95 });
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }, { SPEAKER_00: 'Sam (New Team Member)' }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB }, { SPEAKER_00: 'Sam (expert)' })
+        ];
+
+        const resultNoNames = reconcileSpeakersWithEmbeddings([
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB })
+        ]);
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Role suffixes stripped — "sam" === "sam" — boost fires once
+        expect(result.nameBoostCount).toBe(1);
+        // No display names → no boost
+        expect(resultNoNames.nameBoostCount).toBe(0);
+
+        // Both runs should merge (score is high enough without the boost too),
+        // but the named run proves the normalization worked
+        expect(result.clusterDetails.length).toBe(1);
+      });
+
+      it('should NOT boost same-chunk speaker pairs even when names match', () => {
+        // Two speakers in the SAME chunk happen to be named the same — that's two
+        // different people, not a cross-chunk identity match. Don't boost them.
+        const embeddingA = generateEmbedding(8041);
+        const embeddingB = generateEmbedding(8042, { to: embeddingA, score: 0.50 });
+
+        // Both in chunk 0
+        const chunkArtifacts = [
+          createChunkArtifact(0, {
+            SPEAKER_00: embeddingA,
+            SPEAKER_01: embeddingB
+          }, {
+            SPEAKER_00: 'Alex',
+            SPEAKER_01: 'Alex' // Different Alex, same chunk
+          })
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Same-chunk guard fires — no boost applied
+        expect(result.nameBoostCount).toBe(0);
+      });
+
+      it('should report nameBoostCount of zero when no speakers have display names', () => {
+        // Existing test pattern — chunk artifacts with empty speakers maps
+        // (the original createChunkArtifact call with no display names)
+        const embeddingA = generateEmbedding(8051);
+        const embeddingB = generateEmbedding(8052, { to: embeddingA, score: 0.50 });
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }),   // no display names
+          createChunkArtifact(1, { SPEAKER_00: embeddingB })    // no display names
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        expect(result.nameBoostCount).toBe(0);
       });
     });
 

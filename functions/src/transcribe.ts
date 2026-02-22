@@ -3203,7 +3203,9 @@ function mergeWhisperXAndGeminiData(
           // EXCEPTION: If we have a speaker role (host, guest, interviewer, etc.), trust the identification
           // because someone can be both a speaker AND mentioned (e.g., Bill Gates being interviewed)
           const hasConfirmingRole = speakerNote.role &&
-            ['host', 'guest', 'interviewer', 'interviewee', 'speaker', 'expert', 'panelist', 'moderator', 'co-host']
+            ['host', 'guest', 'interviewer', 'interviewee', 'speaker', 'expert', 'panelist', 'moderator', 'co-host',
+             'presenter', 'participant', 'team member', 'lead', 'consultant', 'facilitator', 'analyst', 'manager',
+             'director', 'engineer', 'developer', 'designer', 'owner']
               .some(role => speakerNote.role!.toLowerCase().includes(role));
 
           if (mentionedPeopleNames.has(inferredLower) && !hasConfirmingRole) {
