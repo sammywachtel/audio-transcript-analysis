@@ -1,5 +1,20 @@
 # What's New
 
+## Version 2.9.0 - February 22, 2026
+
+### 🎯 Smarter Speaker Matching
+
+**Name-Aware Voice Matching**
+- When the system identifies the same person by name across different parts of a long recording, it now uses that as a tiebreaker for voice matching
+- Previously, speakers with borderline voice similarity could end up split into separate entries even when both were clearly "Sam" — now matching names nudge the system toward merging them correctly
+- Generic labels like "Speaker 1" are ignored to prevent false merges
+
+**Better Role Recognition**
+- Speakers with roles like "Team Member", "Engineer", "Presenter", or "Consultant" are now correctly recognized as active participants
+- Previously, if someone named "Terry" was both a speaker and mentioned in conversation, their name could be rejected unless they had a role like "Host" or "Guest" — this is now fixed for 13 additional roles
+
+---
+
 ## Version 2.8.0 - February 20, 2026
 
 ### 🚀 Faster Transcription with Dedicated GPU

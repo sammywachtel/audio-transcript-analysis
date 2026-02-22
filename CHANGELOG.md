@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-02-22
+
+### Added
+- **Name-Boosted Speaker Reconciliation** - Speakers identified with the same name across different audio chunks now receive a similarity boost during voice-matching
+  - Configurable boost amount (default 0.15) nudges borderline voice matches over the merge threshold when identity is confirmed by name
+  - Normalizes names by stripping role suffixes (e.g., "Sam (Team Member)" → "sam") and lowercasing before comparison
+  - Skips generic placeholder names ("Speaker 1", "Unknown") to avoid false merges
+  - Only applies to cross-chunk pairs — same-chunk speakers with matching names stay separate
+  - Per-boost logging and `nameBoostCount` in reconciliation metadata for observability
+  - `signalsUsed` metadata now includes `"names"` when name boosts are applied, distinguishing name-assisted runs from embeddings-only
+
+### Changed
+- **Expanded Speaker Role Recognition** - Added 13 active-participant roles to the People-list confirming-role whitelist
+  - New roles: presenter, participant, team member, lead, consultant, facilitator, analyst, manager, director, engineer, developer, designer, owner
+  - Speakers with these roles are no longer rejected when their name matches someone in the People list (talked about vs. present)
+  - Fixes cases like "Terry (Team Member)" being rejected because "team member" wasn't in the allowed roles
+
 ## [2.8.0] - 2026-02-20
 
 ### Added

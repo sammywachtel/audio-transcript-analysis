@@ -505,6 +505,8 @@ export interface ReconciliationMetadata {
   finalEdgeThreshold?: number;
   /** Number of relaxation iterations performed */
   relaxationIterations?: number;
+  /** Number of cross-chunk same-name pairs that received a similarity boost */
+  nameBoostCount?: number;
 }
 
 // =============================================================================

@@ -50,6 +50,8 @@ export interface EmbeddingReconciliationResult {
   finalEdgeThreshold: number;
   /** Number of relaxation iterations performed */
   relaxationIterations: number;
+  /** Number of cross-chunk same-name pairs that received a similarity boost */
+  nameBoostCount: number;
 }
 
 export interface EmbeddingClusterDetails {
@@ -107,6 +109,14 @@ export const EmbeddingReconciliationConfig = {
    * from reconciliation to prevent low-quality audio from causing false merges.
    */
   QUALITY_FLOOR: 0.3,
+
+  /**
+   * Name boost: added to cross-chunk similarity when both speakers share the same
+   * normalized display name. Treats confirmed identity as a tiebreaker nudge —
+   * won't rescue truly incompatible embeddings, but helps borderline pairs merge.
+   * Capped at 1.0 to keep values sane.
+   */
+  NAME_BOOST: 0.15,
 };
 
 // ============================================================================
@@ -130,6 +140,92 @@ function estimateUniqueSpeakers(chunkArtifacts: ChunkArtifact[]): number {
   }
 
   return maxUniqueSpeakers;
+}
+
+/**
+ * Normalize a speaker display name for same-identity comparison.
+ *
+ * Strips parenthesized role suffixes (e.g. "Sam (New Team Member)" → "sam"),
+ * lowercases, and trims whitespace. Returns null for generic placeholder names
+ * like "Speaker 1" or "Unknown" — boosting those would merge every anonymous
+ * speaker in a meeting, which is exactly the wrong thing.
+ */
+function normalizeSpeakerName(displayName: string): string | null {
+  if (!displayName) return null;
+
+  // Generic names that tell us nothing about identity — skip them
+  if (/^speaker\s*\d*/i.test(displayName.trim()) || /^unknown$/i.test(displayName.trim())) {
+    return null;
+  }
+
+  // Strip parenthesized role/title suffixes: "Sam (Lead Engineer)" → "Sam"
+  const stripped = displayName.replace(/\s*\([^)]*\)\s*/g, '').trim().toLowerCase();
+
+  return stripped.length > 0 ? stripped : null;
+}
+
+/**
+ * Apply name-based similarity boosts to cross-chunk speaker pairs.
+ *
+ * When two speakers from different chunks share the same normalized display name,
+ * we nudge their similarity up by NAME_BOOST. This helps borderline pairs that
+ * voice embeddings alone can't confidently merge — especially when audio quality
+ * is uneven across chunks. Won't rescue truly different speakers (the embedding
+ * signal is still dominant), but it's a useful tiebreaker.
+ *
+ * Same-chunk pairs are deliberately excluded — two different people named "Alex"
+ * in the same chunk should stay separate, and embedding similarity already handles
+ * the cross-chunk case when voices are clearly different.
+ *
+ * @returns Total number of boosts applied (for observability)
+ */
+function applyNameBoosts(
+  similarityMatrix: number[][],
+  entries: EmbeddingEntry[],
+  chunkArtifacts: ChunkArtifact[]
+): number {
+  let boostCount = 0;
+
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      // Same-chunk pairs are never merged anyway — skip the lookup overhead
+      if (entries[i].chunkIndex === entries[j].chunkIndex) continue;
+
+      // Look up display names from the chunk artifacts
+      const artifactI = chunkArtifacts.find(a => a.chunkIndex === entries[i].chunkIndex);
+      const artifactJ = chunkArtifacts.find(a => a.chunkIndex === entries[j].chunkIndex);
+
+      if (!artifactI || !artifactJ) continue;
+
+      const speakerI = artifactI.speakers[entries[i].speakerId];
+      const speakerJ = artifactJ.speakers[entries[j].speakerId];
+
+      if (!speakerI?.displayName || !speakerJ?.displayName) continue;
+
+      const nameI = normalizeSpeakerName(speakerI.displayName);
+      const nameJ = normalizeSpeakerName(speakerJ.displayName);
+
+      if (!nameI || !nameJ || nameI !== nameJ) continue;
+
+      // Same normalized name in different chunks — apply the boost, cap at 1.0
+      const before = similarityMatrix[i][j];
+      const boosted = Math.min(1.0, before + EmbeddingReconciliationConfig.NAME_BOOST);
+      similarityMatrix[i][j] = boosted;
+      similarityMatrix[j][i] = boosted;
+
+      console.log('[EmbeddingReconciliation] Name boost applied:', {
+        entryI: entries[i].originalId,
+        entryJ: entries[j].originalId,
+        name: nameI,
+        before: before.toFixed(3),
+        after: boosted.toFixed(3)
+      });
+
+      boostCount++;
+    }
+  }
+
+  return boostCount;
 }
 
 /**
@@ -161,7 +257,8 @@ export function reconcileSpeakersWithEmbeddings(
       estimatedUniqueSpeakers: 0,
       relaxationTriggered: false,
       finalEdgeThreshold: 0,
-      relaxationIterations: 0
+      relaxationIterations: 0,
+      nameBoostCount: 0
     };
   }
 
@@ -191,6 +288,13 @@ export function reconcileSpeakersWithEmbeddings(
   console.log('[EmbeddingReconciliation] Applied temporal/boundary boosts:', {
     speakerAppearanceCount: speakerAppearances.size,
     chunkBoundsCount: chunkBounds.size
+  });
+
+  // Step 3.6: Apply name-based similarity boosts for cross-chunk same-name pairs
+  const nameBoostCount = applyNameBoosts(similarityMatrix, embeddingEntries, chunkArtifacts);
+
+  console.log('[EmbeddingReconciliation] Applied name boosts:', {
+    nameBoostCount
   });
 
   // Step 4: Iterative agglomerative clustering with adaptive thresholds
@@ -345,7 +449,8 @@ export function reconcileSpeakersWithEmbeddings(
     cohesionThreshold: cohesionThreshold.toFixed(3),
     qualityExclusions,
     relaxationTriggered,
-    relaxationIterations
+    relaxationIterations,
+    nameBoostCount
   });
 
   return {
@@ -359,7 +464,8 @@ export function reconcileSpeakersWithEmbeddings(
     estimatedUniqueSpeakers,
     relaxationTriggered,
     finalEdgeThreshold: edgeThreshold,
-    relaxationIterations
+    relaxationIterations,
+    nameBoostCount
   };
 }
 
