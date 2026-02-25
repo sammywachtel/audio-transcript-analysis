@@ -59,6 +59,19 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [warningBannerDismissed, setWarningBannerDismissed] = useState(false);
 
+  // Selection mode: opt-in toggle so default clicks always navigate audio
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
+  const [selectionClearSignal, setSelectionClearSignal] = useState(0);
+
+  const toggleSelectionMode = useCallback(() => {
+    setIsSelectionMode(prev => !prev);
+  }, []);
+
+  const exitSelectionModeAndClear = useCallback(() => {
+    setIsSelectionMode(false);
+    setSelectionClearSignal(prev => prev + 1);
+  }, []);
+
   // Fetch audio URL from Firebase Storage on mount
   // The URL is generated on-demand because Storage download URLs expire
   useEffect(() => {
@@ -154,7 +167,9 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
     togglePlay,
     seekBack: () => seek(currentTime - 5000),
     seekForward: () => seek(currentTime + 5000),
-    openHelp: () => {} // Modal state handled by hook
+    openHelp: () => {}, // Modal state handled by hook
+    toggleSelectionMode,
+    exitSelectionMode: exitSelectionModeAndClear
   });
 
   // Chat history persistence
@@ -502,6 +517,9 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
           personOccurrences={personOccurrences}
           highlightedSegmentId={highlightedSegmentId}
           recentReassignSegmentIds={recentReassignSegmentIds}
+          isSelectionMode={isSelectionMode}
+          onToggleSelectionMode={toggleSelectionMode}
+          selectionClearSignal={selectionClearSignal}
           onSeek={seek}
           onTermClick={handleTermClickInTranscript}
           onRenameSpeaker={handleRenameSpeaker}

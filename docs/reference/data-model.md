@@ -168,7 +168,7 @@ interface SpeakerCorrectionDoc {
 - Persists across reloads and devices
 - **Merge workflow**: Click merge button → Select target speaker → Confirm
 - **Reassign workflow (single segment)**: Right-click/long-press segment → Select target speaker
-- **Reassign workflow (multiple segments)**: Shift+Click to select range → Choose target speaker from floating bar
+- **Reassign workflow (multiple segments)**: Press `S` to enter selection mode → Click/Shift+Click to select segments → Choose target speaker from floating bar → Press `Escape` or click "Done" to exit
 - **Rename workflow**: Double-click speaker name in sidebar → Edit inline → Enter to save, Escape to cancel
 - Non-destructive (original data unchanged)
 - Audit trail preserved even after undo

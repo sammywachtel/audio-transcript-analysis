@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { X, Play, SkipBack, SkipForward, HelpCircle } from 'lucide-react';
+import { X, Play, SkipBack, SkipForward, HelpCircle, MousePointerClick } from 'lucide-react';
 
 interface KeyboardShortcutsModalProps {
   isOpen: boolean;
@@ -39,6 +39,13 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({
         { keys: ['Space'], description: 'Play / Pause', icon: <Play size={16} /> },
         { keys: ['←', 'J'], description: 'Seek back 5 seconds', icon: <SkipBack size={16} /> },
         { keys: ['→', 'K'], description: 'Seek forward 5 seconds', icon: <SkipForward size={16} /> }
+      ]
+    },
+    {
+      category: 'Selection',
+      items: [
+        { keys: ['S'], description: 'Toggle selection mode', icon: <MousePointerClick size={16} /> },
+        { keys: ['Esc'], description: 'Exit selection & clear', icon: <X size={16} /> }
       ]
     },
     {

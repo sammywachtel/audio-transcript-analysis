@@ -141,7 +141,7 @@ Firebase secrets (stored via Firebase Secret Manager):
 3. **Wait for Processing** - Cloud Function processes audio (1-3 min depending on length)
 4. **View Transcript** - Interactive viewer with speaker labels and timestamps
 5. **Navigate** - Click any segment to jump to that point in audio
-6. **Fix Speakers** - Click speaker badge to reassign segment to different speaker
+6. **Fix Speakers** - Press `S` to enter selection mode, click/Shift+Click segments, then reassign via the floating bar. Default clicks always seek audio.
 7. **Explore** - Use sidebar to browse terms, topics, and people mentioned
 
 ## Project Structure
