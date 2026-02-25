@@ -173,4 +173,104 @@ describe('useKeyboardShortcuts', () => {
 
     expect(result.current.helpModalOpen).toBe(false);
   });
+
+  it('should call toggleSelectionMode on S key', () => {
+    const toggleSelectionMode = vi.fn();
+    renderHook(() => useKeyboardShortcuts({
+      togglePlay: vi.fn(),
+      seekBack: vi.fn(),
+      seekForward: vi.fn(),
+      toggleSelectionMode
+    }));
+
+    const event = new KeyboardEvent('keydown', { key: 's' });
+    act(() => {
+      document.dispatchEvent(event);
+    });
+
+    expect(toggleSelectionMode).toHaveBeenCalledTimes(1);
+  });
+
+  it('should call toggleSelectionMode on uppercase S key', () => {
+    const toggleSelectionMode = vi.fn();
+    renderHook(() => useKeyboardShortcuts({
+      togglePlay: vi.fn(),
+      seekBack: vi.fn(),
+      seekForward: vi.fn(),
+      toggleSelectionMode
+    }));
+
+    const event = new KeyboardEvent('keydown', { key: 'S' });
+    act(() => {
+      document.dispatchEvent(event);
+    });
+
+    expect(toggleSelectionMode).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not call toggleSelectionMode when typing in input field', () => {
+    const toggleSelectionMode = vi.fn();
+    renderHook(() => useKeyboardShortcuts({
+      togglePlay: vi.fn(),
+      seekBack: vi.fn(),
+      seekForward: vi.fn(),
+      toggleSelectionMode
+    }));
+
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+
+    const event = new KeyboardEvent('keydown', { key: 's', bubbles: true });
+    Object.defineProperty(event, 'target', { value: input, enumerable: true });
+
+    act(() => {
+      document.dispatchEvent(event);
+    });
+
+    expect(toggleSelectionMode).not.toHaveBeenCalled();
+    document.body.removeChild(input);
+  });
+
+  it('should call exitSelectionMode on Escape when help modal is closed', () => {
+    const exitSelectionMode = vi.fn();
+    renderHook(() => useKeyboardShortcuts({
+      togglePlay: vi.fn(),
+      seekBack: vi.fn(),
+      seekForward: vi.fn(),
+      exitSelectionMode
+    }));
+
+    const event = new KeyboardEvent('keydown', { key: 'Escape' });
+    act(() => {
+      document.dispatchEvent(event);
+    });
+
+    expect(exitSelectionMode).toHaveBeenCalledTimes(1);
+  });
+
+  it('should close help modal on Escape before calling exitSelectionMode', () => {
+    const exitSelectionMode = vi.fn();
+    const { result } = renderHook(() => useKeyboardShortcuts({
+      togglePlay: vi.fn(),
+      seekBack: vi.fn(),
+      seekForward: vi.fn(),
+      exitSelectionMode
+    }));
+
+    // Open help modal first
+    const openEvent = new KeyboardEvent('keydown', { key: '?' });
+    act(() => {
+      document.dispatchEvent(openEvent);
+    });
+    expect(result.current.helpModalOpen).toBe(true);
+
+    // Escape should close modal, NOT call exitSelectionMode
+    const escEvent = new KeyboardEvent('keydown', { key: 'Escape' });
+    act(() => {
+      document.dispatchEvent(escEvent);
+    });
+
+    expect(result.current.helpModalOpen).toBe(false);
+    expect(exitSelectionMode).not.toHaveBeenCalled();
+  });
 });

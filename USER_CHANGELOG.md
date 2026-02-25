@@ -1,5 +1,27 @@
 # What's New
 
+## Version 2.9.2 - February 25, 2026
+
+### 🎯 Selection Mode for Speaker Fixes
+
+**Clicks Do What You Expect**
+- Clicking a transcript segment now always jumps to that point in the audio — no more accidentally selecting segments when you just want to navigate
+- The previous behavior (where a click could toggle multi-select) caused confusion when you expected playback and got a purple highlight instead
+
+**Explicit Selection Mode**
+- Press `S` on your keyboard or click the "Select" button to enter selection mode
+- In selection mode, click segments to select them (purple highlight), then use the floating bar to reassign them to a different speaker
+- Shift+Click selects a range of segments at once
+- Press `Escape` to exit selection mode and clear your selections
+- Click "Done" to exit but keep your selections for later
+
+**Always Know What Mode You're In**
+- A visible indicator shows when selection mode is active
+- Selected segment count is displayed so you always know how many segments you've picked
+- The `?` help modal now lists the new `S` and `Esc` shortcuts
+
+---
+
 ## Version 2.9.1 - February 23, 2026
 
 ### 🐛 More Accurate Speaker Boundaries
