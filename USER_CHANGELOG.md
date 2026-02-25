@@ -1,5 +1,20 @@
 # What's New
 
+## Version 2.9.1 - February 23, 2026
+
+### 🐛 More Accurate Speaker Boundaries
+
+**Cleaner Sentence Breaks**
+- Transcript segments now break at natural sentence boundaries more reliably
+- Previously, a segment could start or end mid-sentence (e.g., "Yeah. So what I was" cut off from "saying is...") — now trailing fragments are moved to where they belong
+- The system also catches smaller fragments after commas and semicolons
+
+**Smarter Speaker Corrections**
+- When the AI detects that a segment contains speech from two different people, it can now split the segment at the sentence boundary instead of just reassigning the whole thing
+- Invalid splits are safely skipped — no risk of garbled or missing text
+
+---
+
 ## Version 2.9.0 - February 22, 2026
 
 ### 🎯 Smarter Speaker Matching
