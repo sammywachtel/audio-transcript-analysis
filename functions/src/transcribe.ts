@@ -340,7 +340,8 @@ interface SpeakerCorrection {
   action: 'split' | 'reassign';
   reason: string;
   // For split action:
-  splitAtChar?: number;
+  splitAtChar?: number;       // DEPRECATED: old char-position anchor (kept for _applySpeakerCorrections compat)
+  splitAfterSentence?: string; // NEW: sentence text anchor — find this text, split after it
   speakerBefore?: string;
   speakerAfter?: string;
   // For reassign action:
@@ -2365,89 +2366,174 @@ function groupWordSegmentsIgnoringSpeaker(
  * Heuristic: If a segment starts with a sentence fragment (text ending in
  * sentence-ending punctuation within first N chars), move it to prev segment.
  */
-function fixSegmentBoundaries(
+export function fixSegmentBoundaries(
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>
 ): Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }> {
   if (segments.length < 2) {
     return segments;
   }
 
-  const MAX_FRAGMENT_CHARS = 80;  // Only look for fragments in first 80 chars
-  const MIN_REMAINING_CHARS = 20; // Don't move if it leaves segment too short
+  const MAX_FRAGMENT_CHARS = 80;       // Forward pass: max fragment length at segment START
+  const MAX_COMMA_FRAGMENT_CHARS = 40; // Secondary pattern: comma/semicolon fragments are smaller
+  const MIN_REMAINING_CHARS = 20;      // Don't move if it leaves a stub behind
+  const MAX_REVERSE_FRAGMENT_CHARS = 80; // Reverse pass: max trailing fragment at segment END
 
-  // Regex to find sentence-ending punctuation followed by space and more text
-  // Matches: "text here. More text" or "question? Answer" or "wow! Response"
+  // Primary: sentence-ending punctuation followed by a capitalized continuation
   const fragmentPattern = /^(.+?[.!?])\s+([A-Z].*)/s;
+  // Secondary: comma or semicolon fragment at start — "well, anyway. But" style trailing clauses
+  const commaFragmentPattern = /^(.+?[,;])\s+([A-Z].*)/s;
+  // Reverse: last sentence boundary followed by short trailing text
+  const reverseFragmentPattern = /(.+[.!?])\s+(.{1,80})$/s;
 
-  let movedCount = 0;
+  let forwardCandidates = 0;
+  let forwardMoved = 0;
+  let reverseCandidates = 0;
+  let reverseMoved = 0;
   const result = [...segments];
 
+  // ---- FORWARD PASS: move leading fragment of segment[i] to segment[i-1] ----
   for (let i = 1; i < result.length; i++) {
     const current = result[i];
     const previous = result[i - 1];
 
-    // Only fix boundaries between DIFFERENT speakers
     if (current.speakerId === previous.speakerId) {
       continue;
     }
 
     const text = current.text.trim();
 
-    // Check if segment starts with a fragment (sentence ending within first N chars)
-    const match = text.match(fragmentPattern);
-    if (!match) {
+    // Try primary pattern first (sentence-ending punctuation)
+    let fragment: string | null = null;
+    let remainder: string | null = null;
+    let maxFragLen = MAX_FRAGMENT_CHARS;
+
+    const primaryMatch = text.match(fragmentPattern);
+    if (primaryMatch) {
+      fragment = primaryMatch[1];
+      remainder = primaryMatch[2];
+    } else {
+      // Try secondary: comma/semicolon fragment (tighter length limit)
+      const commaMatch = text.match(commaFragmentPattern);
+      if (commaMatch) {
+        fragment = commaMatch[1];
+        remainder = commaMatch[2];
+        maxFragLen = MAX_COMMA_FRAGMENT_CHARS;
+      }
+    }
+
+    if (!fragment || !remainder) {
       continue;
     }
 
-    const fragment = match[1];  // The part to move (e.g., "all these other things. Anyways.")
-    const remainder = match[2]; // The part to keep (e.g., "But having tools...")
+    forwardCandidates++;
 
-    // Only move if fragment is reasonably short and remainder is long enough
-    if (fragment.length > MAX_FRAGMENT_CHARS || remainder.length < MIN_REMAINING_CHARS) {
+    if (fragment.length > maxFragLen || remainder.length < MIN_REMAINING_CHARS) {
       continue;
     }
 
-    // Additional check: fragment should look like a continuation, not a complete thought
-    // Skip if fragment starts with common sentence starters
+    // Fragment starting with common sentence starters is probably intentional speech,
+    // not a dangling tail — but only reject it if it's long enough to stand alone.
+    // Threshold lowered from 40 → 25: short starter fragments are still usually bleeds.
     const startsWithSentenceStarter = /^(I|You|We|They|He|She|It|The|A|An|This|That|So|But|And|Or|If|When|What|How|Why|Where|Who)\s/i.test(fragment);
-    if (startsWithSentenceStarter && fragment.length > 40) {
-      // Longer fragments starting with sentence starters are probably intentional
+    if (startsWithSentenceStarter && fragment.length > 25) {
       continue;
     }
 
-    console.debug(`[FixBoundaries] Moving fragment from segment ${i} to ${i-1}:`, {
+    console.debug(`[FixBoundaries] Forward: moving fragment from seg ${i} to ${i-1}:`, {
       fragment: fragment.substring(0, 50) + (fragment.length > 50 ? '...' : ''),
       fromSpeaker: current.speakerId,
       toSpeaker: previous.speakerId
     });
 
-    // Calculate new timestamps (interpolate based on character ratio)
     const totalChars = current.text.length;
     const fragmentRatio = fragment.length / totalChars;
     const durationMs = current.endMs - current.startMs;
     const fragmentDurationMs = Math.floor(durationMs * fragmentRatio);
     const newBoundaryMs = current.startMs + fragmentDurationMs;
 
-    // Update previous segment: append fragment and extend end time
     result[i - 1] = {
       ...previous,
       text: previous.text.trimEnd() + ' ' + fragment,
       endMs: newBoundaryMs
     };
 
-    // Update current segment: remove fragment and adjust start time
     result[i] = {
       ...current,
       text: remainder,
       startMs: newBoundaryMs
     };
 
-    movedCount++;
+    forwardMoved++;
   }
 
-  if (movedCount > 0) {
-    console.log(`[FixBoundaries] Moved ${movedCount} sentence fragments to previous segments`);
+  // ---- REVERSE PASS: move trailing fragment of segment[i] to segment[i+1] ----
+  // Catches the mirror problem: speaker change detected early, so the start of the
+  // next speaker's thought is still appended to the current speaker's segment.
+  for (let i = 0; i < result.length - 1; i++) {
+    const current = result[i];
+    const next = result[i + 1];
+
+    if (current.speakerId === next.speakerId) {
+      continue;
+    }
+
+    const text = current.text.trim();
+
+    // Look for a sentence boundary followed by a short trailing chunk
+    const match = text.match(reverseFragmentPattern);
+    if (!match) {
+      continue;
+    }
+
+    const keep = match[1];     // Everything up to and including last sentence end
+    const trailing = match[2]; // The orphaned tail that belongs to the next segment
+
+    reverseCandidates++;
+
+    if (trailing.length > MAX_REVERSE_FRAGMENT_CHARS || keep.length < MIN_REMAINING_CHARS) {
+      continue;
+    }
+
+    // Reject if trailing starts with a sentence starter and is substantial —
+    // that suggests it's intentional content, not a bleed.
+    const trailingStartsWithStarter = /^(I|You|We|They|He|She|It|The|A|An|This|That|So|But|And|Or|If|When|What|How|Why|Where|Who)\s/i.test(trailing);
+    if (trailingStartsWithStarter && trailing.length > 25) {
+      continue;
+    }
+
+    console.debug(`[FixBoundaries] Reverse: moving trailing fragment from seg ${i} to ${i+1}:`, {
+      trailing: trailing.substring(0, 50) + (trailing.length > 50 ? '...' : ''),
+      fromSpeaker: current.speakerId,
+      toSpeaker: next.speakerId
+    });
+
+    const totalChars = current.text.length;
+    const keepRatio = keep.length / totalChars;
+    const durationMs = current.endMs - current.startMs;
+    const keepDurationMs = Math.floor(durationMs * keepRatio);
+    const newBoundaryMs = current.startMs + keepDurationMs;
+
+    result[i] = {
+      ...current,
+      text: keep,
+      endMs: newBoundaryMs
+    };
+
+    result[i + 1] = {
+      ...next,
+      text: trailing + ' ' + next.text.trimStart(),
+      startMs: newBoundaryMs
+    };
+
+    reverseMoved++;
   }
+
+  console.log('[FixBoundaries] Boundary repair complete:', {
+    forwardCandidates,
+    forwardMoved,
+    reverseCandidates,
+    reverseMoved
+  });
 
   // Re-index segments
   return result.map((seg, idx) => ({ ...seg, index: idx }));
@@ -2789,7 +2875,7 @@ async function identifySpeakerReassignments(
   const vertexAI = getVertexAIClient();
 
   // Use gemini-2.5-flash for speaker reassignment analysis
-  // Schema simplified to only support reassign (no split)
+  // Schema supports both 'reassign' (whole-segment) and 'split' (mid-segment) actions
   const model = vertexAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     generationConfig: {
@@ -2802,11 +2888,15 @@ async function identifySpeakerReassignments(
             items: {
               type: SchemaType.OBJECT,
               properties: {
-                segmentIndex: { type: SchemaType.INTEGER },
-                newSpeaker: { type: SchemaType.STRING },
-                reason: { type: SchemaType.STRING }
+                segmentIndex:       { type: SchemaType.INTEGER },
+                action:             { type: SchemaType.STRING },  // 'reassign' or 'split'
+                newSpeaker:         { type: SchemaType.STRING },  // for reassign
+                splitAfterSentence: { type: SchemaType.STRING },  // for split: last sentence of first speaker
+                speakerBefore:      { type: SchemaType.STRING },  // for split
+                speakerAfter:       { type: SchemaType.STRING },  // for split
+                reason:             { type: SchemaType.STRING }
               },
-              required: ['segmentIndex', 'newSpeaker', 'reason']
+              required: ['segmentIndex', 'action', 'reason']
             }
           }
         },
@@ -2837,7 +2927,10 @@ You are an expert at identifying speaker attribution errors in conversation tran
 
 CURRENT SPEAKER DISTRIBUTION: ${speakerDistribution}
 
-Analyze this transcript and identify segments where the ENTIRE SEGMENT is attributed to the WRONG speaker.
+Analyze this transcript and identify attribution errors. You can suggest two types of corrections:
+
+**action: "reassign"** — The ENTIRE segment belongs to a different speaker.
+**action: "split"** — ONE segment contains text from TWO different speakers (mid-segment change).
 
 Focus on these patterns that indicate MISATTRIBUTION:
 
@@ -2860,11 +2953,30 @@ Focus on these patterns that indicate MISATTRIBUTION:
    - Brief responses like "Yeah", "Mm-hmm", "Right" during someone's extended speech
    - These are often from the listener, not the speaker
 
+5. BOUNDARY BLEED:
+   - The START of a segment may contain the END of the previous speaker's thought
+   - Look for segments that begin with a short phrase or sentence ending
+   - If the first sentence reads like a continuation of the PREVIOUS segment's topic
+     but the rest is clearly from the current speaker, flag for split
+
+6. SPEAKER ISLANDS:
+   - A single short segment (< 15 words) attributed to speaker B, surrounded by
+     speaker A segments on both sides, is often a misattribution (use reassign)
+
+7. MID-SEGMENT SPEAKER CHANGES (SPLIT):
+   - If a SINGLE segment contains text from TWO different speakers, suggest splitting
+   - Provide "splitAfterSentence": the EXACT text of the last complete sentence spoken
+     by the FIRST speaker (this anchors the split point)
+   - The split MUST be at a sentence boundary (the anchor text must end with . ! or ?)
+   - Maximum 3 splits per transcript — only the most obvious cases
+   - Provide "speakerBefore" and "speakerAfter" speaker IDs for split corrections
+
 IMPORTANT GUIDELINES:
-- Only identify segments where the ENTIRE segment should be reassigned to a different speaker
-- Do NOT suggest splitting segments - only whole-segment reassignments
-- Be conservative - only flag clear errors based on conversational logic
-- Provide the newSpeaker ID (must be one of: ${speakerList})
+- Use action: "reassign" for whole-segment changes (provide "newSpeaker")
+- Use action: "split" for mid-segment speaker changes (provide "splitAfterSentence", "speakerBefore", "speakerAfter")
+- Be conservative — only flag clear errors based on conversational logic
+- All speaker IDs must be one of: ${speakerList}
+- Maximum 3 split corrections total
 
 Available speakers: ${speakerList}
 
@@ -2872,8 +2984,10 @@ Transcript (with speaker labels and segment indices):
 ${formattedTranscript}
 
 Return your analysis as JSON with an array of corrections.
-Each correction needs: segmentIndex (0-based), newSpeaker (the correct speaker ID), reason (brief explanation).
-If no corrections are needed, return an empty array.
+Each correction needs: segmentIndex (0-based), action ("reassign" or "split"), reason (brief explanation).
+For reassign: also include newSpeaker.
+For split: also include splitAfterSentence, speakerBefore, speakerAfter.
+If no corrections are needed, return an empty corrections array.
 `;
 
   console.log('[Speaker Reassignment] Analyzing transcript...', {
@@ -2909,20 +3023,38 @@ If no corrections are needed, return an empty array.
 
   // Parse response with robust error handling (fallback to no corrections on failure)
   try {
-    type ReassignResponse = { corrections: Array<{ segmentIndex: number; newSpeaker: string; reason: string }> };
-    const parsed = robustJsonParse<ReassignResponse>(responseText, 'Speaker Reassignment');
+    type CorrectionResponse = { corrections: Array<{
+      segmentIndex: number;
+      action: string;
+      newSpeaker?: string;
+      splitAfterSentence?: string;
+      speakerBefore?: string;
+      speakerAfter?: string;
+      reason: string;
+    }> };
+    const parsed = robustJsonParse<CorrectionResponse>(responseText, 'Speaker Reassignment');
 
-    // Convert to SpeakerCorrection format with action='reassign'
     const corrections: SpeakerCorrection[] = parsed.corrections.map(c => ({
       segmentIndex: c.segmentIndex,
-      action: 'reassign' as const,
+      action: (c.action === 'split' ? 'split' : 'reassign') as 'split' | 'reassign',
       reason: c.reason,
-      newSpeaker: c.newSpeaker
+      newSpeaker: c.newSpeaker,
+      splitAfterSentence: c.splitAfterSentence,
+      speakerBefore: c.speakerBefore,
+      speakerAfter: c.speakerAfter
     }));
 
+    const reassignCount = corrections.filter(c => c.action === 'reassign').length;
+    const splitCount = corrections.filter(c => c.action === 'split').length;
     console.log('[Speaker Reassignment] Analysis complete:', {
       correctionCount: corrections.length,
-      corrections: corrections.map(c => `[${c.segmentIndex}] -> ${c.newSpeaker}: ${c.reason?.substring(0, 50)}`)
+      reassignCount,
+      splitCount,
+      corrections: corrections.map(c =>
+        c.action === 'split'
+          ? `[${c.segmentIndex}] SPLIT after "${c.splitAfterSentence?.substring(0, 30)}": ${c.reason?.substring(0, 50)}`
+          : `[${c.segmentIndex}] -> ${c.newSpeaker}: ${c.reason?.substring(0, 50)}`
+      )
     });
 
     return {
@@ -2945,11 +3077,17 @@ If no corrections are needed, return an empty array.
 }
 
 /**
- * Apply speaker reassignments to segments.
- * Only changes speaker IDs - NO timestamp manipulation.
- * This is the safe version that won't cause timestamp clustering issues.
+ * Apply speaker corrections (reassignments and splits) to segments.
+ *
+ * Processing order:
+ *   1. Apply all reassignments (simple speaker ID swaps, no timestamp changes)
+ *   2. Apply up to MAX_SPLITS splits in DESCENDING index order (to keep earlier indices valid)
+ *   3. Merge adjacent same-speaker segments created/revealed by the splits
+ *   4. Re-index all segments
+ *
+ * Every split is guarded — invalid corrections are skipped with a log, never thrown.
  */
-function applySpeakerReassignments(
+export function applySpeakerReassignments(
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
   corrections: SpeakerCorrection[],
   allSpeakers: string[]
@@ -2958,43 +3096,157 @@ function applySpeakerReassignments(
     return segments;
   }
 
-  // Only process reassign actions (ignore any split actions that might slip through)
+  const MAX_SPLITS = 3;
+  const MIN_SPLIT_HALF_CHARS = 20; // Both halves must be at least this long
+
+  // ---- Phase 1: Reassignments ----
   const reassignments = corrections.filter(c => c.action === 'reassign' && c.newSpeaker);
-
-  if (reassignments.length === 0) {
-    return segments;
-  }
-
-  const result = [...segments];
+  let result = [...segments];
 
   for (const correction of reassignments) {
     const { segmentIndex, newSpeaker } = correction;
 
-    // Validate segment index
     if (segmentIndex < 0 || segmentIndex >= result.length) {
-      console.warn(`[Speaker Reassignment] Invalid segment index ${segmentIndex}, skipping`);
+      console.warn(`[Speaker Reassignment] Invalid segment index ${segmentIndex}, skipping reassign`);
       continue;
     }
 
-    // Validate new speaker exists
     if (!allSpeakers.includes(newSpeaker!)) {
-      console.warn(`[Speaker Reassignment] Unknown speaker ${newSpeaker}, skipping`);
+      console.warn(`[Speaker Reassignment] Unknown speaker "${newSpeaker}", skipping reassign`);
       continue;
     }
 
     const oldSpeaker = result[segmentIndex].speakerId;
-
-    // Only apply if actually changing speaker
     if (oldSpeaker !== newSpeaker) {
-      console.debug(`[Speaker Reassignment] Segment ${segmentIndex}: ${oldSpeaker} -> ${newSpeaker}`);
-      result[segmentIndex] = {
-        ...result[segmentIndex],
-        speakerId: newSpeaker!
-      };
+      console.debug(`[Speaker Reassignment] Seg ${segmentIndex}: ${oldSpeaker} -> ${newSpeaker}`);
+      result[segmentIndex] = { ...result[segmentIndex], speakerId: newSpeaker! };
     }
   }
 
-  return result;
+  // ---- Phase 2: Splits ----
+  // Cap at MAX_SPLITS, process descending so earlier indices stay valid
+  const splitCorrections = corrections
+    .filter(c => c.action === 'split' && c.splitAfterSentence)
+    .slice(0, MAX_SPLITS)
+    .sort((a, b) => b.segmentIndex - a.segmentIndex);
+
+  const droppedSplits = corrections.filter(c => c.action === 'split').length - splitCorrections.length;
+  if (droppedSplits > 0) {
+    console.warn(`[Speaker Reassignment] Dropped ${droppedSplits} split correction(s) exceeding MAX_SPLITS=${MAX_SPLITS}`);
+  }
+
+  for (const correction of splitCorrections) {
+    const { segmentIndex, splitAfterSentence, speakerBefore, speakerAfter } = correction;
+
+    // Guard: valid index
+    if (segmentIndex < 0 || segmentIndex >= result.length) {
+      console.warn(`[Speaker Reassignment] Invalid segment index ${segmentIndex}, skipping split`);
+      continue;
+    }
+
+    // Guard: both speakers must be known
+    if (!speakerBefore || !speakerAfter) {
+      console.warn(`[Speaker Reassignment] Split at seg ${segmentIndex} missing speakerBefore/speakerAfter, skipping`);
+      continue;
+    }
+    if (!allSpeakers.includes(speakerBefore)) {
+      console.warn(`[Speaker Reassignment] Unknown speakerBefore "${speakerBefore}" for split at seg ${segmentIndex}, skipping`);
+      continue;
+    }
+    if (!allSpeakers.includes(speakerAfter)) {
+      console.warn(`[Speaker Reassignment] Unknown speakerAfter "${speakerAfter}" for split at seg ${segmentIndex}, skipping`);
+      continue;
+    }
+
+    const segment = result[segmentIndex];
+    const anchor = splitAfterSentence!.trim();
+
+    // Guard: anchor text must exist in segment
+    const anchorPos = segment.text.indexOf(anchor);
+    if (anchorPos === -1) {
+      console.warn(`[Speaker Reassignment] splitAfterSentence not found in seg ${segmentIndex}, skipping`, {
+        anchor: anchor.substring(0, 60),
+        segmentStart: segment.text.substring(0, 60)
+      });
+      continue;
+    }
+
+    // Guard: anchor must end at a sentence boundary
+    const splitPos = anchorPos + anchor.length; // character index right after the anchor
+    const anchorEndsWithPunct = /[.!?]$/.test(anchor.trimEnd());
+    if (!anchorEndsWithPunct) {
+      console.warn(`[Speaker Reassignment] Split anchor for seg ${segmentIndex} doesn't end with sentence punctuation, skipping`, {
+        anchor: anchor.substring(0, 60)
+      });
+      continue;
+    }
+
+    const textBefore = segment.text.substring(0, splitPos).trim();
+    const textAfter = segment.text.substring(splitPos).trim();
+
+    // Guard: both halves must be substantial enough to stand alone
+    if (textBefore.length < MIN_SPLIT_HALF_CHARS || textAfter.length < MIN_SPLIT_HALF_CHARS) {
+      console.warn(`[Speaker Reassignment] Split halves too short for seg ${segmentIndex}, skipping`, {
+        beforeLen: textBefore.length,
+        afterLen: textAfter.length,
+        minRequired: MIN_SPLIT_HALF_CHARS
+      });
+      continue;
+    }
+
+    // Interpolate timestamps by character ratio
+    const totalChars = segment.text.length;
+    const charRatio = textBefore.length / totalChars;
+    const durationMs = segment.endMs - segment.startMs;
+    const splitTimeMs = segment.startMs + Math.floor(durationMs * charRatio);
+
+    console.debug(`[Speaker Reassignment] Splitting seg ${segmentIndex}:`, {
+      speakerBefore,
+      speakerAfter,
+      splitTimeMs,
+      beforeLen: textBefore.length,
+      afterLen: textAfter.length,
+      reason: correction.reason?.substring(0, 60)
+    });
+
+    const segBefore = {
+      text: textBefore,
+      startMs: segment.startMs,
+      endMs: splitTimeMs,
+      speakerId: speakerBefore,
+      index: segment.index  // placeholder — reindexed at end
+    };
+
+    const segAfter = {
+      text: textAfter,
+      startMs: splitTimeMs,
+      endMs: segment.endMs,
+      speakerId: speakerAfter,
+      index: segment.index  // placeholder
+    };
+
+    result.splice(segmentIndex, 1, segBefore, segAfter);
+  }
+
+  // ---- Phase 3: Merge adjacent same-speaker segments ----
+  // Splits can expose or create same-speaker neighbours — clean them up.
+  const merged: typeof result = [];
+  for (const seg of result) {
+    const last = merged[merged.length - 1];
+    if (last && last.speakerId === seg.speakerId) {
+      // Extend the previous segment
+      merged[merged.length - 1] = {
+        ...last,
+        text: last.text.trimEnd() + ' ' + seg.text.trimStart(),
+        endMs: seg.endMs
+      };
+    } else {
+      merged.push({ ...seg });
+    }
+  }
+
+  // ---- Phase 4: Re-index ----
+  return merged.map((seg, idx) => ({ ...seg, index: idx }));
 }
 
 /**

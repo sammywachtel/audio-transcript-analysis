@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.1] - 2026-02-23
+
+### Fixed
+- **Sentence-Boundary Diarization Errors** - Improved boundary repair and speaker correction for segments that split mid-sentence
+  - `fixSegmentBoundaries()` now runs both forward and reverse passes, catching trailing fragments and comma/semicolon splits (max 40 chars)
+  - Gemini speaker corrections now support `split` actions alongside `reassign`, using sentence-text anchors instead of character positions
+  - `applySpeakerReassignments()` upgraded to a 4-phase pipeline: reassign → split (max 3, guarded) → merge adjacent same-speaker → reindex
+  - Five guard rails prevent invalid splits: index validity, speaker validity, anchor presence, sentence punctuation, and minimum 20-char halves
+
 ## [2.9.0] - 2026-02-22
 
 ### Added

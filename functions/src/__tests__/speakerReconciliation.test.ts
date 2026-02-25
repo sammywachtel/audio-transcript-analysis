@@ -8,6 +8,9 @@
  * - Confidence thresholds and low-confidence errors
  * - Edge cases (empty signatures, single speaker, no overlap)
  * - Embedding-based reconciliation (singleton detection, adaptive relaxation)
+ *
+ * NOTE: fixSegmentBoundaries and applySpeakerReassignments tests live in
+ * segmentBoundaries.test.ts (separate file to isolate Firebase mock setup).
  */
 
 import { reconcileSpeakers, ReconciliationLowConfidenceError } from '../speakerReconciliation';
