@@ -36,7 +36,7 @@ import {
   sanitizeForFirestore,
   createInitialChunkContext
 } from './chunkContext';
-import { ChunkContext, ProcessingMode, SpeakerSignature } from './types';
+import { ChunkContext, ChunkingMetadata, ChunkPipelineResult, ProcessingMode, SpeakerHints, SpeakerSignature, PendingFollowerChunk } from './types';
 import { ChunkMetadata } from './chunking';
 import { BUILD_VERSION, BUILD_NUMBER } from './version';
 
@@ -121,6 +121,10 @@ interface TranscriptionTaskPayload {
   chunkEndMs?: number;
   overlapBeforeMs?: number;
   overlapAfterMs?: number;
+  /** True if this is the leader chunk (chunk 0 dispatched first) */
+  isLeaderChunk?: boolean;
+  /** Speaker hints from leader chunk, forwarded to follower chunks */
+  speakerHints?: SpeakerHints;
 }
 
 /**
@@ -128,6 +132,173 @@ interface TranscriptionTaskPayload {
  */
 function isChunkTask(payload: TranscriptionTaskPayload): boolean {
   return payload.chunkIndex !== undefined && payload.totalChunks !== undefined;
+}
+
+/**
+ * Extract speaker hints from the leader chunk's pipeline results.
+ * Pulls speaker count, names, and notes from speakerMappings + signatures
+ * so follower chunks can skip Gemini pre-analysis.
+ */
+export function extractSpeakerHints(pipelineResult: ChunkPipelineResult): SpeakerHints {
+  // Deduplicate names from speaker mappings (displayName field carries the goods)
+  const nameSet = new Set<string>();
+  const speakerNotes: SpeakerHints['speakerNotes'] = [];
+
+  for (const mapping of pipelineResult.speakerMappings) {
+    if (mapping.displayName) {
+      nameSet.add(mapping.displayName);
+    }
+    speakerNotes.push({
+      speakerId: mapping.canonicalId,
+      inferredName: mapping.displayName || undefined,
+    });
+  }
+
+  // Also pull names from speaker signatures if available (these have richer data)
+  if (pipelineResult.chunkSpeakerSignatures) {
+    for (const sig of pipelineResult.chunkSpeakerSignatures) {
+      if (sig.inferredName) {
+        nameSet.add(sig.inferredName);
+      }
+    }
+  }
+
+  return {
+    numSpeakers: pipelineResult.speakerMappings.length,
+    speakerNames: Array.from(nameSet),
+    speakerNotes: speakerNotes.length > 0 ? speakerNotes : undefined,
+  };
+}
+
+/**
+ * After the leader chunk (chunk 0) finishes, persist its speaker hints and
+ * dispatch all pending follower tasks with those hints baked into their payloads.
+ *
+ * Uses a transactional read of followersDispatched to prevent duplicate dispatch
+ * (e.g., if Cloud Tasks retries the leader task after it already succeeded).
+ */
+async function dispatchFollowersWithHints(
+  conversationId: string,
+  userId: string,
+  processingMode: ProcessingMode,
+  pipelineResult: ChunkPipelineResult
+): Promise<void> {
+  const hints = extractSpeakerHints(pipelineResult);
+
+  console.log('[ProcessTranscription] Leader chunk complete - extracting speaker hints:', {
+    conversationId,
+    numSpeakers: hints.numSpeakers,
+    speakerNames: hints.speakerNames,
+  });
+
+  const conversationRef = db.collection('conversations').doc(conversationId);
+
+  // Atomic check-and-dispatch: read pending followers and guard flag in one transaction
+  // to prevent double-dispatch if Cloud Tasks retries the leader
+  const pendingFollowers = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(conversationRef);
+    const data = snap.data();
+    const chunkingMeta = data?.chunkingMetadata as ChunkingMetadata | undefined;
+
+    if (!chunkingMeta?.pendingFollowerChunks?.length) {
+      console.log('[ProcessTranscription] No pending followers to dispatch (single-chunk job or already dispatched)');
+      return null;
+    }
+
+    if (chunkingMeta.followersDispatched) {
+      console.log('[ProcessTranscription] Followers already dispatched (duplicate leader completion)');
+      return null;
+    }
+
+    // Persist hints and mark followers as dispatched atomically
+    tx.update(conversationRef, {
+      'chunkingMetadata.leaderSpeakerHints': hints,
+      'chunkingMetadata.followersDispatched': true,
+      updatedAt: FieldValue.serverTimestamp()
+    });
+
+    return chunkingMeta.pendingFollowerChunks;
+  });
+
+  if (!pendingFollowers) {
+    return;
+  }
+
+  // Enqueue follower tasks with speaker hints
+  const { CloudTasksClient } = await import('@google-cloud/tasks');
+  const tasksClient = new CloudTasksClient();
+
+  const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+  if (!project) {
+    throw new Error('GCP project ID not found in environment');
+  }
+
+  const location = 'us-central1';
+  const queue = 'transcription-queue';
+  const parent = tasksClient.queuePath(project, location, queue);
+  const functionName = 'processTranscription';
+  const processTranscriptionUrl = `https://${location}-${project}.cloudfunctions.net/${functionName}`;
+  const DISPATCH_DEADLINE_SECONDS = 1800;
+
+  // Read current taskGeneration so followers use the right generation
+  const convSnap = await conversationRef.get();
+  const taskGeneration = convSnap.data()?.taskGeneration ?? 1;
+
+  const taskPromises = pendingFollowers.map(async (follower: PendingFollowerChunk, index: number) => {
+    const payload = {
+      conversationId,
+      userId,
+      filePath: follower.chunkStoragePath,
+      chunkIndex: follower.chunkIndex,
+      totalChunks: follower.totalChunks,
+      chunkMetadata: follower,
+      processingMode,
+      taskGeneration,
+      chunkStartMs: follower.startMs,
+      chunkEndMs: follower.endMs,
+      overlapBeforeMs: follower.overlapBeforeMs,
+      overlapAfterMs: follower.overlapAfterMs,
+      speakerHints: hints // The whole point of leader-first
+    };
+
+    const task = {
+      httpRequest: {
+        httpMethod: 'POST' as const,
+        url: processTranscriptionUrl,
+        headers: { 'Content-Type': 'application/json' },
+        body: Buffer.from(JSON.stringify(payload)).toString('base64'),
+        oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
+      },
+      // Stagger follower tasks to avoid thundering herd
+      scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 + (index * 2) },
+      dispatchDeadline: { seconds: DISPATCH_DEADLINE_SECONDS }
+    };
+
+    const [createdTask] = await tasksClient.createTask({ parent, task });
+
+    console.log('[ProcessTranscription] Follower task enqueued with hints:', {
+      conversationId,
+      chunkIndex: follower.chunkIndex,
+      taskName: createdTask.name,
+      hintSpeakerCount: hints.numSpeakers
+    });
+
+    return createdTask;
+  });
+
+  const createdTasks = await Promise.all(taskPromises);
+
+  // Clear pending followers now that they've been dispatched
+  await conversationRef.update({
+    'chunkingMetadata.pendingFollowerChunks': FieldValue.delete(),
+    updatedAt: FieldValue.serverTimestamp()
+  });
+
+  console.log('[ProcessTranscription] ✅ All follower tasks dispatched with speaker hints:', {
+    conversationId,
+    followerCount: createdTasks.length,
+    speakerHints: { numSpeakers: hints.numSpeakers, names: hints.speakerNames }
+  });
 }
 
 /**
@@ -290,7 +461,7 @@ export const processTranscription = onRequest(
       console.log('[ProcessTranscription] Starting transcription pipeline...', { version: BUILD_VERSION });
 
       // Execute the full transcription pipeline (shared with transcribeAudio)
-      // Pass chunk context and metadata for chunk-aware processing
+      // Pass chunk context, metadata, and leader hints for chunk-aware processing
       const pipelineResult = await executeTranscriptionPipeline({
         conversationId,
         userId,
@@ -304,7 +475,9 @@ export const processTranscription = onRequest(
           endMs: payload.chunkEndMs!,
           overlapBeforeMs: payload.overlapBeforeMs!,
           overlapAfterMs: payload.overlapAfterMs!
-        } : undefined
+        } : undefined,
+        // Forward leader hints to follower chunks (skips Gemini pre-analysis)
+        speakerHints: payload.speakerHints
       });
 
       // For chunk tasks, emit the next context and mark as complete
@@ -378,6 +551,18 @@ export const processTranscription = onRequest(
           allComplete: result.allComplete,
           shouldEnqueueMerge: result.shouldEnqueueMerge
         });
+
+        // Leader chunk completion: extract hints and dispatch followers
+        // This is the crux of the leader-first pattern - chunk 0 tells everyone else
+        // who's in the room so they don't have to guess
+        if (chunkIndex === 0 && payload.isLeaderChunk) {
+          await dispatchFollowersWithHints(
+            conversationId,
+            userId,
+            processingMode,
+            pipelineResult
+          );
+        }
 
         // If all chunks complete, enqueue merge task and update status
         if (result.shouldEnqueueMerge) {

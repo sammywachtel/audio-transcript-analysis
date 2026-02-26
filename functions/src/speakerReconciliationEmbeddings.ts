@@ -111,12 +111,24 @@ export const EmbeddingReconciliationConfig = {
   QUALITY_FLOOR: 0.3,
 
   /**
-   * Name boost: added to cross-chunk similarity when both speakers share the same
-   * normalized display name. Treats confirmed identity as a tiebreaker nudge —
-   * won't rescue truly incompatible embeddings, but helps borderline pairs merge.
-   * Capped at 1.0 to keep values sane.
+   * @deprecated NAME_BOOST is no longer used for the actual similarity calculation.
+   * Kept for backward-compatible reporting/logging. Use NAME_MERGE_FLOOR instead.
+   *
+   * Old behavior: `Math.min(1.0, before + NAME_BOOST)` — additive, could be gamed
+   * by very-low-similarity pairs getting just enough nudge to sneak through.
    */
   NAME_BOOST: 0.15,
+
+  /**
+   * Name merge floor: when two speakers share the same normalized display name
+   * across chunks, their similarity is lifted to AT LEAST this value.
+   *
+   * Floor semantics (max) beat additive semantics (add) here: if the embedding
+   * similarity is already above 0.75 we don't change it, but if it's 0.50 we
+   * raise it to 0.75 — treating a confirmed name match as a reliable identity signal
+   * without compounding already-high scores toward 1.0.
+   */
+  NAME_MERGE_FLOOR: 0.75,
 };
 
 // ============================================================================
@@ -207,18 +219,22 @@ function applyNameBoosts(
 
       if (!nameI || !nameJ || nameI !== nameJ) continue;
 
-      // Same normalized name in different chunks — apply the boost, cap at 1.0
+      // Same normalized name in different chunks — lift to floor if below it.
+      // Max semantics: already above 0.75? Leave it alone. Below? Raise to floor.
+      // Avoids piling score onto already-high pairs and makes the threshold crisp.
       const before = similarityMatrix[i][j];
-      const boosted = Math.min(1.0, before + EmbeddingReconciliationConfig.NAME_BOOST);
+      const boosted = Math.max(before, EmbeddingReconciliationConfig.NAME_MERGE_FLOOR);
       similarityMatrix[i][j] = boosted;
       similarityMatrix[j][i] = boosted;
 
-      console.log('[EmbeddingReconciliation] Name boost applied:', {
+      console.log('[EmbeddingReconciliation] Name floor applied:', {
         entryI: entries[i].originalId,
         entryJ: entries[j].originalId,
         name: nameI,
         before: before.toFixed(3),
-        after: boosted.toFixed(3)
+        floor: EmbeddingReconciliationConfig.NAME_MERGE_FLOOR.toFixed(3),
+        after: boosted.toFixed(3),
+        lifted: before < EmbeddingReconciliationConfig.NAME_MERGE_FLOOR
       });
 
       boostCount++;
@@ -297,9 +313,13 @@ export function reconcileSpeakersWithEmbeddings(
     nameBoostCount
   });
 
-  // Step 4: Iterative agglomerative clustering with adaptive thresholds
+  // Step 4: Iterative agglomerative clustering with adaptive thresholds.
+  // Monotonic invariant: edgeThreshold may only decrease across iterations.
+  // The adaptive function can suggest higher thresholds as clusters merge, but
+  // letting it climb back up causes oscillation and un-merges work we already did.
   let clusterLabels = initializeSingletonClusters(embeddingEntries.length);
   let edgeThreshold = computeAdaptiveEdgeThreshold(embeddingEntries.length);
+  let bestThreshold = edgeThreshold; // lowest threshold seen so far — our ratchet
 
   console.log('[EmbeddingReconciliation] Starting iterative clustering:', {
     initialClusters: embeddingEntries.length,
@@ -330,8 +350,12 @@ export function reconcileSpeakersWithEmbeddings(
       break;
     }
 
-    // Recompute edge threshold for next iteration based on new cluster count
-    edgeThreshold = computeAdaptiveEdgeThreshold(newClusterCount);
+    // Recompute edge threshold for next iteration based on new cluster count,
+    // but only allow it to move downward. Once we've committed to a lower threshold
+    // we don't un-relax — that way oscillation dies instead of running forever.
+    const candidateThreshold = computeAdaptiveEdgeThreshold(newClusterCount);
+    edgeThreshold = Math.min(bestThreshold, candidateThreshold);
+    bestThreshold = edgeThreshold;
   }
 
   // Step 5: Build clusters and compute singleton ratio
@@ -351,19 +375,26 @@ export function reconcileSpeakersWithEmbeddings(
   let relaxationIterations = 0;
   const initialEdgeThreshold = edgeThreshold;
 
-  // Check for warning conditions
-  if (singletonRatio > ADAPTIVE_CONFIG.singletonWarningThreshold) {
+  // >= not > — when ratio is exactly at the threshold, we should act, not shrug.
+  const highSingletonRatio = singletonRatio >= ADAPTIVE_CONFIG.singletonWarningThreshold;
+  const overFragmented = estimatedUniqueSpeakers > 0 && clusters.length > estimatedUniqueSpeakers * 2;
+
+  if (highSingletonRatio) {
     console.warn(`[EmbeddingReconciliation] ⚠️  High singleton ratio detected: ${(singletonRatio * 100).toFixed(1)}% (threshold: ${(ADAPTIVE_CONFIG.singletonWarningThreshold * 100).toFixed(0)}%)`);
   }
 
-  if (clusters.length > estimatedUniqueSpeakers * 2) {
+  if (overFragmented) {
     console.warn(`[EmbeddingReconciliation] ⚠️  Over-fragmentation detected: ${clusters.length} clusters vs ${estimatedUniqueSpeakers} estimated speakers (>2x)`);
   }
 
-  // Trigger adaptive relaxation if singleton ratio is too high
-  if (singletonRatio > ADAPTIVE_CONFIG.singletonWarningThreshold) {
+  // Trigger adaptive relaxation if singleton ratio is too high OR cluster count is
+  // embarrassingly larger than the speaker estimate. Two paths to the same fix.
+  if (highSingletonRatio || overFragmented) {
     relaxationTriggered = true;
-    console.log('[EmbeddingReconciliation] 🔧 Triggering adaptive threshold relaxation');
+    const triggerReason = highSingletonRatio && overFragmented ? 'both'
+      : highSingletonRatio ? 'singleton ratio'
+      : 'over-fragmentation';
+    console.log(`[EmbeddingReconciliation] 🔧 Triggering adaptive threshold relaxation (reason: ${triggerReason})`);
 
     for (let relaxIter = 0; relaxIter < ADAPTIVE_CONFIG.maxRelaxationIterations; relaxIter++) {
       // Relax edge threshold
@@ -403,9 +434,17 @@ export function reconcileSpeakersWithEmbeddings(
         singletonRatio: singletonRatio.toFixed(3)
       });
 
-      // Check if we've reached target singleton ratio
-      if (singletonRatio < ADAPTIVE_CONFIG.singletonTargetThreshold) {
+      // Two ways out: singleton ratio drops to target, OR cluster count falls
+      // back within 2x the speaker estimate (if over-fragmentation was the trigger).
+      const singletonGoalMet = singletonRatio < ADAPTIVE_CONFIG.singletonTargetThreshold;
+      const fragmentGoalMet = overFragmented && clusters.length <= estimatedUniqueSpeakers * 2;
+
+      if (singletonGoalMet) {
         console.log('[EmbeddingReconciliation] ✅ Target singleton ratio achieved');
+        break;
+      }
+      if (fragmentGoalMet) {
+        console.log('[EmbeddingReconciliation] ✅ Over-fragmentation resolved');
         break;
       }
     }

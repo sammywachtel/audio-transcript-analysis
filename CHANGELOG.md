@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-02-26
+
+### Added
+- **Leader-Chunk Speaker Hint Propagation** - Chunk 0 now processes first and shares speaker identity hints with all follower chunks
+  - Leader chunk's speaker mappings extracted and forwarded as `SpeakerHints` in follower Cloud Task payloads
+  - Follower chunks skip Gemini pre-analysis when valid leader hints are present, reducing latency and token costs
+  - Transactional `followersDispatched` guard prevents duplicate follower dispatch from Cloud Tasks at-least-once delivery
+  - All new fields are optional for backward compatibility with existing documents and in-flight tasks
+
+### Changed
+- **Name-Match Floor Semantics** - Cross-chunk name matching now uses floor-based similarity instead of additive boost
+  - `max(similarity, 0.75)` replaces `similarity + 0.15`, preventing low-similarity pairs from sneaking past the merge threshold while leaving already-high pairs unchanged
+  - `NAME_MERGE_FLOOR` (0.75) replaces deprecated `NAME_BOOST` (0.15) in `EmbeddingReconciliationConfig`
+- **Monotonic Clustering Threshold** - Agglomerative clustering edge threshold now only decreases across iterations, preventing oscillation when adaptive recomputation suggests a higher value
+- **Broader Over-Fragmentation Trigger** - Adaptive relaxation now also triggers when cluster count exceeds 2× estimated unique speakers, not only on high singleton ratio
+
 ## [2.9.1] - 2026-02-23
 
 ### Fixed

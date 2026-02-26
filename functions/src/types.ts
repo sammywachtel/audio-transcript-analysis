@@ -239,6 +239,39 @@ export interface ChunkContext {
 }
 
 /**
+ * Speaker identity hints extracted from the leader chunk (chunk 0).
+ * Passed to follower chunks so they can skip Gemini pre-analysis
+ * and start with known speaker names/counts.
+ */
+export interface SpeakerHints {
+  /** Number of speakers detected in the leader chunk */
+  numSpeakers: number;
+  /** Speaker names inferred from the leader chunk (e.g., ["Alice", "Bob"]) */
+  speakerNames: string[];
+  /** Per-speaker notes from the leader's pipeline (roles, context clues) */
+  speakerNotes?: Array<{
+    speakerId: string;
+    inferredName?: string;
+    role?: string;
+  }>;
+}
+
+/**
+ * Serialized follower chunk descriptor, persisted in Firestore
+ * while waiting for the leader chunk to finish.
+ * Basically everything we need to re-create the Cloud Task later.
+ */
+export interface PendingFollowerChunk {
+  chunkIndex: number;
+  totalChunks: number;
+  chunkStoragePath: string;
+  startMs: number;
+  endMs: number;
+  overlapBeforeMs: number;
+  overlapAfterMs: number;
+}
+
+/**
  * Firestore-stored chunking metadata with status tracking.
  * Extended from the original chunkMetadata to include context propagation.
  */
@@ -267,6 +300,12 @@ export interface ChunkingMetadata {
   mergeStartedAt?: string;
   /** When merge completed (ISO timestamp) */
   mergedAt?: string;
+  /** Speaker hints extracted from leader chunk (chunk 0) after it completes */
+  leaderSpeakerHints?: SpeakerHints;
+  /** Follower chunks waiting for leader to finish before dispatch */
+  pendingFollowerChunks?: PendingFollowerChunk[];
+  /** Whether follower tasks have been dispatched (guard against duplicate dispatch) */
+  followersDispatched?: boolean;
 }
 
 /**

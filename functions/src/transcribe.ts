@@ -47,6 +47,8 @@ import {
   SpeakerMapping,
   ChunkArtifact,
   SpeakerSignature,
+  SpeakerHints,
+  PendingFollowerChunk,
   ProcessingMode
 } from './types';
 import { computeSpeakerQualityMapFromWhisperXSegments } from './speakerQuality';
@@ -786,6 +788,8 @@ export interface TranscriptionPipelineParams {
     overlapBeforeMs: number;
     overlapAfterMs: number;
   };
+  /** Speaker hints from leader chunk - when present, skips Gemini pre-analysis */
+  speakerHints?: SpeakerHints;
 }
 
 /**
@@ -808,7 +812,7 @@ export interface TranscriptionPipelineParams {
  * On abort, updates status to 'aborted' and records partial metrics.
  */
 export async function executeTranscriptionPipeline(params: TranscriptionPipelineParams): Promise<ChunkPipelineResult> {
-  const { conversationId, userId, filePath, whisperServiceUrl, audioSizeBytes, chunkContext, chunkMetadata } = params;
+  const { conversationId, userId, filePath, whisperServiceUrl, audioSizeBytes, chunkContext, chunkMetadata, speakerHints } = params;
   const isChunkTask = !!chunkMetadata;
 
   // Initialize progress tracking (with chunk info for aggregate progress calculation)
@@ -873,38 +877,55 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     await checkAbort(conversationId);
 
     // Step 1: Pre-analyze with Gemini to get speaker hints
-    console.log('[Pipeline] Step 1: Pre-analyzing audio with Gemini...');
+    // If leader hints were forwarded from chunk 0, skip the Gemini call entirely -
+    // we already know who's talking and don't need to burn tokens re-discovering it
     const preAnalysisStartTime = Date.now();
 
     let preAnalysisResult: GeminiPreAnalysisResult | null = null;
     let whisperxHints: WhisperXDiarizationHints | undefined;
 
-    try {
-      preAnalysisResult = await preAnalyzeAudioWithGemini(
-        audioBuffer,
-        conversationId,
-        userId
-      );
-
+    if (speakerHints && speakerHints.speakerNames.length > 0) {
+      // Leader chunk already did the heavy lifting - use its hints directly
       whisperxHints = {
-        numSpeakers: preAnalysisResult.hints.numSpeakers,
-        speakerNames: preAnalysisResult.hints.speakerNames
+        numSpeakers: speakerHints.numSpeakers,
+        speakerNames: speakerHints.speakerNames
       };
 
-      console.log('[Pipeline] Pre-analysis complete:', {
-        speakerCount: whisperxHints.numSpeakers,
-        speakerNames: whisperxHints.speakerNames,
-        durationMs: Date.now() - preAnalysisStartTime
+      console.log('[Pipeline] Step 1: Skipping Gemini pre-analysis (using leader chunk hints):', {
+        numSpeakers: speakerHints.numSpeakers,
+        speakerNames: speakerHints.speakerNames,
+        hasSpeakerNotes: !!speakerHints.speakerNotes?.length
       });
+    } else {
+      console.log('[Pipeline] Step 1: Pre-analyzing audio with Gemini...');
 
-      partialMetrics.geminiLabels.push(preAnalysisResult.labels);
+      try {
+        preAnalysisResult = await preAnalyzeAudioWithGemini(
+          audioBuffer,
+          conversationId,
+          userId
+        );
 
-      // Track pre-analysis tokens as audio input (sends raw audio to Gemini)
-      partialMetrics.llmUsage.geminiAnalysis.audioInputTokens += preAnalysisResult.tokenUsage.inputTokens;
-      partialMetrics.llmUsage.geminiAnalysis.inputTokens += preAnalysisResult.tokenUsage.inputTokens;
-      partialMetrics.llmUsage.geminiAnalysis.outputTokens += preAnalysisResult.tokenUsage.outputTokens;
-    } catch (error) {
-      console.warn('[Pipeline] Pre-analysis failed, continuing without hints:', error);
+        whisperxHints = {
+          numSpeakers: preAnalysisResult.hints.numSpeakers,
+          speakerNames: preAnalysisResult.hints.speakerNames
+        };
+
+        console.log('[Pipeline] Pre-analysis complete:', {
+          speakerCount: whisperxHints.numSpeakers,
+          speakerNames: whisperxHints.speakerNames,
+          durationMs: Date.now() - preAnalysisStartTime
+        });
+
+        partialMetrics.geminiLabels.push(preAnalysisResult.labels);
+
+        // Track pre-analysis tokens as audio input (sends raw audio to Gemini)
+        partialMetrics.llmUsage.geminiAnalysis.audioInputTokens += preAnalysisResult.tokenUsage.inputTokens;
+        partialMetrics.llmUsage.geminiAnalysis.inputTokens += preAnalysisResult.tokenUsage.inputTokens;
+        partialMetrics.llmUsage.geminiAnalysis.outputTokens += preAnalysisResult.tokenUsage.outputTokens;
+      } catch (error) {
+        console.warn('[Pipeline] Pre-analysis failed, continuing without hints:', error);
+      }
     }
 
     // Check for abort after pre-analysis
@@ -1029,9 +1050,16 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     const analysis = analysisResult.analysis;
     const geminiAnalysisTokens = analysisResult.tokenUsage;
 
-    // Merge speaker notes from pre-analysis if available
-    // Pre-analysis identifies speakers by voice before WhisperX runs
-    if (preAnalysisResult?.hints._speakerNotes) {
+    // Merge speaker notes from pre-analysis or leader hints (whichever is available)
+    // Pre-analysis identifies speakers by voice before WhisperX runs;
+    // leader hints carry the same data forward from chunk 0 to followers
+    if (speakerHints?.speakerNotes && speakerHints.speakerNotes.length > 0) {
+      analysis.speakerNotes = speakerHints.speakerNotes;
+      console.log('[Pipeline] Speaker notes from leader hints:', {
+        speakerCount: analysis.speakerNotes.length,
+        namedSpeakers: analysis.speakerNotes.filter(s => s.inferredName).length
+      });
+    } else if (preAnalysisResult?.hints._speakerNotes) {
       analysis.speakerNotes = preAnalysisResult.hints._speakerNotes;
       console.log('[Pipeline] Speaker notes from pre-analysis:', {
         speakerCount: analysis.speakerNotes.length,
@@ -1887,6 +1915,20 @@ export const transcribeAudio = onObjectFinalized(
           // Initialize chunk statuses for resumable execution
           const initialStatuses = createInitialChunkStatuses(uploadedChunks.length);
 
+          // Build pending follower descriptors (chunks 1..N-1) for leader-first dispatch.
+          // These get persisted in Firestore and dispatched after chunk 0 finishes.
+          const pendingFollowerChunks: PendingFollowerChunk[] = uploadedChunks
+            .filter(c => c.chunkIndex > 0)
+            .map(c => ({
+              chunkIndex: c.chunkIndex,
+              totalChunks: c.totalChunks,
+              chunkStoragePath: c.chunkStoragePath!,
+              startMs: c.startMs,
+              endMs: c.endMs,
+              overlapBeforeMs: c.overlapBeforeMs,
+              overlapAfterMs: c.overlapAfterMs
+            }));
+
           // Store chunk metadata with status tracking (chunkingMetadata replaces old chunkMetadata)
           const chunkingMetadata: Omit<ChunkingMetadata, 'chunkedAt'> & { chunkedAt: ReturnType<typeof FieldValue.serverTimestamp> } = {
             chunkingEnabled: true,
@@ -1896,7 +1938,9 @@ export const transcribeAudio = onObjectFinalized(
             chunkContexts: [], // Will be populated as chunks complete
             chunkedAt: FieldValue.serverTimestamp() as ReturnType<typeof FieldValue.serverTimestamp>,
             originalDurationMs: chunkingResult.originalDurationMs,
-            originalStoragePath: filePath
+            originalStoragePath: filePath,
+            // Leader-first: stash followers until chunk 0 finishes and provides speaker hints
+            ...(pendingFollowerChunks.length > 0 && { pendingFollowerChunks }),
           };
 
           await db.collection('conversations').doc(conversationId).update({
@@ -1923,58 +1967,45 @@ export const transcribeAudio = onObjectFinalized(
           // Check for abort before enqueueing chunk tasks
           await checkAbort(conversationId);
 
-          // Create one Cloud Task per chunk
-          // Stagger scheduling to avoid thundering herd
-          // Note: For sequential mode, chunks wait for predecessors
-          //       For parallel mode, chunks run independently
-          const taskPromises = uploadedChunks.map(async (chunk, index) => {
-            const payload = {
-              conversationId,
-              userId,
-              filePath: chunk.chunkStoragePath,
-              chunkIndex: chunk.chunkIndex,
-              totalChunks: chunk.totalChunks,
-              chunkMetadata: chunk,
-              processingMode, // Controls whether chunk waits for predecessor context
-              taskGeneration: 1, // Allows stale task detection on retry
-              // Include timing metadata for offset calculations
-              chunkStartMs: chunk.startMs,
-              chunkEndMs: chunk.endMs,
-              overlapBeforeMs: chunk.overlapBeforeMs,
-              overlapAfterMs: chunk.overlapAfterMs
-            };
-
-            const task = {
-              httpRequest: {
-                httpMethod: 'POST' as const,
-                url: processTranscriptionUrl,
-                headers: { 'Content-Type': 'application/json' },
-                body: Buffer.from(JSON.stringify(payload)).toString('base64'),
-                oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
-              },
-              // Stagger tasks: 5s base + 2s per chunk to avoid overload
-              scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 + (index * 2) },
-              dispatchDeadline: { seconds: DISPATCH_DEADLINE_SECONDS }
-            };
-
-            const [createdTask] = await tasksClient.createTask({ parent, task });
-
-            console.log('[Transcribe] Chunk task enqueued:', {
-              conversationId,
-              chunkIndex: chunk.chunkIndex,
-              taskName: createdTask.name,
-              scheduleTime: createdTask.scheduleTime
-            });
-
-            return createdTask;
-          });
-
-          const createdTasks = await Promise.all(taskPromises);
-
-          console.log('[Transcribe] ✅ All chunk tasks enqueued:', {
+          // Leader-first dispatch: only enqueue chunk 0 now.
+          // Followers wait in Firestore until the leader finishes and provides
+          // speaker hints, then processTranscription dispatches them.
+          const leaderChunk = uploadedChunks[0];
+          const leaderPayload = {
             conversationId,
-            taskCount: createdTasks.length,
-            chunkIndices: uploadedChunks.map(c => c.chunkIndex)
+            userId,
+            filePath: leaderChunk.chunkStoragePath,
+            chunkIndex: leaderChunk.chunkIndex,
+            totalChunks: leaderChunk.totalChunks,
+            chunkMetadata: leaderChunk,
+            processingMode,
+            taskGeneration: 1,
+            chunkStartMs: leaderChunk.startMs,
+            chunkEndMs: leaderChunk.endMs,
+            overlapBeforeMs: leaderChunk.overlapBeforeMs,
+            overlapAfterMs: leaderChunk.overlapAfterMs,
+            isLeaderChunk: true
+          };
+
+          const leaderTask = {
+            httpRequest: {
+              httpMethod: 'POST' as const,
+              url: processTranscriptionUrl,
+              headers: { 'Content-Type': 'application/json' },
+              body: Buffer.from(JSON.stringify(leaderPayload)).toString('base64'),
+              oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
+            },
+            scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 },
+            dispatchDeadline: { seconds: DISPATCH_DEADLINE_SECONDS }
+          };
+
+          const [createdLeaderTask] = await tasksClient.createTask({ parent, task: leaderTask });
+
+          console.log('[Transcribe] ✅ Leader chunk (chunk 0) task enqueued:', {
+            conversationId,
+            taskName: createdLeaderTask.name,
+            followersPending: pendingFollowerChunks.length,
+            totalChunks: uploadedChunks.length
           });
         }
       }
