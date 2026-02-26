@@ -4,20 +4,45 @@ Comprehensive flow diagram showing all Google Cloud Functions, their triggers, i
 
 ## Overview
 
-The application uses **10 Cloud Functions** to handle audio processing, chat, analytics, and billing:
+The application uses **18 Cloud Functions** across 8 source modules to handle audio processing, chat, speaker corrections, analytics, billing, and alerting:
 
-| Function | Trigger | Memory | Timeout | Purpose |
-|----------|---------|--------|---------|---------|
-| `transcribeAudio` | Storage `onObjectFinalized` | 2GiB | 9 min | Entry point for uploads, chunks large files |
-| `processTranscription` | Cloud Tasks HTTP | 2GiB | 60 min | Process each chunk via Gemini + WhisperX |
-| `processMerge` | Cloud Tasks HTTP | 1GiB | 10 min | Stitch chunks, reconcile speakers |
-| `processReprocessing` | Cloud Tasks HTTP | 512MiB | 10 min | Fallback: re-chunk in sequential mode |
-| `chatWithConversation` | HTTPS Callable | 512MiB | 10 min | LLM chat with timestamp citations |
-| `retryTranscription` | HTTPS Callable | 512MiB | 60 sec | Resume or restart failed jobs |
-| `computeDailyStats` | Scheduler (2 AM) | 256MiB | 9 min | Aggregate usage statistics |
-| `syncBillingCosts` | Scheduler (4 AM) | 512MiB | 9 min | Sync actual costs from BigQuery |
-| `triggerBillingSync` | HTTPS Callable | 512MiB | 9 min | Manual billing sync trigger (admin) |
-| `diagnoseBillingLabels` | HTTPS Callable | 512MiB | 60 sec | Diagnostic for billing label issues |
+### Transcription Pipeline
+
+| Function | File | Trigger | Memory | Timeout | Purpose |
+|----------|------|---------|--------|---------|---------|
+| `transcribeAudio` | `transcribe.ts` | Storage `onObjectFinalized` | 2GiB | 9 min | Entry point for uploads, chunks large files |
+| `processTranscription` | `processTranscription.ts` | Cloud Tasks HTTP | 2GiB | 60 min | Process each chunk via Gemini + WhisperX |
+| `processMerge` | `chunkMerge.ts` | Cloud Tasks HTTP | 1GiB | 10 min | Stitch chunks, reconcile speakers |
+| `processReprocessing` | `chunkMerge.ts` | Cloud Tasks HTTP | 512MiB | 10 min | Fallback: re-chunk in sequential mode |
+
+### User-Facing Callables
+
+| Function | File | Trigger | Memory | Timeout | Purpose |
+|----------|------|---------|--------|---------|---------|
+| `chatWithConversation` | `chat.ts` | HTTPS Callable | 512MiB | 5 min | LLM chat with timestamp citations |
+| `retryTranscription` | `retry.ts` | HTTPS Callable | 512MiB | 60 sec | Resume or restart failed jobs |
+| `mergeSpeakers` | `speakerCorrections.ts` | HTTPS Callable | 256MiB | 30 sec | Merge two speakers into one |
+| `reassignSegments` | `speakerCorrections.ts` | HTTPS Callable | 256MiB | 30 sec | Move segments to a different speaker |
+| `renameSpeaker` | `speakerCorrections.ts` | HTTPS Callable | 256MiB | 30 sec | Change a speaker's display name |
+| `undoCorrection` | `speakerCorrections.ts` | HTTPS Callable | 256MiB | 30 sec | Undo a previous correction |
+
+### Stats & Analytics
+
+| Function | File | Trigger | Memory | Timeout | Purpose |
+|----------|------|---------|--------|---------|---------|
+| `onConversationCreated` | `statsTriggers.ts` | Firestore `onDocumentCreated` | default | default | Record creation event |
+| `onConversationDeleted` | `statsTriggers.ts` | Firestore `onDocumentDeleted` | default | default | Record deletion event |
+| `computeDailyStats` | `statsAggregator.ts` | Scheduler (2 AM UTC) | 512MiB | 5 min | Aggregate usage statistics |
+| `triggerStatsComputation` | `statsAggregator.ts` | HTTPS Callable | 512MiB | 5 min | Manual stats trigger (admin) |
+
+### Billing & Alerting
+
+| Function | File | Trigger | Memory | Timeout | Purpose |
+|----------|------|---------|--------|---------|---------|
+| `syncBillingCosts` | `billingSync.ts` | Scheduler (4 AM UTC) | 512MiB | 9 min | Sync actual costs from BigQuery |
+| `triggerBillingSync` | `billingSync.ts` | HTTPS Callable | 512MiB | 9 min | Manual billing sync trigger (admin) |
+| `diagnoseBillingLabels` | `billingSync.ts` | HTTPS Callable | 512MiB | 60 sec | Diagnostic for billing label issues |
+| `handleReconciliationAlert` | `handleReconciliationAlert.ts` | Pub/Sub `reconciliation-alerts` | 256MB | 60 sec | Auto-disable reconciliation on errors |
 
 ## Complete Flow Diagram
 
@@ -30,16 +55,16 @@ The application uses **10 Cloud Functions** to handle audio processing, chat, an
 │ CLIENT (React App)                                                              │
 │                                                                                 │
 │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐  ┌───────────────┐ │
-│  │ Upload         │  │ chatWith       │  │ getSignedUrl   │  │ retry         │ │
-│  │ Audio File     │  │ Conversation   │  │ (Callable)     │  │ Transcription │ │
+│  │ Upload         │  │ chatWith       │  │ Speaker        │  │ retry         │ │
+│  │ Audio File     │  │ Conversation   │  │ Corrections    │  │ Transcription │ │
 │  └───────┬────────┘  └───────┬────────┘  └───────┬────────┘  └───────┬───────┘ │
 │          │                   │                   │                   │         │
 └──────────┼───────────────────┼───────────────────┼───────────────────┼─────────┘
            │                   │                   │                   │
            ▼                   ▼                   ▼                   ▼
 ┌────────────────────┐ ┌────────────────────┐ ┌────────────────────┐ ┌────────────────────┐
-│ Firebase Storage   │ │ Gemini API         │ │ Firebase Storage   │ │ Cloud Tasks        │
-│ (audio/{userId})   │ │ + Firestore        │ │ (signed URL)       │ │ Queue              │
+│ Firebase Storage   │ │ Gemini API         │ │ Firestore          │ │ Cloud Tasks        │
+│ (audio/{userId})   │ │ + Firestore        │ │ (corrections sub)  │ │ Queue              │
 └─────────┬──────────┘ └────────────────────┘ └────────────────────┘ └─────────┬──────────┘
           │                                                                    │
           │ onObjectFinalized                                                  │
@@ -115,7 +140,7 @@ The application uses **10 Cloud Functions** to handle audio processing, chat, an
                                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ processMerge (Cloud Tasks HTTP)                                             │
-│ Memory: 512MiB | Timeout: 10 min                                            │
+│ Memory: 1GiB | Timeout: 10 min                                               │
 │ ┌─────────────────────────────────────────────────────────────────────────┐ │
 │ │ 1. Load all chunk artifacts from subcollection                          │ │
 │ │ 2. Deduplicate segments in overlap regions                              │ │
@@ -167,10 +192,32 @@ The application uses **10 Cloud Functions** to handle audio processing, chat, an
                                               └────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ SUPPORTING FUNCTIONS                                                            │
+│ SPEAKER CORRECTIONS (speakerCorrections.ts)                                     │
+│ All: HTTPS Callable | 256MiB | 30 sec | Apply-on-read pattern                  │
+│                                                                                 │
+│  Client (Viewer page)                                                           │
+│          │                                                                      │
+│          ├─► mergeSpeakers ──────► speakerCorrections/{id} (type: merge)        │
+│          │   Merge speaker A into B                                             │
+│          │                                                                      │
+│          ├─► reassignSegments ──► speakerCorrections/{id} (type: reassign)      │
+│          │   Move segments to a different speaker                               │
+│          │                                                                      │
+│          ├─► renameSpeaker ─────► speakerCorrections/{id} (type: rename)        │
+│          │   Change display name (validated: non-empty, <50 chars)              │
+│          │                                                                      │
+│          └─► undoCorrection ────► Sets undoneAt timestamp (preserves audit)     │
+│                                                                                 │
+│  Client applies corrections at read time — no reprocessing needed.              │
+│  Server replays active corrections to validate new operations.                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ STATS & ANALYTICS                                                               │
 │                                                                                 │
 │ ┌─────────────────────────┐ ┌─────────────────────────┐ ┌─────────────────────┐ │
 │ │ onConversationCreated   │ │ onConversationDeleted   │ │ computeDailyStats   │ │
+│ │ statsTriggers.ts        │ │ statsTriggers.ts        │ │ statsAggregator.ts  │ │
 │ │ (Firestore trigger)     │ │ (Firestore trigger)     │ │ (Scheduler: 2AM)    │ │
 │ │                         │ │                         │ │                     │ │
 │ │ Records user event      │ │ Records user event      │ │ Aggregates global & │ │
@@ -183,7 +230,29 @@ The application uses **10 Cloud Functions** to handle audio processing, chat, an
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
+│ RECONCILIATION ALERTING (handleReconciliationAlert.ts)                           │
+│ Pub/Sub: reconciliation-alerts | 256MB | 60 sec                                 │
+│                                                                                 │
+│  Cloud Monitoring                                                               │
+│  (log-based metric: reconciliation errors > 5% in 5 min)                        │
+│          │                                                                      │
+│          ▼                                                                      │
+│  Alert policy fires ──► Pub/Sub topic: reconciliation-alerts                    │
+│                                    │                                            │
+│                                    ▼                                            │
+│                         handleReconciliationAlert                               │
+│                                    │                                            │
+│                                    ▼                                            │
+│                         Disables context-aware reconciliation                   │
+│                         (feature flag in Firestore)                             │
+│                                                                                 │
+│  On OPEN incident: auto-disables to prevent cascading failures.                 │
+│  Manual re-enable required after investigation.                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
 │ RETRY FLOW (retryTranscription → Cloud Tasks)                                   │
+│ retry.ts | HTTPS Callable | 512MiB | 60 sec                                    │
 │                                                                                 │
 │  Failed/Aborted Job                                                             │
 │          │                                                                      │
@@ -319,14 +388,48 @@ Allows users to retry failed or aborted jobs.
 - Max 3 retries enforced
 - Increments `taskGeneration` to invalidate stale Cloud Tasks
 
-### 7. Stats Functions
+### 7. Speaker Correction Functions
+
+**File:** `functions/src/speakerCorrections.ts`
+
+Four lightweight callables that let users fix diarization errors from the Viewer UI. All use the **apply-on-read pattern**: corrections are written to a `speakerCorrections` subcollection and the client applies them at read time (no reprocessing required). The server replays active corrections before each write to validate operations against the effective speaker state.
+
+- **`mergeSpeakers`**: Merge speaker A into speaker B (all A's segments become B's)
+- **`reassignSegments`**: Move specific segments to a different speaker
+- **`renameSpeaker`**: Change a speaker's display name (validated: non-empty, <50 chars)
+- **`undoCorrection`**: Mark a correction as undone (sets `undoneAt` timestamp, preserves audit trail)
+
+**Shared Characteristics:**
+- Auth required, ownership verified
+- 256MiB memory, 30 sec timeout
+- Returns `correctionId` for undo tracking (except `undoCorrection`)
+
+### 8. Stats Functions
 
 **Files:** `functions/src/statsTriggers.ts`, `functions/src/statsAggregator.ts`
 
-- `onConversationCreated`: Records user event on conversation creation
-- `onConversationDeleted`: Records user event on conversation deletion
-- `computeDailyStats`: Scheduled (2 AM UTC) aggregation of global and daily stats
-- `triggerStatsComputation`: Admin manual trigger for stats computation
+- `onConversationCreated`: Firestore trigger — records user event on conversation creation
+- `onConversationDeleted`: Firestore trigger — records user event on conversation deletion
+- `computeDailyStats`: Scheduled (2 AM UTC) — aggregates rolling windows (7-day, 30-day active users), processing stats, LLM usage
+- `triggerStatsComputation`: HTTPS Callable — admin manual trigger, same logic as scheduled version
+
+### 9. handleReconciliationAlert (Pub/Sub)
+
+**File:** `functions/src/handleReconciliationAlert.ts`
+
+Circuit breaker that auto-disables context-aware speaker reconciliation when Cloud Monitoring detects elevated error rates.
+
+**Alert Pipeline:**
+1. Log-based metric counts `reconciliation_error` events
+2. Alert policy fires when error rate exceeds 5% in a 5-minute window
+3. Alert publishes to `reconciliation-alerts` Pub/Sub topic
+4. This function receives the alert and disables the feature flag in Firestore
+
+**Behavior:**
+- On `OPEN` incident: disables context-aware reconciliation to prevent cascading failures
+- On `CLOSED` incident: logs only (manual re-enable required after investigation)
+
+**Setup:** Requires manual creation of Pub/Sub topic, log-based metrics, and alert policy (documented in rollout runbook).
 
 ## Billing Sync Functions (v2.2.0+)
 

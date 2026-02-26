@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Monotonic Clustering Threshold** - Agglomerative clustering edge threshold now only decreases across iterations, preventing oscillation when adaptive recomputation suggests a higher value
 - **Broader Over-Fragmentation Trigger** - Adaptive relaxation now also triggers when cluster count exceeds 2× estimated unique speakers, not only on high singleton ratio
 
+## [2.9.2] - 2026-02-25
+
+### Added
+- **Transcript Selection Mode Toggle** - Explicit opt-in selection mode resolves click ambiguity between audio navigation and multi-segment speaker reassignment
+  - Default clicks always seek audio playback — no accidental segment selection
+  - Press `S` or click the "Select" button to enter selection mode for multi-segment operations
+  - Click or Shift+Click segments to build selection, then reassign via the floating bar
+  - `Escape` exits selection mode and clears selections; "Done" button exits but preserves selections
+  - Selection count badge and mode indicator visible while selection mode is active
+  - Keyboard shortcuts (`S` toggle, `Esc` exit) added to the help modal (`?` key)
+
 ## [2.9.1] - 2026-02-23
 
 ### Fixed

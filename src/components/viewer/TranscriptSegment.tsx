@@ -309,7 +309,7 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
                 </span>
               );
             }
-            return <span key={i} onClick={() => onSeek(segment.startMs + 1)} className="cursor-pointer">{part.text}</span>;
+            return <span key={i} onClick={onSegmentClick ? undefined : () => onSeek(segment.startMs + 1)} className={onSegmentClick ? undefined : "cursor-pointer"}>{part.text}</span>;
           })}
         </p>
       </div>

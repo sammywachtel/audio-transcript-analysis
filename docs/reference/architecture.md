@@ -37,42 +37,44 @@ Technical architecture of the Audio Transcript Analysis App.
 │                                                    │ onFinalized  │
 │                                                    ▼              │
 │  ┌──────────────────────────────────────────────────────────────┐ │
-│  │                    Cloud Functions                           │ │
+│  │                Cloud Functions (18 total)                    │ │
 │  │                                                              │ │
-│  │  ┌──────────────────────┐  ┌──────────────────────┐          │ │
-│  │  │  transcribeAudio     │  │  chatWithConversation│          │ │
-│  │  │  (Storage trigger)   │  │  (HTTPS callable)    │          │ │
-│  │  │  - validates file    │  └──────────────────────┘          │ │
-│  │  │  - enqueues task     │  ┌──────────────────────┐          │ │
-│  │  │  - 540s timeout      │  │  retryTranscription  │          │ │
-│  │  └──────────┬───────────┘  │  (HTTPS callable)    │          │ │
-│  │             │              └──────────────────────┘          │ │
-│  │             ▼                                                │ │
-│  │  ┌──────────────────────┐                                    │ │
-│  │  │  Cloud Tasks Queue   │                                    │ │
+│  │  ┌──────────────────────┐  ┌──────────────────────────────┐  │ │
+│  │  │  transcribeAudio     │  │  Callables (HTTPS)           │  │ │
+│  │  │  (Storage trigger)   │  │  ┌────────────────────────┐  │  │ │
+│  │  │  - validates file    │  │  │ chatWithConversation   │  │  │ │
+│  │  │  - enqueues task     │  │  │ retryTranscription     │  │  │ │
+│  │  │  - 540s timeout      │  │  │ mergeSpeakers          │  │  │ │
+│  │  └──────────┬───────────┘  │  │ reassignSegments       │  │  │ │
+│  │             │              │  │ renameSpeaker          │  │  │ │
+│  │             ▼              │  │ undoCorrection         │  │  │ │
+│  │  ┌──────────────────────┐  │  └────────────────────────┘  │  │ │
+│  │  │  Cloud Tasks Queue   │  └──────────────────────────────┘  │ │
 │  │  │  transcription-queue │                                    │ │
-│  │  └──────────┬───────────┘                                    │ │
-│  │             ▼                                                │ │
-│  │  ┌─────────────────────────────────────────────────────────┐ │ │
-│  │  │  processTranscription (HTTP Function, private)          │ │ │
-│  │  │  - 3600s timeout (60 min for large files)               │ │ │
-│  │  │  - 2GiB memory                                          │ │ │
-│  │  │  ┌────────────────┐                                     │ │ │
-│  │  │  │  alignment     │                                     │ │ │
-│  │  │  │  module        │                                     │ │ │
-│  │  │  └────────────────┘                                     │ │ │
-│  │  └──────────┬──────────────────────────────────────────────┘ │ │
-│  │             │                                                │ │
-│  └─────────────┼────────────────────────────────────────────────┘ │
-│                │                                                  │
-└────────────────┼──────────────────────────────────────────────────┘
-                 │
-         ┌───────┴───────┐
-         ▼               ▼
-┌────────────────┐  ┌────────────────┐
-│  Vertex AI     │  │  Replicate     │
-│  (Gemini)      │  │  (WhisperX)    │
-└────────────────┘  └────────────────┘
+│  │  └──────────┬───────────┘  ┌──────────────────────────────┐  │ │
+│  │             │              │  Background                  │  │ │
+│  │             ▼              │  ┌────────────────────────┐  │  │ │
+│  │  ┌────────────────────┐    │  │ onConversation*        │  │  │ │
+│  │  │  processTranscr.   │    │  │ computeDailyStats      │  │  │ │
+│  │  │  (private, 60 min) │    │  │ syncBillingCosts       │  │  │ │
+│  │  └──────────┬─────────┘    │  │ handleReconAlert       │  │  │ │
+│  │             │              │  └────────────────────────┘  │  │ │
+│  │             ▼              └──────────────────────────────┘  │ │
+│  │  ┌────────────────────┐                                      │ │
+│  │  │  processMerge      │  See cloud-functions-flow.md         │ │
+│  │  │  (private, 10 min) │  for detailed flow diagrams.        │ │
+│  │  └────────────────────┘                                      │ │
+│  │                                                              │ │
+│  └──────────────────────────────────────────────────────────────┘ │
+│                                                                   │
+└───────────────────────────────────────────────────────────────────┘
+                                 │
+                         ┌───────┴───────┐
+                         ▼               ▼
+                  ┌────────────────┐  ┌────────────────┐
+                  │  Vertex AI     │  │  Replicate     │
+                  │  (Gemini)      │  │  (WhisperX)    │
+                  └────────────────┘  └────────────────┘
 ```
 
 ## Component Architecture
@@ -174,17 +176,25 @@ audio-transcript-analysis-app/
 │       ├── TimeSeriesChart.tsx
 │       ├── LLMUsageBreakdown.tsx
 │       └── MetricsTable.tsx
-├── functions/              # Cloud Functions (Node.js)
+├── functions/              # Cloud Functions (Node.js) — 18 functions, 8 modules
 │   └── src/
-│       ├── index.ts        # Function exports
-│       ├── transcribe.ts   # WhisperX + Gemini analysis
-│       ├── alignment.ts    # WhisperX integration via Replicate
-│       ├── metrics.ts      # Processing metrics recording
-│       ├── userEvents.ts   # User activity event tracking
-│       ├── statsTriggers.ts    # Firestore triggers for stats
-│       ├── statsAggregator.ts  # Scheduled daily aggregation
-│       ├── pricing.ts      # Pricing lookup and cost calculation
-│       └── logger.ts       # Structured logging utility
+│       ├── index.ts                    # Function exports + Firebase Admin init
+│       ├── transcribe.ts               # transcribeAudio (Storage trigger) + Gemini pipeline
+│       ├── processTranscription.ts     # processTranscription (Cloud Tasks)
+│       ├── chunkMerge.ts               # processMerge + processReprocessing (Cloud Tasks)
+│       ├── chat.ts                     # chatWithConversation (HTTPS callable)
+│       ├── retry.ts                    # retryTranscription (HTTPS callable)
+│       ├── speakerCorrections.ts       # merge/reassign/rename/undo (HTTPS callables)
+│       ├── statsTriggers.ts            # onConversation* (Firestore triggers)
+│       ├── statsAggregator.ts          # computeDailyStats + triggerStatsComputation
+│       ├── billingSync.ts              # syncBillingCosts + triggerBillingSync + diagnose
+│       ├── handleReconciliationAlert.ts # Pub/Sub circuit breaker
+│       ├── alignment.ts                # WhisperX integration via Replicate
+│       ├── chunking.ts                 # Audio splitting + silence detection
+│       ├── metrics.ts                  # Processing metrics recording
+│       ├── userEvents.ts               # User activity event tracking
+│       ├── pricing.ts                  # Pricing lookup and cost calculation
+│       └── logger.ts                   # Structured logging utility
 ├── types.ts                # TypeScript types
 ├── utils.ts                # Helper functions
 └── firebase-config.ts      # Firebase initialization

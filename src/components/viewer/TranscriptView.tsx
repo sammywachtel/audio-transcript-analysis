@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Conversation } from '@/config/types';
 import { TranscriptSegment } from './TranscriptSegment';
 import { TopicMarker } from './TopicMarker';
@@ -12,6 +12,9 @@ interface TranscriptViewProps {
   personOccurrences: Record<string, { start: number; end: number; personId: string }[]>;
   highlightedSegmentId?: string | null;
   recentReassignSegmentIds?: string[];
+  isSelectionMode?: boolean;
+  onToggleSelectionMode?: () => void;
+  selectionClearSignal?: number;
   onSeek: (ms: number) => void;
   onTermClick: (termId: string) => void;
   onRenameSpeaker: (speakerId: string) => void;
@@ -36,6 +39,9 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   personOccurrences,
   highlightedSegmentId,
   recentReassignSegmentIds = [],
+  isSelectionMode = false,
+  onToggleSelectionMode,
+  selectionClearSignal = 0,
   onSeek,
   onTermClick,
   onRenameSpeaker,
@@ -48,6 +54,14 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   // Multi-select state for bulk operations
   const [selectedSegmentIds, setSelectedSegmentIds] = useState<Set<string>>(new Set());
   const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
+
+  // Parent says "nuke the selection" by bumping this counter
+  useEffect(() => {
+    if (selectionClearSignal > 0) {
+      setSelectedSegmentIds(new Set());
+      setLastSelectedIndex(null);
+    }
+  }, [selectionClearSignal]);
 
   /**
    * Handle segment click with Shift modifier for multi-select
@@ -153,18 +167,20 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                 onTermClick={onTermClick}
                 onRenameSpeaker={onRenameSpeaker}
                 onReassignSpeaker={onReassignSpeaker}
-                onSegmentClick={(shiftKey) => handleSegmentClick(seg.segmentId, idx, shiftKey)}
+                onSegmentClick={isSelectionMode ? (shiftKey) => handleSegmentClick(seg.segmentId, idx, shiftKey) : undefined}
               />
             </div>
           );
         })}
       </div>
 
-      {/* Selection bar for bulk operations */}
+      {/* Selection bar for bulk operations — always rendered so the toggle button shows */}
       {onReassignSegments && (
         <TranscriptSelectionBar
           selectedSegmentIds={selectedSegmentIds}
           allSpeakers={allSpeakers}
+          isSelectionMode={isSelectionMode}
+          onToggleSelectionMode={onToggleSelectionMode}
           onReassign={handleBulkReassign}
           onClear={handleClearSelection}
         />

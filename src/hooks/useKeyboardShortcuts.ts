@@ -5,6 +5,8 @@ interface KeyboardShortcutsCallbacks {
   seekBack?: () => void;
   seekForward?: () => void;
   openHelp?: () => void;
+  toggleSelectionMode?: () => void;
+  exitSelectionMode?: () => void;
 }
 
 /**
@@ -14,8 +16,9 @@ interface KeyboardShortcutsCallbacks {
  * - Space: Play/Pause
  * - ← or J: Seek back 5s
  * - → or K: Seek forward 5s
+ * - S: Toggle selection mode (for multi-segment speaker reassignment)
  * - ?: Open keyboard shortcuts help modal
- * - Escape: Close modal (handled by modal components)
+ * - Escape: Exit selection mode + clear, or close modal
  *
  * Ignores events when user is typing in form fields.
  * Shows a first-time tooltip to introduce keyboard shortcuts.
@@ -84,6 +87,12 @@ export const useKeyboardShortcuts = (callbacks: KeyboardShortcutsCallbacks) => {
           }
           break;
 
+        case 's':
+        case 'S':
+          e.preventDefault();
+          callbacks.toggleSelectionMode?.();
+          break;
+
         case '?':
           e.preventDefault();
           callbacks.openHelp?.();
@@ -94,9 +103,11 @@ export const useKeyboardShortcuts = (callbacks: KeyboardShortcutsCallbacks) => {
           break;
 
         case 'Escape':
-          // Close help modal if open
+          // Help modal gets first dibs — close it before anything else
           if (helpModalOpen) {
             setHelpModalOpen(false);
+          } else {
+            callbacks.exitSelectionMode?.();
           }
           break;
       }
