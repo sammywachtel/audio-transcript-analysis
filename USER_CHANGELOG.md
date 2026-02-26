@@ -1,5 +1,25 @@
 # What's New
 
+## Version 2.10.0 - February 26, 2026
+
+### 🚀 Faster Multi-Chunk Processing
+
+**Smarter Speaker Handoff Between Chunks**
+- When processing long audio files, the first chunk now acts as the "leader" and shares what it learns about speakers with all subsequent chunks
+- Later chunks skip redundant speaker analysis entirely, so your long files process **faster** and cost less in API tokens
+- Speaker names are more consistent across chunks — fewer cases where "Sam" in the first half becomes "Speaker 2" in the second half
+
+### 🎯 Improved Speaker Matching
+
+**More Reliable Name-Based Merging**
+- When the system identifies the same person by name in different parts of a long recording, the matching logic is now more precise
+- Previously, a small additive boost could occasionally let unrelated speakers sneak through — now a floor-based approach guarantees named matches clear the merge threshold without inflating already-strong matches
+
+**Fewer Duplicate Speakers**
+- The system now catches over-fragmentation more aggressively, triggering corrective merges when the detected speaker count is unreasonably high relative to the actual number of people talking
+
+---
+
 ## Version 2.9.2 - February 25, 2026
 
 ### 🎯 Selection Mode for Speaker Fixes
