@@ -1,5 +1,16 @@
 # What's New
 
+## Version 2.11.0 - February 27, 2026
+
+### ✨ Resizable Sidebar
+
+**Drag to Fit Your Screen**
+- You can now **drag the left edge of the sidebar** to make it wider or narrower
+- Your preferred width is remembered across sessions — set it once and forget it
+- Works with any width from 280px up to half your screen
+
+---
+
 ## Version 2.10.0 - February 26, 2026
 
 ### 🚀 Faster Multi-Chunk Processing

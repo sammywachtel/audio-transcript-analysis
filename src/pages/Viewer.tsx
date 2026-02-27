@@ -9,6 +9,7 @@ import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { useChat } from '../hooks/useChat';
 import { useChatHistory } from '../hooks/useChatHistory';
 import { useSpeakerCorrections } from '../hooks/useSpeakerCorrections';
+import { usePanelResize } from '../hooks/usePanelResize';
 import { ViewerHeader } from '../components/viewer/ViewerHeader';
 import { TranscriptView } from '../components/viewer/TranscriptView';
 import { Sidebar } from '../components/viewer/Sidebar';
@@ -156,6 +157,9 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
       return () => clearTimeout(timer);
     }
   }, [targetSegmentId]);
+
+  // Draggable sidebar resize
+  const { width: sidebarWidth, isDragging: isSidebarDragging, handleProps: sidebarHandleProps } = usePanelResize();
 
   // Keyboard shortcuts (Space, ←/→, J/K, ?, Escape)
   const {
@@ -528,7 +532,20 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
         />
 
         {/* Sidebar (Desktop) - use corrected speakers */}
-        <div className="hidden lg:block w-80 shrink-0 z-10 shadow-xl shadow-slate-200/50">
+        <div
+          className="hidden lg:flex shrink-0 z-10 shadow-xl shadow-slate-200/50"
+          style={{ width: sidebarWidth }}
+        >
+          {/* Drag handle — thin strip on the left edge of the sidebar */}
+          <div
+            {...sidebarHandleProps}
+            className={`w-1 shrink-0 transition-colors duration-150 ${
+              isSidebarDragging
+                ? 'bg-blue-400'
+                : 'bg-transparent hover:bg-blue-300'
+            }`}
+          />
+          <div className="flex-1 min-w-0 h-full">
           <Sidebar
             terms={Object.values(conversation.terms)}
             people={conversation.people || []}
@@ -573,6 +590,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
             recentMerge={recentMerge}
             speakerSegmentCounts={speakerSegmentCounts}
           />
+          </div>
         </div>
 
         {/* Mobile Sidebar Panel - full sidebar with Context/People/Chat tabs */}
