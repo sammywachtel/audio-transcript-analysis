@@ -7,3 +7,4 @@ export { useAudioPlayer } from './useAudioPlayer';
 export { usePersonMentions } from './usePersonMentions';
 export { useTranscriptSelection } from './useTranscriptSelection';
 export { useAutoScroll } from './useAutoScroll';
+export { usePanelResize } from './usePanelResize';

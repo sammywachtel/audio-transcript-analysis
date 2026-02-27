@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-02-27
+
+### Added
+- **Draggable Sidebar Resize** - Viewer sidebar width can now be adjusted by dragging its left edge
+  - Width persists to localStorage across sessions (default 320px, min 280px, max 50% viewport)
+  - Visual drag handle highlights blue on hover and during drag
+
 ## [2.10.0] - 2026-02-26
 
 ### Added
