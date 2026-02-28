@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-03-06
+
+### Changed
+- **Fuzzy Speaker Name Matching** - Cross-chunk speaker reconciliation now uses Levenshtein distance for name comparison instead of exact string equality
+  - Catches ASR transcription variants like "Arya"/"Araya" and "Dennis"/"Denis" that were previously treated as different speakers
+  - Names 4+ characters use a ≥80% similarity threshold (~1 typo per 5 characters); names ≤3 characters require exact match to avoid false merges (e.g., "Jay" ≠ "Ray")
+  - Fuzzy matches logged with `editDistance` and `fuzzyMatchedWith` fields for observability
+
 ## [2.13.0] - 2026-03-06
 
 ### Fixed

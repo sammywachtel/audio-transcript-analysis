@@ -40,6 +40,9 @@ interface ConversationDoc {
   // Processing Mode (Chunked Uploads)
   processingMode?: 'parallel' | 'sequential';  // Controls chunk execution strategy
 
+  // Chunking Metadata (Large File Processing)
+  chunkingMetadata?: ChunkingMetadata;          // Present when file is chunked (>30 min)
+
   // Speaker Reconciliation (Parallel Mode Only)
   reconciliationConfidence?: number;           // Overall confidence (0-1) of speaker matching
   reconciliationDetails?: ReconciliationDetails; // Detailed match evidence per cluster
@@ -879,6 +882,68 @@ interface FallbackMetadata {
 - Tracking threshold configuration at time of trigger
 
 **When present**: Only on conversations where fallback to sequential was triggered. Can query `fallbackMetadata.triggeredAt IS NOT NULL` to find all fallback occurrences.
+
+### ChunkingMetadata
+
+Metadata tracking chunk processing state for large files. Stored as an embedded object on the conversation document.
+
+```typescript
+interface ChunkingMetadata {
+  totalChunks: number;                          // Total number of audio chunks
+  chunkStatuses: Record<string, ChunkStatus>;   // Per-chunk processing status
+  mergeTaskEnqueued?: boolean;                  // Guard flag: merge task already dispatched
+  mergedAt?: string;                            // ISO timestamp when merge completed
+
+  // Leader-chunk-first dispatch (parallel mode)
+  leaderSpeakerHints?: SpeakerHints;            // Speaker hints extracted from chunk 0
+  pendingFollowerChunks?: PendingFollowerChunk[];  // Followers waiting for leader to complete
+  followersDispatched?: boolean;                // Guard flag: followers already enqueued
+}
+```
+
+**Leader-first fields** (all optional for backward compatibility):
+- `leaderSpeakerHints`: Set after chunk 0 completes, contains speaker count/names/roles extracted from the leader's pipeline results
+- `pendingFollowerChunks`: Set by `transcribeAudio` when dispatching chunk 0, stores serialized follower chunk descriptors (storage paths, overlap info, timestamps)
+- `followersDispatched`: Transactional guard flag set atomically by `dispatchFollowersWithHints()` to prevent duplicate follower dispatch from Cloud Tasks at-least-once delivery
+
+### SpeakerHints
+
+Speaker identity hints extracted from the leader chunk and forwarded to all follower chunks via Cloud Task payloads.
+
+```typescript
+interface SpeakerHints {
+  numSpeakers: number;                // Number of speakers identified by leader
+  speakerNames: string[];             // Deduplicated speaker names from leader
+  speakerNotes?: Array<{              // Per-speaker metadata for Gemini prompting
+    speakerId: string;
+    inferredName?: string;
+    role?: string;
+  }>;
+}
+```
+
+**How hints are used by followers:**
+- `numSpeakers` + `speakerNames` seed WhisperX diarization (skip Gemini pre-analysis)
+- `speakerNotes` seed the Gemini content analysis speaker notes
+- Followers with valid hints bypass the entire Gemini pre-analysis step
+
+### PendingFollowerChunk
+
+Serialized descriptor for a follower chunk waiting to be dispatched after the leader completes.
+
+```typescript
+interface PendingFollowerChunk {
+  chunkIndex: number;           // Chunk position (1..N)
+  totalChunks: number;          // Total chunk count
+  chunkStoragePath: string;     // Firebase Storage path to the chunk audio
+  startMs: number;              // Chunk start time in original audio
+  endMs: number;                // Chunk end time in original audio
+  overlapBeforeMs: number;      // Overlap with previous chunk (ms)
+  overlapAfterMs: number;       // Overlap with next chunk (ms)
+}
+```
+
+**Lifecycle:** Created by `transcribeAudio`, stored in `chunkingMetadata.pendingFollowerChunks`, consumed and deleted by `dispatchFollowersWithHints()` after leader completion.
 
 ## Firebase Storage Structure
 

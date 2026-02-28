@@ -76,8 +76,9 @@ The application uses **18 Cloud Functions** across 8 source modules to handle au
 │ │ 1. Detect audio duration                                              │ │  │
 │ │ 2. If >30 min → Chunk audio into overlapping segments                 │ │  │
 │ │ 3. Upload chunks to Storage                                           │ │  │
-│ │ 4. Create Cloud Tasks for each chunk                                  │ │  │
-│ │ 5. If <30 min → Process directly via executeTranscriptionPipeline     │ │  │
+│ │ 4. Create Cloud Task for chunk 0 ONLY (the "leader")                  │ │  │
+│ │    Store remaining chunks as pendingFollowerChunks in Firestore       │ │  │
+│ │ 5. If <30 min → Process directly via executeTranscriptionPipeline    │ │  │
 │ └───────────────────────────────────────────────────────────────────────┘ │  │
 └─────────┬─────────────────────────────────────┬───────────────────────────┘  │
           │                                     │                              │
@@ -85,37 +86,44 @@ The application uses **18 Cloud Functions** across 8 source modules to handle au
           ▼                                     ▼                              │
 ┌───────────────────────┐             ┌───────────────────────┐                │
 │ Direct Processing     │             │ Cloud Tasks Queue     │◄───────────────┘
-│ (same function)       │             │ (N chunk tasks)       │  retryTranscription
+│ (same function)       │             │ (leader chunk only)   │  retryTranscription
 │                       │             │                       │  enqueues here
 │ → Gemini API          │             │ mode: parallel or     │
 │ → WhisperX align      │             │       sequential      │
 │ → Firestore update    │             │                       │
 │ → status: complete    │             └───────────┬───────────┘
 └───────────────────────┘                         │
-                                                  │ For each chunk
+                                                  │ Chunk 0 (leader)
                                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ processTranscription (Cloud Tasks HTTP)                                     │
 │ Memory: 2GiB | Timeout: 60 min                                              │
 │ ┌─────────────────────────────────────────────────────────────────────────┐ │
-│ │ PARALLEL MODE:                      SEQUENTIAL MODE:                    │ │
+│ │ LEADER CHUNK (chunk 0):              FOLLOWER CHUNKS (1..N):            │ │
 │ │ ┌──────────────────────┐            ┌──────────────────────┐            │ │
-│ │ │ Fresh context        │            │ Load predecessor     │            │ │
-│ │ │ (no dependencies)    │            │ context (speaker     │            │ │
-│ │ │                      │            │ IDs, signatures)     │            │ │
+│ │ │ Full pipeline:       │            │ Hints-assisted:      │            │ │
+│ │ │ • Gemini pre-analysis│            │ • Skip Gemini        │            │ │
+│ │ │ • WhisperX diarize   │            │   pre-analysis       │            │ │
+│ │ │ • Store results      │            │ • WhisperX with      │            │ │
+│ │ │                      │            │   speaker hints      │            │ │
 │ │ └──────────┬───────────┘            └──────────┬───────────┘            │ │
+│ │            │                                   │                        │ │
+│ │            ▼                                   │                        │ │
+│ │ ┌──────────────────────┐                       │                        │ │
+│ │ │ Extract speaker hints│                       │                        │ │
+│ │ │ from leader results  │                       │                        │ │
+│ │ │ (names, count, roles)│                       │                        │ │
+│ │ └──────────┬───────────┘                       │                        │ │
+│ │            │                                   │                        │ │
+│ │            ▼                                   │                        │ │
+│ │ ┌──────────────────────┐                       │                        │ │
+│ │ │ Dispatch followers   │──── Cloud Tasks ─────►│                        │ │
+│ │ │ with speaker hints   │  (speakerHints in     │                        │ │
+│ │ │ (transactional guard)│   each task payload)  │                        │ │
+│ │ └──────────┬───────────┘                       │                        │ │
 │ │            │                                   │                        │ │
 │ │            └─────────────┬─────────────────────┘                        │ │
 │ │                          ▼                                              │ │
-│ │                ┌───────────────────────┐                                │ │
-│ │                │ executeTranscription  │                                │ │
-│ │                │ Pipeline:             │                                │ │
-│ │                │ • Gemini API call     │                                │ │
-│ │                │ • WhisperX alignment  │                                │ │
-│ │                │ • Store chunk result  │                                │ │
-│ │                └──────────┬────────────┘                                │ │
-│ │                           │                                             │ │
-│ │                           ▼                                             │ │
 │ │                ┌───────────────────────┐                                │ │
 │ │                │ Mark chunk complete   │                                │ │
 │ │                │ Emit next context     │                                │ │
@@ -291,9 +299,15 @@ Entry point for all audio uploads. Triggered when a file is uploaded to Firebase
 
 **Responsibilities:**
 - Detect audio duration using ffprobe
-- For files >30 min: split into overlapping chunks, upload chunks, create Cloud Tasks
+- For files >30 min: split into overlapping chunks, upload chunks, dispatch leader chunk
 - For files ≤30 min: process directly via `executeTranscriptionPipeline`
 - Update Firestore with processing status
+
+**Leader-First Dispatch (parallel mode):**
+- Only chunk 0 (the "leader") is dispatched as a Cloud Task immediately
+- All remaining chunks are serialized as `pendingFollowerChunks` in Firestore's `chunkingMetadata`
+- Followers are NOT enqueued until the leader completes and extracts speaker hints
+- This ensures followers can skip Gemini pre-analysis and use the leader's speaker identities
 
 **Key Decisions:**
 - 9-minute timeout is a hard limit for Storage triggers
@@ -308,12 +322,22 @@ Handles the actual transcription work for each chunk or whole file.
 
 **Processing Pipeline:**
 1. Download audio from Storage
-2. Call Gemini API for transcription + speaker diarization
-3. Call WhisperX (via Replicate) for word-level timestamp alignment
+2. Call Gemini API for transcription + speaker diarization (skipped for followers with hints)
+3. Call WhisperX (via Cloud Run GPU) for word-level timestamp alignment
 4. Store results in Firestore (chunk subcollection or main document)
+5. **Leader chunk only**: Extract speaker hints → dispatch all follower chunks
+
+**Leader-Chunk-First Dispatch (parallel mode):**
+
+When chunk 0 (the leader) completes, `processTranscription` runs two additional steps:
+
+1. **Extract speaker hints** via `extractSpeakerHints()` — collects speaker count, names, and role metadata from the leader's pipeline results (`speakerMappings` + `chunkSpeakerSignatures`)
+2. **Dispatch followers** via `dispatchFollowersWithHints()` — reads `pendingFollowerChunks` from Firestore inside a transaction, enqueues a Cloud Task for each follower with `speakerHints` embedded in the task payload, and atomically sets `followersDispatched: true` to prevent duplicate dispatch
+
+Follower chunks receive these hints and skip Gemini pre-analysis entirely, using the leader's speaker identities to seed WhisperX diarization and speaker notes. This saves both latency and Gemini token costs while improving cross-chunk name consistency.
 
 **Two Processing Modes:**
-- **Parallel**: All chunks process independently, speaker reconciliation at merge
+- **Parallel**: Leader chunk processes first, followers use leader hints, speaker reconciliation at merge
 - **Sequential**: Each chunk waits for predecessor, consistent speaker IDs throughout
 
 ### 3. processMerge (Cloud Tasks HTTP)
@@ -477,11 +501,12 @@ Storage triggers have a **9-minute hard timeout limit**. Large audio files can t
 
 ### Why Two Processing Modes?
 
-**Parallel Mode** (default):
-- Faster: all chunks process simultaneously
-- ~60% faster for 6-chunk files
-- Speaker IDs may differ across chunks
-- Requires speaker reconciliation at merge
+**Parallel Mode** (default, with leader-first dispatch):
+- Leader chunk (chunk 0) processes first, extracts speaker hints
+- Follower chunks process concurrently using leader's hints (skip Gemini pre-analysis)
+- Faster than fully sequential, with better name consistency than naive parallel
+- Speaker reconciliation still runs at merge to assign canonical IDs
+- Adds leader processing latency (~2-5 min) before followers start
 
 **Sequential Mode** (fallback):
 - Slower: each chunk waits for predecessor

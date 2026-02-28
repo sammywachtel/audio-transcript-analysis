@@ -177,10 +177,62 @@ function normalizeSpeakerName(displayName: string): string | null {
 }
 
 /**
+ * Levenshtein (edit) distance between two strings.
+ * Classic DP — O(m·n) time, O(min(m,n)) space.
+ * Exported for testing.
+ */
+export function levenshteinDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  // Use the shorter string as the "row" dimension for space efficiency
+  if (a.length > b.length) { const tmp = a; a = b; b = tmp; }
+
+  let prev = Array.from({ length: a.length + 1 }, (_, i) => i);
+
+  for (let j = 1; j <= b.length; j++) {
+    const curr = [j];
+    for (let i = 1; i <= a.length; i++) {
+      curr[i] = a[i - 1] === b[j - 1]
+        ? prev[i - 1]
+        : 1 + Math.min(prev[i - 1], prev[i], curr[i - 1]);
+    }
+    prev = curr;
+  }
+
+  return prev[a.length];
+}
+
+/**
+ * Check if two normalized speaker names are "close enough" to be the same
+ * person, accounting for ASR transcription variants (Arya/Araya, Denis/Dennis).
+ *
+ * Uses Levenshtein distance with length-aware thresholds:
+ *  - Names ≤ 3 chars: exact match only (too short for fuzzy — "Jay" ≠ "Ray")
+ *  - Names 4+ chars: normalized similarity ≥ 0.80 (~1 typo per 5 chars)
+ *
+ * Exported for testing.
+ */
+export function namesAreSimilar(nameA: string, nameB: string): boolean {
+  if (nameA === nameB) return true;
+
+  // Short names are too ambiguous for fuzzy matching
+  if (nameA.length <= 3 || nameB.length <= 3) return false;
+
+  const dist = levenshteinDistance(nameA, nameB);
+  const maxLen = Math.max(nameA.length, nameB.length);
+  const similarity = 1 - dist / maxLen;
+
+  return similarity >= 0.80;
+}
+
+/**
  * Apply name-based similarity boosts to cross-chunk speaker pairs.
  *
- * When two speakers from different chunks share the same normalized display name,
- * we nudge their similarity up by NAME_BOOST. This helps borderline pairs that
+ * When two speakers from different chunks share similar normalized display names
+ * (fuzzy match via Levenshtein distance — catches ASR variants like Arya/Araya),
+ * we lift their similarity to NAME_MERGE_FLOOR. This helps borderline pairs that
  * voice embeddings alone can't confidently merge — especially when audio quality
  * is uneven across chunks. Won't rescue truly different speakers (the embedding
  * signal is still dominant), but it's a useful tiebreaker.
@@ -217,9 +269,9 @@ function applyNameBoosts(
       const nameI = normalizeSpeakerName(speakerI.displayName);
       const nameJ = normalizeSpeakerName(speakerJ.displayName);
 
-      if (!nameI || !nameJ || nameI !== nameJ) continue;
+      if (!nameI || !nameJ || !namesAreSimilar(nameI, nameJ)) continue;
 
-      // Same normalized name in different chunks — lift to floor if below it.
+      // Same (or fuzzy-matched) name in different chunks — lift to floor if below it.
       // Max semantics: already above 0.75? Leave it alone. Below? Raise to floor.
       // Avoids piling score onto already-high pairs and makes the threshold crisp.
       const before = similarityMatrix[i][j];
@@ -227,10 +279,12 @@ function applyNameBoosts(
       similarityMatrix[i][j] = boosted;
       similarityMatrix[j][i] = boosted;
 
+      const fuzzyMatch = nameI !== nameJ;
       console.log('[EmbeddingReconciliation] Name floor applied:', {
         entryI: entries[i].originalId,
         entryJ: entries[j].originalId,
         name: nameI,
+        ...(fuzzyMatch ? { fuzzyMatchedWith: nameJ, editDistance: levenshteinDistance(nameI, nameJ) } : {}),
         before: before.toFixed(3),
         floor: EmbeddingReconciliationConfig.NAME_MERGE_FLOOR.toFixed(3),
         after: boosted.toFixed(3),

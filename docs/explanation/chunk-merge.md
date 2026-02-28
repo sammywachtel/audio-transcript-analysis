@@ -7,12 +7,77 @@ This document explains the chunk merge system - the final step in processing lar
 The chunk merge system is part of the large file upload flow:
 
 ```
-Audio Upload → Chunking → Chunk Processing → Chunk Merge → Complete
-                ↓              ↓                  ↓
-           (30s overlap)  (WhisperX + Gemini)  (Deduplicate)
+Audio Upload → Chunking → Leader Dispatch → Leader Processes → Followers Dispatch → Chunk Merge → Complete
+                 ↓             ↓                  ↓                    ↓                  ↓
+            (30s overlap)  (chunk 0 only)  (extract hints)    (hints skip pre-analysis) (Deduplicate)
 ```
 
 **Purpose**: Transform multiple chunk artifacts into a single merged conversation document with no duplicates or gaps.
+
+## Leader-Chunk-First Dispatch
+
+Before chunks are merged, they must be processed. In parallel mode, processing uses a **leader-chunk-first** pattern that balances speed with speaker consistency.
+
+### Why Not Dispatch All Chunks at Once?
+
+The naive approach — dispatch all chunks simultaneously — means every chunk runs Gemini pre-analysis independently, producing potentially inconsistent speaker identities. Chunk 0 might call a speaker "Alice" while chunk 3 calls the same voice "Speaker 1". Speaker reconciliation at merge time can fix this, but the quality improves dramatically when chunks already agree on who's speaking.
+
+### How It Works
+
+```
+transcribeAudio (Storage trigger):
+    │
+    ├─ Chunk audio into N pieces
+    ├─ Upload all chunks to Storage
+    ├─ Dispatch ONLY chunk 0 (the "leader") as a Cloud Task
+    └─ Store chunks 1..N as pendingFollowerChunks in Firestore
+         │
+         ▼
+processTranscription (chunk 0):
+    │
+    ├─ Full pipeline: Gemini pre-analysis → WhisperX → store results
+    ├─ extractSpeakerHints() → { numSpeakers, speakerNames, speakerNotes }
+    └─ dispatchFollowersWithHints() (transactional):
+         ├─ Read pendingFollowerChunks from Firestore
+         ├─ Check followersDispatched guard (idempotency)
+         ├─ Enqueue Cloud Task for each follower with speakerHints in payload
+         ├─ Set followersDispatched = true (atomically)
+         └─ Delete pendingFollowerChunks (cleanup)
+              │
+              ▼
+processTranscription (chunks 1..N, staggered):
+    │
+    ├─ Receive speakerHints from task payload
+    ├─ SKIP Gemini pre-analysis (hints already provide speaker identities)
+    ├─ WhisperX diarization seeded with hint data (numSpeakers + speakerNames)
+    └─ Speaker notes seeded from leader's speakerNotes
+```
+
+### What Speaker Hints Contain
+
+The `SpeakerHints` structure is extracted from the leader's pipeline results:
+
+- **`numSpeakers`**: How many speakers the leader identified
+- **`speakerNames`**: Deduplicated names from `speakerMappings` (canonical IDs with display names) and `chunkSpeakerSignatures` (richer metadata with inferred names)
+- **`speakerNotes`**: Per-speaker metadata (ID, inferred name, role) used to seed Gemini content analysis
+
+### Idempotency
+
+The follower dispatch uses a Firestore transaction with a `followersDispatched` boolean guard. Cloud Tasks has at-least-once delivery semantics, meaning the leader's `processTranscription` could theoretically run twice. The guard ensures followers are only dispatched once regardless of retries.
+
+### Trade-offs
+
+| Aspect | Leader-First | Naive Parallel | Sequential |
+|--------|-------------|----------------|------------|
+| Latency | Leader delay + parallel followers | All chunks at once | Each waits for predecessor |
+| Gemini calls | 1 full + (N-1) skipped | N full | N full (with context) |
+| Name consistency | High (shared hints) | Low (independent guesses) | High (context propagation) |
+| Token cost | Lower (pre-analysis skipped) | Highest | Moderate |
+| Reconciliation needed | Yes (at merge) | Yes (at merge) | No |
+
+### Retry Behavior
+
+The retry flow (`retry.ts`) dispatches follower chunks directly without leader hints. This means retried followers won't benefit from the hint optimization — they run the full pipeline including Gemini pre-analysis. This is acceptable because retry is a degraded path where correctness matters more than cost savings.
 
 ## System Architecture
 
@@ -469,19 +534,11 @@ The reconciliation system provides several quality indicators:
 
 ## Future Improvements
 
-### 1. Voice Embeddings
+### 1. Retry Hint Propagation
 
-Add voice biometric signatures to speaker reconciliation for more robust matching. Would complement name/content signals with acoustic fingerprints.
+The retry flow currently dispatches followers without leader hints (degraded path). A future improvement could read `leaderSpeakerHints` from `chunkingMetadata` during retry dispatch to provide the same optimization.
 
-### 2. Manual Override UI
-
-Allow users to manually merge or split speakers if reconciliation makes mistakes. Store overrides in Firestore for future reference.
-
-### 3. Adaptive Thresholds
-
-Adjust confidence thresholds based on chunk count, audio quality, and historical accuracy. Learn from user feedback.
-
-### 4. Progressive Merge
+### 2. Progressive Merge
 
 Start merging early chunks while later chunks still processing (reduces time to first view).
 
@@ -496,14 +553,16 @@ Start merging early chunks while later chunks still processing (reduces time to 
 
 ## Key Takeaways
 
-1. **Chunk artifacts** store intermediate results in `conversations/{id}/chunks/*`
-2. **Speaker reconciliation** (parallel mode) matches speakers across chunks using name/topic/term signals
-3. **Confidence threshold** (default 0.75) triggers fallback if reconciliation is uncertain
-4. **Fallback flow**: Low confidence → archive parallel chunks → reprocess sequentially
-5. **Merge trigger** fires atomically when all chunks complete
-6. **Deduplication** uses "preferred chunk" logic (later chunk wins in overlaps)
-7. **Idempotency** ensures safe retries and prevents double-fallback
-8. **Status flow**: `chunking → merging → [reprocessing?] → complete`
-9. **Observability**: Structured logs + `reconciliationMetadata` + `fallbackMetadata` for monitoring
+1. **Leader-first dispatch**: Only chunk 0 processes initially; it extracts speaker hints and dispatches followers
+2. **Speaker hints**: Followers skip Gemini pre-analysis, using leader's speaker identities for WhisperX and content analysis
+3. **Chunk artifacts** store intermediate results in `conversations/{id}/chunks/*`
+4. **Speaker reconciliation** (parallel mode) matches speakers across chunks using voice embeddings + name signals
+5. **Confidence threshold** (default 0.75) triggers fallback if reconciliation is uncertain
+6. **Fallback flow**: Low confidence → archive parallel chunks → reprocess sequentially
+7. **Merge trigger** fires atomically when all chunks complete
+8. **Deduplication** uses "preferred chunk" logic (later chunk wins in overlaps)
+9. **Idempotency** ensures safe retries and prevents duplicate dispatch/merge/fallback
+10. **Status flow**: `chunking → merging → [reprocessing?] → complete`
+11. **Observability**: Structured logs + `reconciliationMetadata` + `fallbackMetadata` for monitoring
 
-The merge layer is the final step that transforms chunked processing back into a seamless user experience. Speaker reconciliation ensures consistent identities across chunk boundaries, and automatic fallback to sequential processing protects users from mislabeled transcripts when confidence is low.
+The merge layer is the final step that transforms chunked processing back into a seamless user experience. The leader-first dispatch pattern ensures followers start with good speaker identities, speaker reconciliation assigns canonical IDs across chunk boundaries, and automatic fallback to sequential processing protects users from mislabeled transcripts when confidence is low.
