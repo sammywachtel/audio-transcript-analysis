@@ -14,7 +14,7 @@
  */
 
 import { reconcileSpeakers, ReconciliationLowConfidenceError } from '../speakerReconciliation';
-import { reconcileSpeakersWithEmbeddings } from '../speakerReconciliationEmbeddings';
+import { reconcileSpeakersWithEmbeddings, levenshteinDistance, namesAreSimilar } from '../speakerReconciliationEmbeddings';
 import { SpeakerSignature, ChunkArtifact } from '../types';
 import { computeAdaptiveEdgeThreshold } from '../adaptiveThresholds';
 
@@ -1006,6 +1006,147 @@ describe('speakerReconciliation', () => {
         const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
 
         // Different names → no boost → stay separate
+        expect(result.nameBoostCount).toBe(0);
+        expect(result.clusterDetails.length).toBe(2);
+      });
+    });
+
+    describe('fuzzy name matching utilities', () => {
+      describe('levenshteinDistance', () => {
+        it('should return 0 for identical strings', () => {
+          expect(levenshteinDistance('arya', 'arya')).toBe(0);
+        });
+
+        it('should handle empty strings', () => {
+          expect(levenshteinDistance('', 'abc')).toBe(3);
+          expect(levenshteinDistance('abc', '')).toBe(3);
+          expect(levenshteinDistance('', '')).toBe(0);
+        });
+
+        it('should compute single insertion', () => {
+          // "arya" → "araya" requires one insertion
+          expect(levenshteinDistance('arya', 'araya')).toBe(1);
+        });
+
+        it('should compute single substitution', () => {
+          expect(levenshteinDistance('jay', 'ray')).toBe(1);
+        });
+
+        it('should compute multiple edits', () => {
+          expect(levenshteinDistance('alice', 'bob')).toBe(5);
+        });
+
+        it('should be symmetric', () => {
+          expect(levenshteinDistance('araya', 'arya')).toBe(levenshteinDistance('arya', 'araya'));
+        });
+      });
+
+      describe('namesAreSimilar', () => {
+        it('should match identical names', () => {
+          expect(namesAreSimilar('sam', 'sam')).toBe(true);
+          expect(namesAreSimilar('dennis', 'dennis')).toBe(true);
+        });
+
+        it('should match ASR transcription variants (the Arya/Araya case)', () => {
+          // dist=1, maxLen=5, sim=0.80 — just clears the 0.80 threshold
+          expect(namesAreSimilar('arya', 'araya')).toBe(true);
+        });
+
+        it('should match common transcription variants for longer names', () => {
+          // "dennis" vs "denis": dist=1, maxLen=6, sim=0.83
+          expect(namesAreSimilar('dennis', 'denis')).toBe(true);
+        });
+
+        it('should NOT fuzzy-match short names (≤3 chars)', () => {
+          // "jay" vs "ray": only 1 edit away but too short to trust
+          expect(namesAreSimilar('jay', 'ray')).toBe(false);
+          expect(namesAreSimilar('sam', 'sal')).toBe(false);
+        });
+
+        it('should still exact-match short names', () => {
+          expect(namesAreSimilar('jay', 'jay')).toBe(true);
+          expect(namesAreSimilar('sam', 'sam')).toBe(true);
+        });
+
+        it('should NOT match clearly different names', () => {
+          expect(namesAreSimilar('alice', 'bob')).toBe(false);
+          expect(namesAreSimilar('nick', 'dennis')).toBe(false);
+          expect(namesAreSimilar('alice', 'alex')).toBe(false); // dist=2, sim=0.60
+        });
+
+        it('should require one short + one long to both be >3 chars', () => {
+          // If either name is ≤3 chars and they're not identical, reject
+          expect(namesAreSimilar('sam', 'samm')).toBe(false); // "sam" is ≤3
+        });
+      });
+    });
+
+    describe('REQ-3b: fuzzy name merge floor', () => {
+      it('should merge cross-chunk speakers with fuzzy-matching names (Arya/Araya)', () => {
+        // The real-world case: Gemini transcribes "Arya" in one chunk and "Araya"
+        // in another. Embeddings alone are too dissimilar (0.50) but the name
+        // floor should lift them to 0.75 and merge.
+        const embeddingA = generateEmbedding(12001);
+        const embeddingB = generateEmbedding(12002, { to: embeddingA, score: 0.50 });
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }, { SPEAKER_00: 'Arya (Host / Product Presenter)' }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB }, { SPEAKER_00: 'Araya (Vendor Sales Representative)' }),
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Fuzzy match "arya" ≈ "araya" → floor applied → single cluster
+        expect(result.nameBoostCount).toBe(1);
+        expect(result.clusterDetails.length).toBe(1);
+        expect(result.speakerIdMap.get('SPEAKER_00_chunk0')).toBe(
+          result.speakerIdMap.get('SPEAKER_00_chunk1')
+        );
+      });
+
+      it('should merge cross-chunk speakers with fuzzy-matching names (Dennis/Denis)', () => {
+        const embeddingA = generateEmbedding(12011);
+        const embeddingB = generateEmbedding(12012, { to: embeddingA, score: 0.50 });
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }, { SPEAKER_00: 'Dennis (Technical Lead)' }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB }, { SPEAKER_00: 'Denis (Technical Lead)' }),
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        expect(result.nameBoostCount).toBe(1);
+        expect(result.clusterDetails.length).toBe(1);
+      });
+
+      it('should NOT fuzzy-merge short names that are 1 edit apart (Jay/Ray)', () => {
+        const embeddingA = generateEmbedding(12021);
+        const embeddingB = generateEmbedding(12022, { to: embeddingA, score: 0.50 });
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }, { SPEAKER_00: 'Jay' }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB }, { SPEAKER_00: 'Ray' }),
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // Short names → exact match required → no boost → separate
+        expect(result.nameBoostCount).toBe(0);
+        expect(result.clusterDetails.length).toBe(2);
+      });
+
+      it('should NOT fuzzy-merge names that are too dissimilar (Alice/Alex)', () => {
+        const embeddingA = generateEmbedding(12031);
+        const embeddingB = generateEmbedding(12032, { to: embeddingA, score: 0.50 });
+
+        const chunkArtifacts = [
+          createChunkArtifact(0, { SPEAKER_00: embeddingA }, { SPEAKER_00: 'Alice' }),
+          createChunkArtifact(1, { SPEAKER_00: embeddingB }, { SPEAKER_00: 'Alex' }),
+        ];
+
+        const result = reconcileSpeakersWithEmbeddings(chunkArtifacts);
+
+        // "alice" vs "alex": dist=2, sim=0.60 — below 0.80 threshold
         expect(result.nameBoostCount).toBe(0);
         expect(result.clusterDetails.length).toBe(2);
       });
