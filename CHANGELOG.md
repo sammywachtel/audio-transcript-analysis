@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-03-06
+
+### Fixed
+- **Over-Aggressive Segment Merging** - Speaker reassignment no longer collapses all adjacent same-speaker segments into giant monologue blocks
+  - Phase 3 of `applySpeakerReassignments()` now only merges segments directly involved in reassignments or splits, preserving WhisperX's natural sentence boundaries
+  - Previously, 104 well-segmented sentences could collapse into 14 massive blocks, trapping multiple speakers' text in single segments
+  - Tracks modified indices through the reassign → split → merge pipeline, including correct index shifting for splice operations
+
 ## [2.11.0] - 2026-02-27
 
 ### Added
