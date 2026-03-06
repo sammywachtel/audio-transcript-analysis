@@ -1,5 +1,16 @@
 # What's New
 
+## Version 2.13.0 - March 6, 2026
+
+### 🐛 Better Transcript Segmentation
+
+**Conversations Stay Properly Broken Down**
+- Fixed an issue where transcripts could collapse dozens of natural sentences into a handful of giant text blocks
+- Each speaker turn now preserves WhisperX's original sentence-level breaks, so you see granular, navigable segments instead of walls of text
+- This particularly improves results for multi-speaker conversations where different people's words were being mashed together in the same block
+
+---
+
 ## Version 2.11.0 - February 27, 2026
 
 ### ✨ Resizable Sidebar

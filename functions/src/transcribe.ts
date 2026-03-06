@@ -3133,6 +3133,8 @@ export function applySpeakerReassignments(
   // ---- Phase 1: Reassignments ----
   const reassignments = corrections.filter(c => c.action === 'reassign' && c.newSpeaker);
   let result = [...segments];
+  // Track which indices were modified so Phase 3 only merges around them
+  const touchedIndices = new Set<number>();
 
   for (const correction of reassignments) {
     const { segmentIndex, newSpeaker } = correction;
@@ -3151,6 +3153,7 @@ export function applySpeakerReassignments(
     if (oldSpeaker !== newSpeaker) {
       console.debug(`[Speaker Reassignment] Seg ${segmentIndex}: ${oldSpeaker} -> ${newSpeaker}`);
       result[segmentIndex] = { ...result[segmentIndex], speakerId: newSpeaker! };
+      touchedIndices.add(segmentIndex);
     }
   }
 
@@ -3257,15 +3260,32 @@ export function applySpeakerReassignments(
     };
 
     result.splice(segmentIndex, 1, segBefore, segAfter);
+    // Both halves of the split are new — mark them for Phase 3
+    touchedIndices.add(segmentIndex);
+    touchedIndices.add(segmentIndex + 1);
+    // Splits insert an element, so bump any previously-tracked indices above this point
+    const shifted = new Set<number>();
+    for (const idx of touchedIndices) {
+      shifted.add(idx > segmentIndex + 1 ? idx + 1 : idx);
+    }
+    touchedIndices.clear();
+    for (const idx of shifted) touchedIndices.add(idx);
   }
 
-  // ---- Phase 3: Merge adjacent same-speaker segments ----
-  // Splits can expose or create same-speaker neighbours — clean them up.
+  // ---- Phase 3: Merge adjacent same-speaker segments (ONLY around modified indices) ----
+  // Only merge neighbours when at least one was touched by Phase 1/2.
+  // Unconditionally merging all same-speaker neighbours destroys WhisperX's
+  // natural sentence boundaries and creates giant multi-sentence blocks.
   const merged: typeof result = [];
-  for (const seg of result) {
+  for (let i = 0; i < result.length; i++) {
+    const seg = result[i];
     const last = merged[merged.length - 1];
-    if (last && last.speakerId === seg.speakerId) {
-      // Extend the previous segment
+    if (
+      last &&
+      last.speakerId === seg.speakerId &&
+      (touchedIndices.has(i) || touchedIndices.has(i - 1))
+    ) {
+      // Only merge if one of the pair was modified by reassignment/split
       merged[merged.length - 1] = {
         ...last,
         text: last.text.trimEnd() + ' ' + seg.text.trimStart(),
