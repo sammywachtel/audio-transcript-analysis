@@ -1,5 +1,16 @@
 # What's New
 
+## Version 2.14.0 - March 6, 2026
+
+### 🎯 Smarter Speaker Name Matching
+
+**Fewer "Ghost" Speakers from Spelling Variants**
+- The system now recognizes that names like "Arya" and "Araya" (or "Dennis" and "Denis") are the same person, even when different audio chunks transcribe the name slightly differently
+- Previously, a single misspelled letter would create a duplicate speaker — you'd see both "Arya" and "Araya" in your transcript as separate people
+- Short names (3 characters or fewer) still require exact matches to avoid false merges — "Jay" won't accidentally merge with "Ray"
+
+---
+
 ## Version 2.13.0 - March 6, 2026
 
 ### 🐛 Better Transcript Segmentation
