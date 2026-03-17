@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Gemini 3 Flash Pipeline PoC** - Validated new transcription architecture: Gemini 3 Flash (WAV) for speaker diarization + naming + content analysis, WhisperX for precise timestamps, HARDY alignment to bridge them
+  - Tested across 5 conversations (9.9-44.8 min, 2-8 speakers) — all successful
+  - Gemini identifies 5-6 speakers by name, uses only 6-31% of output token budget
+  - WAV audio format critical for detecting all speakers (MP3 misses quiet voices)
+  - HARDY alignment achieves median 1.1s timestamp precision vs ground truth
+  - PoC scripts: `poc-combined-pipeline.ts`, `poc-gemini3-fullpass.ts`, `poc-chirp3-benchmark.ts`, etc.
+- **Chirp-3 Speech-to-Text benchmark** - Evaluated Google Cloud Speech-to-Text v2 (Chirp-3) for diarization — found insufficient (3/6 speakers), transcription quality good
+- **GCP setup for Speech-to-Text** - Added `speech.googleapis.com` API and `roles/speech.client` IAM bindings to `gcp-setup.sh`
+- **Implementation requirements** - Created/updated 6 implementation scopes (`gemini_hybrid_01` through `_06`) based on PoC findings, archived `_07` (pyannote upgrade — no longer relevant)
+
+### Changed
+- **Pipeline re-architecture plan** - Updated `02_implementation_gemini_hybrid.md` from Chirp-3-primary to Gemini-3-Flash-primary architecture based on PoC results
+- **PoC findings documented** - Created `03_poc_findings.md` with comprehensive results across all test phases
+
 ## [2.14.0] - 2026-03-06
 
 ### Changed

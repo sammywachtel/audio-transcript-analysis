@@ -40,7 +40,9 @@
     "db:debug": "node scripts/debug-firestore.js"
   },
   "dependencies": {
+    "@google-cloud/speech": "^7.3.0",
     "@google/genai": "^1.33.0",
+    "@google/generative-ai": "^0.24.1",
     "dotenv": "^17.2.3",
     "firebase": "^10.14.1",
     "idb": "^8.0.0",
