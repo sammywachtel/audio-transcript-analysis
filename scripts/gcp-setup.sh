@@ -395,6 +395,8 @@ APIS=(
     "apikeys.googleapis.com"
     # Cloud Tasks (queue-driven transcription architecture)
     "cloudtasks.googleapis.com"
+    # Speech-to-Text v2 (Chirp-3 diarization benchmark)
+    "speech.googleapis.com"
 )
 
 APIS_TO_ENABLE=()
@@ -477,6 +479,7 @@ DEPLOYMENT_ROLES=(
     "roles/iam.serviceAccountUser"
     "roles/secretmanager.admin"
     "roles/serviceusage.serviceUsageConsumer"  # Required for Firebase to check/enable APIs during deploy
+    "roles/speech.client"  # Chirp-3 BatchRecognize (PoC scripts use this SA via firebase-sa-key.json)
 )
 
 for role in "${DEPLOYMENT_ROLES[@]}"; do
@@ -498,6 +501,7 @@ if ! sa_exists "$RUNTIME_SA"; then
 else
     add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/secretmanager.secretAccessor" "$RUNTIME_SA → Secret Accessor"
     add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/aiplatform.user" "$RUNTIME_SA → Vertex AI User"
+    add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/speech.client" "$RUNTIME_SA → Speech-to-Text Client (Chirp-3)"
 fi
 
 # -----------------------------------------------------------------------------
