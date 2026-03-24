@@ -183,12 +183,21 @@ jobs:
       - name: Health check
         env:
           SERVICE_URL: ${{ steps.deploy.outputs.url }}
+          SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
         run: |
           echo "Waiting for service to become ready (GPU cold start can take 2-3 min)..."
-          TOKEN=$(gcloud auth print-identity-token \
-            --audiences="$SERVICE_URL" 2>/dev/null || gcloud auth print-identity-token)
 
           for i in {1..12}; do
+            # WIF credentials can't mint identity tokens directly —
+            # impersonate the SA to get one for each attempt (tokens expire)
+            TOKEN=$(gcloud auth print-identity-token \
+              --impersonate-service-account="$SERVICE_ACCOUNT" \
+              --audiences="$SERVICE_URL" 2>/dev/null) || {
+              echo "Attempt $i/12: Failed to mint identity token, retrying in 15s..."
+              sleep 15
+              continue
+            }
+
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
               -H "Authorization: Bearer $TOKEN" \
               "$SERVICE_URL/health" 2>/dev/null || echo "000")
