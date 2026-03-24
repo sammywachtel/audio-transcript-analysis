@@ -121,6 +121,10 @@ export interface Conversation {
   // Quality warnings (non-blocking issues surfaced to user)
   warnings?: TranscriptWarning[];
 
+  // Pipeline provenance — which pipeline produced this data
+  processingPipeline?: 'legacy' | 'gemini_hybrid';
+  pipelineVersion?: string;
+
   // Retry tracking metadata
   retryCount?: number;
   lastFailedAt?: string;

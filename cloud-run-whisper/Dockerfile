@@ -1,13 +1,27 @@
-# Cloud Run GPU Whisper Diarization Service
+# Cloud Run GPU WhisperX Timestamps Service
 #
-# Mirrors the Cog container environment: CUDA 12 + cuDNN 9, Python 3.10,
-# Whisper Large v3 Turbo + pyannote 3.1. Models pre-cached at build time
-# so the container never phones home to HuggingFace.
+# CUDA 12 + cuDNN 9, Python 3.10, faster-whisper (configurable model size).
+# Timestamps-only mode uses just the Whisper ASR model; pyannote diarization
+# models are still cached for full-diarization requests but lazy-loaded.
+# Models pre-cached at build time so the container never phones home to HF.
 #
-# Build:   docker build -t whisper-diarization .
-# Run:     docker run --gpus all -p 8080:8080 whisper-diarization
+# Build:   docker build -t whisperx-service .
+# Build (medium model): docker build --build-arg WHISPER_MODEL=medium-v3-turbo -t whisperx-service .
+# Run:     docker run --gpus all -p 8080:8080 whisperx-service
 
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+# Which Whisper model to bake into the image. Override at build time:
+#   docker build --build-arg WHISPER_MODEL=large-v3-turbo ...     (default)
+#   docker build --build-arg WHISPER_MODEL=medium \
+#                --build-arg WHISPER_HF_REPO=Systran/faster-whisper-medium ...
+#
+# WHISPER_HF_REPO controls the HuggingFace download path. The default pattern
+# (deepdml/faster-whisper-{MODEL}-ct2) works for large-v3-turbo. Other model
+# sizes live under different orgs — Systran publishes the standard CTranslate2
+# conversions (medium, small, base, tiny).
+ARG WHISPER_MODEL=large-v3-turbo
+ARG WHISPER_HF_REPO=deepdml/faster-whisper-${WHISPER_MODEL}-ct2
 
 # No interactive prompts during build
 ENV DEBIAN_FRONTEND=noninteractive
@@ -36,23 +50,28 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Pre-cache models at build time (~20GB, so grab a coffee)
 # -----------------------------------------------------------------------
 
-# Whisper Large v3 Turbo (CTranslate2 format)
+# Whisper model (CTranslate2 format) — repo controlled by WHISPER_HF_REPO build arg
 RUN mkdir -p /models && \
     python3 -c "\
 from huggingface_hub import snapshot_download; \
 path = snapshot_download( \
-    'deepdml/faster-whisper-large-v3-turbo-ct2', \
-    local_dir='/models/faster-whisper-large-v3-turbo', \
+    '${WHISPER_HF_REPO}', \
+    local_dir='/models/faster-whisper-${WHISPER_MODEL}', \
     local_dir_use_symlinks=False, \
 ); \
 print(f'Whisper cached to {path}')" && \
-    ls -la /models/faster-whisper-large-v3-turbo/ && \
-    test -f /models/faster-whisper-large-v3-turbo/model.bin
+    ls -la /models/faster-whisper-${WHISPER_MODEL}/ && \
+    test -f /models/faster-whisper-${WHISPER_MODEL}/model.bin
 
 # pyannote diarization + speaker embedding models
 # Token passed via BuildKit secret mount — never baked into image layers.
 # Build with: docker build --secret id=hf_token,env=HF_TOKEN ...
+#
+# Skip with --build-arg CACHE_PYANNOTE=false for timestamps-only images.
+# Saves ~3GB image size and avoids CUDA version issues at build time.
+ARG CACHE_PYANNOTE=true
 RUN --mount=type=secret,id=hf_token \
+    if [ "$CACHE_PYANNOTE" = "true" ]; then \
     HF_HOME=/models \
     HF_TOKEN=$(cat /run/secrets/hf_token) \
     python3 -c "\
@@ -63,7 +82,10 @@ Model.from_pretrained('pyannote/wespeaker-voxceleb-resnet34-LM', use_auth_token=
 print('Pyannote models cached')" && \
     echo "=== Model cache contents ===" && \
     ls -la /models/ && \
-    du -sh /models/*
+    du -sh /models/* ; \
+    else \
+    echo "Skipping pyannote cache (CACHE_PYANNOTE=false)" ; \
+    fi
 
 # -----------------------------------------------------------------------
 # Application code
@@ -71,10 +93,14 @@ print('Pyannote models cached')" && \
 
 COPY app.py predict.py ./
 
-# Runtime env — offline mode so we never try to download at runtime
+# Runtime env — offline mode so we never try to download at runtime.
+# WHISPER_MODEL_PATH tells predict.py where the model lives; defaults to
+# whatever we just downloaded. WHISPER_BEAM_SIZE is tunable at deploy time.
 ENV HF_HOME=/models \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
+    WHISPER_MODEL_PATH=/models/faster-whisper-${WHISPER_MODEL} \
+    WHISPER_BEAM_SIZE=5 \
     PORT=8080
 
 EXPOSE 8080

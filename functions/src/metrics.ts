@@ -325,7 +325,7 @@ export async function calculateCost(llmUsage: LLMUsage): Promise<CostResult> {
 
   const geminiUsd = geminiAudioInputUsd + geminiTextInputUsd + geminiOutputUsd;
 
-  // Calculate WhisperX cost (includes diarization - single Replicate model)
+  // Calculate WhisperX cost (Cloud Run GPU service — timestamps-only mode)
   const whisperxUsd = llmUsage.whisperx.computeTimeSeconds * whisperxPerSecond;
 
   const totalUsd = geminiUsd + whisperxUsd;

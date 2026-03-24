@@ -126,6 +126,8 @@ export interface AlignmentResult {
   segments: { speakerId: string; text: string; startMs: number; endMs: number }[];
   alignmentStatus: 'aligned' | 'fallback';
   alignmentError?: string;
+  /** Average per-segment confidence from HARDY alignment [0-1]. Only present when aligned. */
+  avgConfidence?: number;
 }
 
 class AlignmentError extends Error {
@@ -1306,7 +1308,8 @@ async function getWhisperxTimestamps(
   console.debug(
     `[WhisperX] Request parameters: ` +
     `service_url=${serviceUrl}, ` +
-    `language=en`
+    `language=en, ` +
+    `timestamps_only=true`
   );
 
   try {
@@ -1326,7 +1329,8 @@ async function getWhisperxTimestamps(
       },
       body: JSON.stringify({
         file_string: audioBase64,
-        language: 'en'
+        language: 'en',
+        timestamps_only: true
       }),
       signal: controller.signal
     });
@@ -2091,6 +2095,13 @@ export async function alignTimestamps(
       );
     }
 
+    // Surface per-segment confidence as a single summary number.
+    // The full confidence array lives inside HARDY internals — this is the
+    // narrow contract extension the orchestrator can use for quality gates.
+    const avgConfidence = aligned.length > 0
+      ? aligned.reduce((sum, s) => sum + s.confidence, 0) / aligned.length
+      : 0;
+
     // Convert back to simple objects
     const result: AlignmentResult = {
       segments: aligned.map(s => ({
@@ -2099,7 +2110,8 @@ export async function alignTimestamps(
         startMs: s.startMs,
         endMs: s.endMs
       })),
-      alignmentStatus: 'aligned'
+      alignmentStatus: 'aligned',
+      avgConfidence,
     };
 
     console.debug(

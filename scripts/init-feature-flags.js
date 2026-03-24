@@ -31,11 +31,15 @@ if (!projectId) {
 admin.initializeApp({ projectId });
 const db = admin.firestore();
 
-// Default values for speaker reconciliation feature flags
+// Default values for feature flags
 const DEFAULTS = {
+  // Speaker reconciliation
   enableContextAwareReconciliation: true,
   contextAwareRolloutPercentage: 100,
   forceEmbeddingOnlyConversationIds: [],
+  // Hybrid pipeline — disabled by default, operator enables after deploy
+  enableHybridPipeline: false,
+  hybridPipelineRolloutPercentage: 0,
 };
 
 async function initFeatureFlags() {

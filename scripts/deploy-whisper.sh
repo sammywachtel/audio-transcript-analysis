@@ -3,14 +3,19 @@
 # Whisper GPU Service Deployment Script
 #
 # Builds and deploys the WhisperX transcription container to Cloud Run
-# with NVIDIA L4 GPU. The service handles audio transcription and speaker
+# with GPU. The service handles audio transcription and (optionally) speaker
 # diarization, called by Cloud Functions via IAM-authenticated HTTPS.
 #
 # Usage:
-#   ./scripts/deploy-whisper.sh                # Build, push, and deploy
+#   ./scripts/deploy-whisper.sh                # Build, push, and deploy (L4, large-v3-turbo, beam 5)
 #   ./scripts/deploy-whisper.sh --build-only   # Build and push only (no deploy)
-#   ./scripts/deploy-whisper.sh --deploy-only  # Deploy existing image (no build)
+#   ./scripts/deploy-whisper.sh --deploy-only  # Deploy existing image (no deploy)
 #   ./scripts/deploy-whisper.sh --no-cache     # Build without Docker cache
+#   ./scripts/deploy-whisper.sh --cloud-build  # Build via Cloud Build (no local Docker needed)
+#   ./scripts/deploy-whisper.sh --gpu-type nvidia-rtx-pro-6000  # RTX Pro 6000 (only other option on Cloud Run)
+#   ./scripts/deploy-whisper.sh --model-size medium              # Smaller model (spoiler: it's slower)
+#   ./scripts/deploy-whisper.sh --beam-size 2                # Faster decoding
+#   ./scripts/deploy-whisper.sh --eval t4-test               # Isolated eval service (no prod impact)
 #
 # Prerequisites:
 #   - Docker installed and running
@@ -58,6 +63,21 @@ SERVICE_NAME="${WHISPER_SERVICE_NAME:-whisperx-service}"
 AR_REPO="${WHISPER_AR_REPO:-whisper-gpu}"
 IMAGE_TAG="${WHISPER_IMAGE_TAG:-latest}"
 
+# Tunable knobs for GPU/model/beam cost evaluation.
+# Override via env var or CLI flags (--gpu-type, --model-size, --beam-size).
+WHISPER_GPU_TYPE="${WHISPER_GPU_TYPE:-nvidia-l4}"
+WHISPER_MODEL_SIZE="${WHISPER_MODEL_SIZE:-large-v3-turbo}"
+WHISPER_BEAM_SIZE="${WHISPER_BEAM_SIZE:-5}"
+
+# HuggingFace repo for the Whisper model. The default pattern works for the
+# large-v3-turbo model from deepdml. Other sizes use different orgs — e.g.,
+# Systran publishes standard CTranslate2 conversions (medium, small, etc.).
+# Override with --hf-repo or WHISPER_HF_REPO env var.
+WHISPER_HF_REPO="${WHISPER_HF_REPO:-deepdml/faster-whisper-${WHISPER_MODEL_SIZE}-ct2}"
+
+# Eval mode — when set, deploys an isolated service that won't touch production.
+EVAL_TAG=""
+
 # HuggingFace token — needed at build time for gated pyannote models.
 # Accepts either name so you don't have to remember which one you set.
 HF_TOKEN="${HF_TOKEN:-${HUGGINGFACE_ACCESS_TOKEN:-}}"
@@ -75,6 +95,7 @@ BUILD_CONTEXT="${REPO_ROOT}/cloud-run-whisper"
 
 DO_BUILD=true
 DO_DEPLOY=true
+USE_CLOUD_BUILD=false
 DOCKER_EXTRA_ARGS=""
 
 while [[ $# -gt 0 ]]; do
@@ -91,20 +112,53 @@ while [[ $# -gt 0 ]]; do
             DOCKER_EXTRA_ARGS="--no-cache"
             shift
             ;;
+        --cloud-build)
+            USE_CLOUD_BUILD=true
+            shift
+            ;;
         --tag)
             IMAGE_TAG="$2"
             IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/whisperx:${IMAGE_TAG}"
+            shift 2
+            ;;
+        --gpu-type)
+            WHISPER_GPU_TYPE="$2"
+            shift 2
+            ;;
+        --model-size)
+            WHISPER_MODEL_SIZE="$2"
+            # Update HF repo default when model changes (can still be overridden by --hf-repo)
+            WHISPER_HF_REPO="${WHISPER_HF_REPO_EXPLICIT:-deepdml/faster-whisper-${WHISPER_MODEL_SIZE}-ct2}"
+            shift 2
+            ;;
+        --hf-repo)
+            WHISPER_HF_REPO="$2"
+            WHISPER_HF_REPO_EXPLICIT="$2"
+            shift 2
+            ;;
+        --beam-size)
+            WHISPER_BEAM_SIZE="$2"
+            shift 2
+            ;;
+        --eval)
+            EVAL_TAG="$2"
             shift 2
             ;;
         --help)
             echo "Usage: $0 [options]"
             echo ""
             echo "Options:"
-            echo "  --build-only   Build and push image only (skip deploy)"
-            echo "  --deploy-only  Deploy existing image only (skip build)"
-            echo "  --no-cache     Build without Docker layer cache"
-            echo "  --tag TAG      Image tag (default: latest)"
-            echo "  --help         Show this help message"
+            echo "  --build-only        Build and push image only (skip deploy)"
+            echo "  --deploy-only       Deploy existing image only (skip build)"
+            echo "  --no-cache          Build without Docker layer cache"
+            echo "  --cloud-build       Build via Cloud Build instead of local Docker"
+            echo "  --tag TAG           Image tag (default: latest)"
+            echo "  --gpu-type TYPE     GPU type for Cloud Run (default: nvidia-l4)"
+            echo "  --model-size SIZE   Whisper model (default: large-v3-turbo)"
+            echo "  --hf-repo REPO      HuggingFace repo for model (auto-detected from model-size)"
+            echo "  --beam-size N       Beam size for decoding (default: 5)"
+            echo "  --eval TAG          Deploy as isolated eval service (e.g., --eval t4-test)"
+            echo "  --help              Show this help message"
             echo ""
             echo "Environment variables (set in .env or export):"
             echo "  GCP_PROJECT_ID         GCP project ID (required)"
@@ -112,6 +166,9 @@ while [[ $# -gt 0 ]]; do
             echo "  WHISPER_SERVICE_NAME   Service name (default: whisperx-service)"
             echo "  WHISPER_AR_REPO        Artifact Registry repo (default: whisper-gpu)"
             echo "  WHISPER_IMAGE_TAG      Image tag (default: latest)"
+            echo "  WHISPER_GPU_TYPE       GPU type (default: nvidia-l4)"
+            echo "  WHISPER_MODEL_SIZE     Whisper model size (default: large-v3-turbo)"
+            echo "  WHISPER_BEAM_SIZE      Beam size (default: 5)"
             exit 0
             ;;
         *)
@@ -136,17 +193,31 @@ if [ "$DO_BUILD" = true ] && [ ! -d "$BUILD_CONTEXT" ]; then
     exit 1
 fi
 
+# --- Eval mode adjustments ---
+# When --eval is used, we deploy a separate service that can't accidentally
+# stomp on production. Think of it as a parallel universe for GPU experiments.
+if [ -n "$EVAL_TAG" ]; then
+    SERVICE_NAME="${SERVICE_NAME}-eval-${EVAL_TAG}"
+    log_info "Eval mode: deploying as isolated service '${SERVICE_NAME}'"
+fi
+
 echo ""
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BLUE}  Whisper GPU Service Deployment${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo "  Project:  $PROJECT_ID"
-echo "  Region:   $REGION"
-echo "  Service:  $SERVICE_NAME"
-echo "  Image:    $IMAGE"
-echo "  Build:    $DO_BUILD"
-echo "  Deploy:   $DO_DEPLOY"
+echo "  Project:    $PROJECT_ID"
+echo "  Region:     $REGION"
+echo "  Service:    $SERVICE_NAME"
+echo "  Image:      $IMAGE"
+echo "  GPU:        $WHISPER_GPU_TYPE"
+echo "  Model:      $WHISPER_MODEL_SIZE ($WHISPER_HF_REPO)"
+echo "  Beam size:  $WHISPER_BEAM_SIZE"
+echo "  Build:      $DO_BUILD"
+echo "  Deploy:     $DO_DEPLOY"
+if [ -n "$EVAL_TAG" ]; then
+echo "  Eval tag:   $EVAL_TAG (isolated — production untouched)"
+fi
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -166,22 +237,27 @@ if ! gcloud auth print-identity-token &> /dev/null; then
 fi
 
 if [ "$DO_BUILD" = true ]; then
-    if ! command -v docker &> /dev/null; then
-        log_error "Docker not found. Install: https://docs.docker.com/get-docker/"
-        exit 1
-    fi
+    if [ "$USE_CLOUD_BUILD" = true ]; then
+        log_info "Cloud Build mode — skipping local Docker checks"
+        log_info "HF_TOKEN will be read from GCP Secret Manager during build"
+    else
+        if ! command -v docker &> /dev/null; then
+            log_error "Docker not found. Install Docker or use --cloud-build flag."
+            exit 1
+        fi
 
-    if ! docker info &> /dev/null; then
-        log_error "Docker daemon not running. Start Docker and try again."
-        exit 1
-    fi
+        if ! docker info &> /dev/null; then
+            log_error "Docker daemon not running. Start Docker or use --cloud-build flag."
+            exit 1
+        fi
 
-    if [ -z "$HF_TOKEN" ]; then
-        log_error "HF_TOKEN is required for building (pyannote models are gated)."
-        log_error "Set HF_TOKEN in .env or export it:"
-        log_error "  export HF_TOKEN=hf_..."
-        log_error "Get a token at: https://huggingface.co/settings/tokens"
-        exit 1
+        if [ -z "$HF_TOKEN" ]; then
+            log_error "HF_TOKEN is required for building (pyannote models are gated)."
+            log_error "Set HF_TOKEN in .env or export it:"
+            log_error "  export HF_TOKEN=hf_..."
+            log_error "Get a token at: https://huggingface.co/settings/tokens"
+            exit 1
+        fi
     fi
 fi
 
@@ -201,19 +277,43 @@ log_success "Preflight checks passed"
 # -----------------------------------------------------------------------------
 
 if [ "$DO_BUILD" = true ]; then
-    log_info "Configuring Docker for Artifact Registry..."
-    gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+    if [ "$USE_CLOUD_BUILD" = true ]; then
+        # Cloud Build path — no local Docker needed. The cloudbuild.yaml handles
+        # BuildKit secret mounts and pulls HF_TOKEN from Secret Manager.
+        # Must use --service-account so the build runs as a SA with secret access.
+        log_info "Submitting build to Cloud Build..."
+        log_warning "This takes 20-40 minutes — Cloud Build downloads and caches ~20GB of models."
 
-    log_info "Building image from $BUILD_CONTEXT..."
-    log_warning "This may take a while — the Whisper image is ~20GB with cached models."
-    DOCKER_BUILDKIT=1 docker build --platform linux/amd64 \
-        --secret id=hf_token,env=HF_TOKEN \
-        $DOCKER_EXTRA_ARGS -t "$IMAGE" "$BUILD_CONTEXT"
-    log_success "Image built: $IMAGE"
+        IMAGE_NAME="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/whisperx"
+        BUILD_SA="github-actions@${PROJECT_ID}.iam.gserviceaccount.com"
 
-    log_info "Pushing image to Artifact Registry..."
-    docker push "$IMAGE"
-    log_success "Image pushed: $IMAGE"
+        gcloud builds submit \
+            --config="${REPO_ROOT}/cloud-run-whisper/cloudbuild.yaml" \
+            --substitutions="_IMAGE_NAME=${IMAGE_NAME},_TAG=${IMAGE_TAG},_WHISPER_MODEL=${WHISPER_MODEL_SIZE},_WHISPER_HF_REPO=${WHISPER_HF_REPO}" \
+            --service-account="projects/${PROJECT_ID}/serviceAccounts/${BUILD_SA}" \
+            --project="$PROJECT_ID" \
+            --quiet \
+            "$BUILD_CONTEXT"
+
+        log_success "Image built and pushed via Cloud Build: $IMAGE"
+    else
+        # Local Docker path — requires Docker daemon and HF_TOKEN env var
+        log_info "Configuring Docker for Artifact Registry..."
+        gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+        log_info "Building image from $BUILD_CONTEXT (model: $WHISPER_MODEL_SIZE)..."
+        log_warning "This may take a while — the Whisper image is ~20GB with cached models."
+        DOCKER_BUILDKIT=1 docker build --platform linux/amd64 \
+            --secret id=hf_token,env=HF_TOKEN \
+            --build-arg WHISPER_MODEL="$WHISPER_MODEL_SIZE" \
+            --build-arg WHISPER_HF_REPO="$WHISPER_HF_REPO" \
+            $DOCKER_EXTRA_ARGS -t "$IMAGE" "$BUILD_CONTEXT"
+        log_success "Image built: $IMAGE"
+
+        log_info "Pushing image to Artifact Registry..."
+        docker push "$IMAGE"
+        log_success "Image pushed: $IMAGE"
+    fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -223,12 +323,14 @@ fi
 if [ "$DO_DEPLOY" = true ]; then
     log_info "Deploying to Cloud Run with GPU..."
 
+    # 16Gi host RAM is plenty — the model only uses ~2.5GB VRAM in timestamps-only
+    # mode. L4 has 24GB VRAM but we're nowhere near that limit.
     gcloud run deploy "$SERVICE_NAME" \
         --project="$PROJECT_ID" \
         --region="$REGION" \
         --image="$IMAGE" \
         --gpu=1 \
-        --gpu-type=nvidia-l4 \
+        --gpu-type="$WHISPER_GPU_TYPE" \
         --no-gpu-zonal-redundancy \
         --memory=16Gi \
         --timeout=300 \
@@ -236,6 +338,7 @@ if [ "$DO_DEPLOY" = true ]; then
         --min-instances=0 \
         --max-instances=3 \
         --no-allow-unauthenticated \
+        --set-env-vars="WHISPER_BEAM_SIZE=$WHISPER_BEAM_SIZE" \
         --quiet
 
     log_success "Deployed $SERVICE_NAME to Cloud Run"

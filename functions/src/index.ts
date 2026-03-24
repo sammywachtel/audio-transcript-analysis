@@ -60,10 +60,7 @@ export const bucket = getStorage().bucket();
 
 // Export cloud functions
 export { transcribeAudio } from './transcribe';
-export { processTranscription } from './processTranscription';
-export { processMerge, processReprocessing } from './chunkMerge';
 export { chatWithConversation } from './chat';
-export { retryTranscription } from './retry';
 export { mergeSpeakers, reassignSegments, renameSpeaker, undoCorrection } from './speakerCorrections';
 
 // Export stats tracking triggers

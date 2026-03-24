@@ -236,7 +236,7 @@ docker compose logs -f alignment-service
 
 **Log prefixes to look for:**
 - `[Align]` - Request handling, timing, confidence
-- `[WhisperX]` - Replicate API calls, word timestamps
+- `[WhisperX]` - Cloud Run GPU service calls, word timestamps
 - `[HARDY]` - Alignment algorithm details
 - `[Anchors]` - Anchor point matching
 - `[Timer]` - Operation timing

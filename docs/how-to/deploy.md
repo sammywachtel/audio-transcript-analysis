@@ -92,17 +92,17 @@ Configure in **Settings → Secrets and variables → Actions**:
 
 > **Note**: The `VITE_` prefix is required - Vite only exposes environment variables with this prefix to client-side code.
 
-### Firebase Secrets (One-Time Setup)
+### Firebase/GCP Secrets (One-Time Setup)
 
-These secrets are stored in Firebase Secret Manager, not GitHub:
+These secrets are stored in GCP Secret Manager and accessed by Cloud Functions and Cloud Build:
 
-| Secret | Description | Setup Command |
-|--------|-------------|---------------|
-| `GEMINI_API_KEY` | Gemini API key (create in GCP project) | `npx firebase functions:secrets:set GEMINI_API_KEY` |
-| `REPLICATE_API_TOKEN` | Replicate API token for WhisperX | `npx firebase functions:secrets:set REPLICATE_API_TOKEN` |
-| `HUGGINGFACE_ACCESS_TOKEN` | HuggingFace token for diarization | `npx firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN` |
+| Secret | Description | Setup |
+|--------|-------------|-------|
+| `GEMINI_API_KEY` | Gemini API key for transcription + analysis | `gcp-setup.sh` creates automatically, or `npx firebase functions:secrets:set GEMINI_API_KEY` |
+| `WHISPER_SERVICE_URL` | Cloud Run URL for WhisperX timestamps service | `gcp-setup.sh` auto-detects, or `npx firebase functions:secrets:set WHISPER_SERVICE_URL` |
+| `HF_TOKEN` | HuggingFace token for WhisperX model downloads | `gcp-setup.sh` Step 10e, or set via Secret Manager directly |
 
-**Important:** The setup script (`gcp-setup.sh`) can create the Gemini API key automatically within your project. If setting manually:
+**Important:** The setup script (`gcp-setup.sh`) handles all three secrets. If setting manually:
 
 ```bash
 PROJECT_ID="your-project-id"
@@ -115,7 +115,7 @@ gcloud services api-keys create \
 
 # Store in Firebase secrets
 npx firebase functions:secrets:set GEMINI_API_KEY
-npx firebase functions:secrets:set REPLICATE_API_TOKEN
+npx firebase functions:secrets:set WHISPER_SERVICE_URL
 ```
 
 To get Firebase config values:
@@ -137,10 +137,10 @@ As of v2.2.0, pricing configuration in the `_pricing` Firestore collection is **
 
 Create these documents in the `_pricing` collection:
 
-1. **`gemini-2.5-flash`** (audio input pricing):
+1. **`gemini-3-flash`** (audio input pricing):
    ```json
    {
-     "model": "gemini-2.5-flash",
+     "model": "gemini-3-flash",
      "service": "gemini",
      "inputPricePerMillion": 1.00,
      "outputPricePerMillion": 2.50,
@@ -148,21 +148,21 @@ Create these documents in the `_pricing` collection:
    }
    ```
 
-2. **`gemini-2.5-flash-text`** (text input pricing):
+2. **`gemini-3-flash-text`** (text input pricing):
    ```json
    {
-     "model": "gemini-2.5-flash-text",
+     "model": "gemini-3-flash-text",
      "service": "gemini",
      "inputPricePerMillion": 0.30,
      "effectiveFrom": "2026-01-01T00:00:00Z"
    }
    ```
 
-3. **`whisperx`** (transcription + diarization):
+3. **`whisperx`** (timestamp alignment via Cloud Run GPU):
    ```json
    {
      "model": "whisperx",
-     "service": "replicate",
+     "service": "cloud-run-gpu",
      "pricePerSecond": 0.0023,
      "effectiveFrom": "2026-01-01T00:00:00Z"
    }
@@ -172,7 +172,7 @@ You can add these via the Admin Dashboard → Pricing Manager or directly in Fir
 
 ## BigQuery Billing Sync Setup (Optional)
 
-The `syncBillingCosts` function syncs actual Gemini costs from BigQuery billing exports for cost reconciliation. This requires:
+The `syncBillingCosts` function syncs actual Gemini costs from BigQuery billing exports for cost comparison. This requires:
 
 1. **BigQuery billing export** enabled in your billing project
 2. **IAM permissions** for the Cloud Functions service account
@@ -194,80 +194,64 @@ gcloud projects add-iam-policy-binding $BILLING_PROJECT \
 
 The `gcp-setup.sh` script handles this automatically when run with the billing project configured.
 
-## Cloud Tasks Queue Setup (One-Time)
+## Cloud Tasks Queue (Retired)
 
-The app uses Cloud Tasks to handle long-running audio transcription jobs. The `transcribeAudio` storage trigger enqueues tasks, and the `processTranscription` HTTP function processes them with a 60-minute timeout.
-
-### Create the Queue
-
-```bash
-PROJECT_ID="your-project-id"
-
-# Create the transcription queue
-gcloud tasks queues create transcription-queue \
-  --location=us-central1 \
-  --max-dispatches-per-second=10 \
-  --max-concurrent-dispatches=5 \
-  --max-attempts=3 \
-  --min-backoff=60s \
-  --max-backoff=600s \
-  --project=$PROJECT_ID
-```
-
-**Queue Configuration Explained:**
-- `max-dispatches-per-second=10`: Rate limit to avoid overwhelming the processing function
-- `max-concurrent-dispatches=5`: Max parallel transcriptions (balance resource usage)
-- `max-attempts=3`: Retry failed tasks up to 3 times
-- `min-backoff=60s`: Wait at least 1 minute before first retry
-- `max-backoff=600s`: Wait at most 10 minutes between retries
-
-### Verify Queue IAM
-
-The App Engine default service account needs permission to create tasks and invoke the HTTP function:
-
-```bash
-PROJECT_ID="your-project-id"
-
-# Grant Cloud Tasks Enqueuer role (usually automatic)
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:${PROJECT_ID}@appspot.gserviceaccount.com" \
-  --role="roles/cloudtasks.enqueuer"
-
-# Grant Cloud Functions Invoker role for processTranscription
-gcloud functions add-iam-policy-binding processTranscription \
-  --project=$PROJECT_ID \
-  --region=us-central1 \
-  --member="serviceAccount:${PROJECT_ID}@appspot.gserviceaccount.com" \
-  --role="roles/cloudfunctions.invoker"
-```
-
-### Monitor Queue Status
-
-```bash
-# List queues
-gcloud tasks queues list --location=us-central1 --project=$PROJECT_ID
-
-# Describe queue (shows config and stats)
-gcloud tasks queues describe transcription-queue \
-  --location=us-central1 \
-  --project=$PROJECT_ID
-
-# List tasks in queue (if any are pending)
-gcloud tasks list \
-  --queue=transcription-queue \
-  --location=us-central1 \
-  --project=$PROJECT_ID
-```
+> The `transcription-queue` was part of the legacy chunked pipeline and is no longer used.
+> The current hybrid pipeline (Gemini 3 Flash + WhisperX timestamps) processes everything
+> directly within `transcribeAudio` without Cloud Tasks. The queue may still exist in your
+> GCP project but can be safely paused or deleted.
 
 ## Whisper GPU Service (Cloud Run)
 
-The WhisperX transcription service runs on Cloud Run with an NVIDIA L4 GPU for fast audio transcription and speaker diarization.
+The WhisperX service runs on Cloud Run with an NVIDIA L4 GPU. It provides **word-level timestamps only** — speaker diarization is handled by Gemini 3 Flash.
 
-### Quick Deploy
+### Deployment Options
+
+There are two ways to deploy WhisperX:
+
+| Method | When to Use | Requirements |
+|--------|-------------|--------------|
+| **GitHub Actions** | Automated CI/CD, no local Docker | Push to `main` or manual workflow dispatch |
+| **Local Script** | Manual deploys, development | Docker installed (or use `--cloud-build` flag) |
+
+### GitHub Actions Deployment (Recommended)
+
+The `deploy-whisper.yml` workflow handles building and deploying without requiring local Docker.
+
+**Automatic triggers:**
+- Push to `main` when `cloud-run-whisper/**` files change
+- Push to `main` when `.github/workflows/deploy-whisper.yml` changes
+
+**Manual trigger:**
+1. Go to **Actions** → **Deploy WhisperX** → **Run workflow**
+2. Options:
+   - `deploy_only`: Skip build, deploy existing image
+   - `image_tag`: Custom tag (default: git SHA)
+
+**Required GitHub Secrets:**
+
+| Secret | Description |
+|--------|-------------|
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity Federation provider path |
+| `GCP_SERVICE_ACCOUNT` | Service account email (e.g., `github-actions@PROJECT.iam.gserviceaccount.com`) |
+| `GCP_PROJECT_ID` | Your GCP project ID |
+
+**Required GCP Secret Manager Secrets:**
+
+| Secret | Description | Setup |
+|--------|-------------|-------|
+| `HF_TOKEN` | HuggingFace token for gated WhisperX models | Created by `gcp-setup.sh` Step 10e |
+
+The HF_TOKEN secret must be accessible to the Cloud Build service account. The `gcp-setup.sh` script grants the necessary `secretAccessor` role.
+
+### Quick Deploy (Local Script)
 
 ```bash
 # Full build + deploy (reads GCP_PROJECT_ID from .env)
 ./scripts/deploy-whisper.sh
+
+# Build via Cloud Build (no local Docker needed)
+./scripts/deploy-whisper.sh --cloud-build
 
 # Build and push image only (no deploy)
 ./scripts/deploy-whisper.sh --build-only
@@ -281,6 +265,58 @@ The WhisperX transcription service runs on Cloud Run with an NVIDIA L4 GPU for f
 # Deploy with a specific image tag
 ./scripts/deploy-whisper.sh --tag v1.2.3
 ```
+
+### Evaluation Deploys (GPU/Model/Beam Experiments)
+
+The deploy script supports isolated evaluation services for testing alternative GPU, model, and beam size configurations without affecting production. Use the `--eval` flag to deploy a separate Cloud Run service:
+
+```bash
+# Test with reduced beam size (no rebuild — runtime env var)
+./scripts/deploy-whisper.sh --deploy-only --beam-size 2 --eval beam2
+
+# Test with Whisper medium model (requires rebuild — different HF repo)
+./scripts/deploy-whisper.sh --cloud-build --model-size medium --hf-repo Systran/faster-whisper-medium --eval medium-model
+
+# Combine multiple knobs
+./scripts/deploy-whisper.sh --cloud-build --model-size medium --hf-repo Systran/faster-whisper-medium --beam-size 2 --eval medium-beam2
+```
+
+**Available evaluation knobs:**
+
+| Flag | Default | Effect | Rebuild Required? |
+|------|---------|--------|-------------------|
+| `--gpu-type TYPE` | `nvidia-l4` | Cloud Run GPU type (only `nvidia-l4` and `nvidia-rtx-pro-6000` supported) | No |
+| `--model-size SIZE` | `large-v3-turbo` | Whisper model baked into image | **Yes** |
+| `--hf-repo REPO` | Auto-detected | HuggingFace repo for model download | **Yes** |
+| `--beam-size N` | `5` | Decoding beam width (runtime env var) | No |
+| `--eval TAG` | _(none)_ | Deploy as `whisperx-service-eval-TAG` | No |
+
+> **Model repos:** The default HF repo pattern (`deepdml/faster-whisper-{SIZE}-ct2`) only works for `large-v3-turbo`. Other sizes use different repos — e.g., `Systran/faster-whisper-medium` for the medium model. Use `--hf-repo` to override when testing non-default models.
+
+> **Important:** `--eval` deploys to a separate service name, so production is never touched. Clean up eval services when done to avoid idle GPU costs:
+> ```bash
+> gcloud run services delete whisperx-service-eval-t4-test --region=us-east4
+> ```
+
+#### Docker-Free Deployment
+
+If Docker is not installed locally, use the `--cloud-build` flag:
+
+```bash
+# Build via Cloud Build, then deploy
+./scripts/deploy-whisper.sh --cloud-build
+
+# With a specific tag
+./scripts/deploy-whisper.sh --cloud-build --tag timestamps-only-v2
+```
+
+This submits the build to Cloud Build, which:
+1. Reads `HF_TOKEN` from GCP Secret Manager
+2. Builds the image using BuildKit secret mounts
+3. Pushes to Artifact Registry
+4. Takes ~20-40 minutes (models are ~20GB)
+
+The script uses `--service-account` to run the build as the `github-actions` service account, which has the necessary Secret Manager permissions.
 
 The script reads configuration from `.env` (or environment variables):
 - `GCP_PROJECT_ID` (required)
@@ -298,7 +334,7 @@ IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/whisper-gpu/whisperx:latest"
 gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
 
 # Build for linux/amd64 (required by Cloud Run, even if building on ARM Mac)
-# HF_TOKEN needed for gated pyannote models — passed via BuildKit secret (not baked into layers)
+# HF_TOKEN needed for gated WhisperX models — passed via BuildKit secret (not baked into layers)
 export HF_TOKEN="hf_..."  # your HuggingFace access token
 DOCKER_BUILDKIT=1 docker build --platform linux/amd64 \
   --secret id=hf_token,env=HF_TOKEN \
@@ -339,7 +375,7 @@ gcloud run deploy whisperx-service \
 | `--gpu=1` | 1 GPU | WhisperX needs GPU for inference |
 | `--gpu-type=nvidia-l4` | NVIDIA L4 | Cost-effective inference GPU |
 | `--no-gpu-zonal-redundancy` | Single zone | Lower quota requirement, fine for batch workloads |
-| `--memory=16Gi` | 16 GiB | WhisperX + pyannote models need headroom |
+| `--memory=16Gi` | 16 GiB | WhisperX models need headroom |
 | `--timeout=300` | 5 min | Hard limit per request (Cloud Run backstop) |
 | `--concurrency=1` | 1 req/instance | GPU can't safely share across concurrent requests |
 | `--min-instances=0` | Scale to zero | No cost when idle |
@@ -692,7 +728,7 @@ Debug logs are always written. To view them:
 - `[Gemini]` - API calls, response parsing
 - `[Transform]` - Data model transformation
 - `[Alignment]` - Alignment request preparation, timing
-- `[WhisperX]` - Replicate API calls, word timestamps
+- `[WhisperX]` - Cloud Run GPU service calls, word timestamps
 - `[HARDY]` - Alignment algorithm, anchor detection, region alignment
 - `[Anchors]` - Anchor point matching, skip statistics
 

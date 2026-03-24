@@ -1,0 +1,221 @@
+# =============================================================================
+# GitHub Actions Workflow: Deploy WhisperX GPU Service
+#
+# Builds the WhisperX Docker image via Cloud Build and deploys to Cloud Run
+# with NVIDIA L4 GPU. The image is ~20GB (Whisper + pyannote models baked in),
+# so builds take 20-40 minutes.
+#
+# Triggers:
+#   - Push to main (when cloud-run-whisper/ files change)
+#   - Manual dispatch (deploy from any branch, optionally skip build)
+#
+# Required GitHub Secrets:
+#   - GCP_WORKLOAD_IDENTITY_PROVIDER: Workload Identity Federation provider
+#   - GCP_SERVICE_ACCOUNT: Service account email (github-actions@...)
+#   - GCP_PROJECT_ID: GCP project ID
+#
+# Required GCP Secret Manager Secrets:
+#   - HF_TOKEN: HuggingFace token for gated pyannote models (build-time only)
+#
+# The deploy-whisper.sh script provides the same functionality for local use
+# when Docker is available. This workflow is the Docker-free alternative.
+# =============================================================================
+
+name: Deploy WhisperX
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'cloud-run-whisper/**'
+      - '.github/workflows/deploy-whisper.yml'
+
+  workflow_dispatch:
+    inputs:
+      deploy_only:
+        description: 'Skip build, deploy existing latest image'
+        required: false
+        default: false
+        type: boolean
+      image_tag:
+        description: 'Image tag to build/deploy (default: git SHA)'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: deploy-whisper-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WHISPER_REGION: us-east4
+  SERVICE_NAME: whisperx-service
+  AR_REPO: whisper-gpu
+
+jobs:
+  deploy-whisper:
+    name: Build & Deploy WhisperX
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Determine image tag
+        id: image
+        env:
+          INPUT_TAG: ${{ github.event.inputs.image_tag }}
+          GIT_SHA: ${{ github.sha }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          TAG="${INPUT_TAG}"
+          if [ -z "$TAG" ]; then
+            TAG="$GIT_SHA"
+          fi
+          IMAGE_NAME="${WHISPER_REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/whisperx"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "full_image=$IMAGE_NAME:$TAG" >> "$GITHUB_OUTPUT"
+
+      # -------------------------------------------------------------------
+      # Build via Cloud Build (uses cloudbuild.yaml for BuildKit + secrets)
+      # -------------------------------------------------------------------
+      - name: Build WhisperX image via Cloud Build
+        if: github.event.inputs.deploy_only != 'true'
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          echo "Building WhisperX image (this takes 20-40 minutes)..."
+          # --service-account is required for availableSecrets to work correctly
+          gcloud builds submit \
+            --config=cloud-run-whisper/cloudbuild.yaml \
+            --substitutions="_IMAGE_NAME=${IMAGE_NAME},_TAG=${IMAGE_TAG}" \
+            --service-account="projects/${PROJECT_ID}/serviceAccounts/${SERVICE_ACCOUNT}" \
+            --project="$PROJECT_ID" \
+            --quiet \
+            cloud-run-whisper/
+
+      # -------------------------------------------------------------------
+      # Deploy to Cloud Run with GPU
+      # -------------------------------------------------------------------
+      - name: Deploy to Cloud Run
+        id: deploy
+        env:
+          DEPLOY_ONLY: ${{ github.event.inputs.deploy_only }}
+          FULL_IMAGE: ${{ steps.image.outputs.full_image }}
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          if [ "$DEPLOY_ONLY" = "true" ]; then
+            DEPLOY_IMAGE="${IMAGE_NAME}:latest"
+          else
+            DEPLOY_IMAGE="$FULL_IMAGE"
+          fi
+
+          gcloud run deploy "$SERVICE_NAME" \
+            --project="$PROJECT_ID" \
+            --region="$WHISPER_REGION" \
+            --image="$DEPLOY_IMAGE" \
+            --gpu=1 \
+            --gpu-type=nvidia-l4 \
+            --no-gpu-zonal-redundancy \
+            --memory=16Gi \
+            --timeout=300 \
+            --concurrency=1 \
+            --min-instances=0 \
+            --max-instances=3 \
+            --no-allow-unauthenticated \
+            --quiet
+
+          SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" \
+            --project="$PROJECT_ID" \
+            --region="$WHISPER_REGION" \
+            --format="value(status.url)")
+          echo "url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+
+      # -------------------------------------------------------------------
+      # Update WHISPER_SERVICE_URL secret (Cloud Functions read this)
+      # -------------------------------------------------------------------
+      - name: Update service URL secret
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.url }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          SECRET_NAME="WHISPER_SERVICE_URL"
+
+          CURRENT=$(gcloud secrets versions access latest \
+            --secret="$SECRET_NAME" \
+            --project="$PROJECT_ID" 2>/dev/null) || CURRENT=""
+
+          if [ "$CURRENT" = "$SERVICE_URL" ]; then
+            echo "Secret $SECRET_NAME already up to date"
+          else
+            echo -n "$SERVICE_URL" | gcloud secrets versions add "$SECRET_NAME" \
+              --data-file=- \
+              --project="$PROJECT_ID"
+            echo "Updated secret $SECRET_NAME"
+          fi
+
+      # -------------------------------------------------------------------
+      # Health check — GPU cold starts take 2-3 minutes
+      # -------------------------------------------------------------------
+      - name: Health check
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          echo "Waiting for service to become ready (GPU cold start can take 2-3 min)..."
+          TOKEN=$(gcloud auth print-identity-token \
+            --audiences="$SERVICE_URL" 2>/dev/null || gcloud auth print-identity-token)
+
+          for i in {1..12}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer $TOKEN" \
+              "$SERVICE_URL/health" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed!"
+              curl -s -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/health" | jq .
+              exit 0
+            fi
+            echo "Attempt $i/12: Status $STATUS, retrying in 15s..."
+            sleep 15
+          done
+          echo "Health check failed after 12 attempts (service may still be starting)"
+          exit 1
+
+      - name: Deployment summary
+        if: success()
+        env:
+          FULL_IMAGE: ${{ steps.image.outputs.full_image }}
+          SERVICE_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          echo "## WhisperX Deployment Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Service:** $SERVICE_NAME" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Region:** $WHISPER_REGION" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image:** $FULL_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          echo "**URL:** $SERVICE_URL" >> "$GITHUB_STEP_SUMMARY"
+
+    outputs:
+      service_url: ${{ steps.deploy.outputs.url }}
+      image: ${{ steps.image.outputs.full_image }}

@@ -225,11 +225,11 @@ const db = initializeFirestore(app, {
 - Single-region deployment (may need multi-region for latency)
 - Context-based state (may need Redux for complex features)
 
-### Recently Shipped (Beta v1.0.0)
-- WhisperX alignment for precision timestamps (~50ms accuracy)
-- pyannote speaker diarization integrated with WhisperX
-- Gemini speaker corrections for mid-segment changes
-- Manual speaker reassignment UI
+### Recently Shipped
+- Gemini 3 Flash hybrid pipeline: single-pass diarization + content analysis (see [migration explainer](gemini3-migration.md))
+- WhisperX on Cloud Run GPU for word-level timestamps
+- HARDY alignment bridging Gemini text with WhisperX timing
+- Manual speaker reassignment UI (merge, rename, reassign)
 - Alignment status indicators (aligned/fallback badges)
 
 ### Planned Improvements

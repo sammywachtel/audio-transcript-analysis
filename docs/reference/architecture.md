@@ -37,33 +37,27 @@ Technical architecture of the Audio Transcript Analysis App.
 │                                                    │ onFinalized  │
 │                                                    ▼              │
 │  ┌──────────────────────────────────────────────────────────────┐ │
-│  │                Cloud Functions (18 total)                    │ │
+│  │                Cloud Functions                               │ │
 │  │                                                              │ │
 │  │  ┌──────────────────────┐  ┌──────────────────────────────┐  │ │
 │  │  │  transcribeAudio     │  │  Callables (HTTPS)           │  │ │
 │  │  │  (Storage trigger)   │  │  ┌────────────────────────┐  │  │ │
 │  │  │  - validates file    │  │  │ chatWithConversation   │  │  │ │
-│  │  │  - enqueues task     │  │  │ retryTranscription     │  │  │ │
-│  │  │  - 540s timeout      │  │  │ mergeSpeakers          │  │  │ │
-│  │  └──────────┬───────────┘  │  │ reassignSegments       │  │  │ │
-│  │             │              │  │ renameSpeaker          │  │  │ │
-│  │             ▼              │  │ undoCorrection         │  │  │ │
-│  │  ┌──────────────────────┐  │  └────────────────────────┘  │  │ │
-│  │  │  Cloud Tasks Queue   │  └──────────────────────────────┘  │ │
-│  │  │  transcription-queue │                                    │ │
-│  │  └──────────┬───────────┘  ┌──────────────────────────────┐  │ │
-│  │             │              │  Background                  │  │ │
-│  │             ▼              │  ┌────────────────────────┐  │  │ │
-│  │  ┌────────────────────┐    │  │ onConversation*        │  │  │ │
-│  │  │  processTranscr.   │    │  │ computeDailyStats      │  │  │ │
-│  │  │  (private, 60 min) │    │  │ syncBillingCosts       │  │  │ │
-│  │  └──────────┬─────────┘    │  │ handleReconAlert       │  │  │ │
-│  │             │              │  └────────────────────────┘  │  │ │
-│  │             ▼              └──────────────────────────────┘  │ │
-│  │  ┌────────────────────┐                                      │ │
-│  │  │  processMerge      │  See cloud-functions-flow.md         │ │
-│  │  │  (private, 10 min) │  for detailed flow diagrams.        │ │
-│  │  └────────────────────┘                                      │ │
+│  │  │  - runs pipeline     │  │  │ mergeSpeakers          │  │  │ │
+│  │  │  - 540s timeout      │  │  │ reassignSegments       │  │  │ │
+│  │  └──────────┬───────────┘  │  │ renameSpeaker          │  │  │ │
+│  │             │              │  │ undoCorrection         │  │  │ │
+│  │             ▼              │  └────────────────────────┘  │  │ │
+│  │  ┌──────────────────────┐  └──────────────────────────────┘  │ │
+│  │  │  newPipeline.ts      │                                    │ │
+│  │  │  (Gemini 3 Flash +   │  ┌──────────────────────────────┐  │ │
+│  │  │   WhisperX + HARDY)  │  │  Background                  │  │ │
+│  │  └──────────────────────┘  │  ┌────────────────────────┐  │  │ │
+│  │                            │  │ onConversation*        │  │  │ │
+│  │  See cloud-functions-      │  │ computeDailyStats      │  │  │ │
+│  │  flow.md for detailed      │  │ syncBillingCosts       │  │  │ │
+│  │  flow diagrams.            │  └────────────────────────┘  │  │ │
+│  │                            └──────────────────────────────┘  │ │
 │  │                                                              │ │
 │  └──────────────────────────────────────────────────────────────┘ │
 │                                                                   │
@@ -72,8 +66,8 @@ Technical architecture of the Audio Transcript Analysis App.
                          ┌───────┴───────┐
                          ▼               ▼
                   ┌────────────────┐  ┌────────────────┐
-                  │  Vertex AI     │  │  Replicate     │
-                  │  (Gemini)      │  │  (WhisperX)    │
+                  │  Gemini API    │  │  Cloud Run GPU │
+                  │  (Gemini 3)    │  │  (WhisperX)    │
                   └────────────────┘  └────────────────┘
 ```
 
@@ -176,21 +170,20 @@ audio-transcript-analysis-app/
 │       ├── TimeSeriesChart.tsx
 │       ├── LLMUsageBreakdown.tsx
 │       └── MetricsTable.tsx
-├── functions/              # Cloud Functions (Node.js) — 18 functions, 8 modules
+├── functions/              # Cloud Functions (Node.js)
 │   └── src/
 │       ├── index.ts                    # Function exports + Firebase Admin init
-│       ├── transcribe.ts               # transcribeAudio (Storage trigger) + Gemini pipeline
-│       ├── processTranscription.ts     # processTranscription (Cloud Tasks)
-│       ├── chunkMerge.ts               # processMerge + processReprocessing (Cloud Tasks)
+│       ├── transcribe.ts               # transcribeAudio (Storage trigger) — entry point
+│       ├── newPipeline.ts              # processWithNewPipeline — hybrid pipeline orchestrator
+│       ├── gemini3Pipeline.ts          # Gemini 3 Flash API client + Firestore data assembly
+│       ├── alignment.ts                # HARDY alignment + WhisperX Cloud Run GPU calls
+│       ├── audioUtils.ts               # Audio duration detection + shared helpers
+│       ├── firestoreUtils.ts           # Firestore write utilities
 │       ├── chat.ts                     # chatWithConversation (HTTPS callable)
-│       ├── retry.ts                    # retryTranscription (HTTPS callable)
 │       ├── speakerCorrections.ts       # merge/reassign/rename/undo (HTTPS callables)
 │       ├── statsTriggers.ts            # onConversation* (Firestore triggers)
 │       ├── statsAggregator.ts          # computeDailyStats + triggerStatsComputation
 │       ├── billingSync.ts              # syncBillingCosts + triggerBillingSync + diagnose
-│       ├── handleReconciliationAlert.ts # Pub/Sub circuit breaker
-│       ├── alignment.ts                # WhisperX integration via Replicate
-│       ├── chunking.ts                 # Audio splitting + silence detection
 │       ├── metrics.ts                  # Processing metrics recording
 │       ├── userEvents.ts               # User activity event tracking
 │       ├── pricing.ts                  # Pricing lookup and cost calculation
@@ -202,7 +195,7 @@ audio-transcript-analysis-app/
 
 ## Data Flow
 
-### Upload Flow (Queue-Driven Architecture with Chunking)
+### Upload Flow (Gemini 3 Flash Hybrid Pipeline)
 
 ```
 1. User selects audio file
@@ -216,53 +209,44 @@ audio-transcript-analysis-app/
 4. Storage trigger fires transcribeAudio
    onObjectFinalized → transcribeAudio()
         ↓
-5. transcribeAudio downloads audio for duration check
-   ├── Updates Firestore: status='queued'
-   └── Downloads to /tmp for analysis
-        ↓
-6. Chunking decision based on duration
-   ├── Short file (≤30 min) → Single Cloud Task (step 7a)
-   └── Long file (>30 min) → Chunking workflow (step 7b)
-
-7a. Short file: Enqueue single task
-    └── Creates task in 'transcription-queue'
-         ↓
-7b. Long file: Chunk and enqueue multiple tasks
-    ├── Detect silence gaps via ffmpeg
-    ├── Split at natural break points (10-15 min chunks)
-    ├── Add 5-10s overlap between chunks
-    ├── Upload chunks to Storage (chunks/{conversationId}/)
-    ├── Save chunk metadata to Firestore
-    └── Enqueue one Cloud Task per chunk
-         ↓
-8. Cloud Tasks invokes processTranscription (HTTP function, 30-min timeout per chunk)
+5. transcribeAudio routes to processWithNewPipeline()
    ├── Updates Firestore: status='processing'
-   └── Downloads audio (chunk or full file) from Storage
+   └── All processing runs in-process (no external queue)
         ↓
-9. processTranscription calls Gemini API for pre-analysis and content extraction
+6. Gemini 3 Flash (WAV) — single-pass analysis
+   ├── Full-audio diarization (speakers by name)
+   ├── Transcription with speaker attribution
+   ├── Content analysis (terms, topics, persons)
+   └── Returns segments with approximate timestamps
         ↓
-10. processTranscription calls WhisperX for transcription + alignment
-    ├── Success → alignmentStatus: 'aligned'
-    └── Failure → alignmentStatus: 'fallback' (uses Gemini transcription)
+7. WhisperX timestamp alignment (per 10-min chunk)
+   ├── Download MP3 from Storage
+   ├── Split into 10-minute chunks if needed
+   ├── For each chunk:
+   │   ├── Call Cloud Run GPU WhisperX service (IAM-auth HTTP)
+   │   ├── Scale Gemini timestamps to chunk-local time
+   │   ├── HARDY alignment (anchor + region matching)
+   │   └── Offset aligned timestamps back to global time
+   └── Merge aligned results across chunks
         ↓
-11. processTranscription writes results to Firestore (status: 'complete')
-    ├── Success → Returns 200 (no Cloud Tasks retry)
-    └── Failure → Returns 500 (Cloud Tasks retries with backoff)
+8. Assembly + quality gates
+   ├── assembleFirestoreData() converts to Firestore schema
+   ├── Quality gates check segment coverage + speaker counts
+   └── alignmentStatus: 'aligned' or 'fallback'
         ↓
-12. Real-time listener updates UI
+9. Write to Firestore (status: 'complete')
+        ↓
+10. Real-time listener updates UI
     onSnapshot → setConversations()
 ```
 
-**Why Two-Stage Architecture?**
+**Why Direct Pipeline (No Queue)?**
 
-- Storage triggers have a hard 540s (9-minute) timeout limit
-- Large audio files (46MB+) need 10-15+ minutes for Gemini + WhisperX processing
-- HTTP functions can have up to 3600s (60-minute) timeout
-- Cloud Tasks handles retries automatically with exponential backoff
+The hybrid pipeline processes audio fast enough to run within the 9-minute Storage trigger timeout for most files. Gemini 3 Flash handles the full audio in a single call (~15-100s depending on length), and WhisperX timestamps process in parallel chunks. This eliminates the complexity of Cloud Tasks while keeping the architecture simple.
 
-### Job Control (Cancel & Retry)
+### Job Control (Cancel)
 
-The system provides full job control capabilities allowing users to cancel active jobs and retry failed ones.
+The system allows users to cancel active processing jobs.
 
 **Cancel/Abort Flow:**
 
@@ -270,405 +254,41 @@ The system provides full job control capabilities allowing users to cancel activ
 1. User clicks "Cancel" on processing job in Library
         ↓
 2. Frontend calls firestoreService.abortProcessing(conversationId)
-   ├── Validates status is abortable: processing, chunking, merging, or reprocessing
+   ├── Validates status is abortable: 'processing'
    └── Sets abortRequested: true flag in Firestore
         ↓
-3. Backend functions check abort flag at strategic checkpoints:
-   ├── transcribeAudio: Before enqueueing chunk tasks
-   ├── chunkMerge: After loading artifacts, after reconciliation, before final write
-   └── processTranscription: At processing boundaries (existing)
+3. Pipeline checks abort flag at strategic checkpoints
         ↓
 4. When abort detected, function throws AbortRequestedError
    ├── Updates status to 'aborted'
-   ├── Sets processingError: 'Cancelled by user'
-   └── Returns 200 (success) to prevent Cloud Tasks retry
+   └── Sets processingError: 'Cancelled by user'
         ↓
 5. Real-time listener updates UI to show "Cancelled" status
 ```
 
-**Retry Flow:**
-
-```
-1. User clicks "Retry" on failed/aborted job in Library
-        ↓
-2. Frontend calls retryTranscription callable function
-   ├── Validates user owns conversation
-   ├── Validates status is 'failed' or 'aborted'
-   ├── Validates retryCount < 3 (max retry limit)
-   └── Validates audio file still exists in storage
-        ↓
-3. Retry strategy determination:
-   ├── Non-chunked job → Full restart
-   │   ├── Clears error state and processing metadata
-   │   ├── Sets status: 'processing', retryCount++
-   │   └── Enqueues new processTranscription task
-   │
-   └── Chunked job with partial progress → Resume incomplete chunks
-       ├── Identifies chunks with status ≠ 'complete'
-       ├── Resets incomplete chunk statuses to 'pending'
-       ├── Sets status: 'chunking', retryCount++
-       └── Enqueues tasks only for incomplete chunks
-        ↓
-4. Processing resumes with updated retry metadata:
-   ├── retryCount: incremented (enforces max 3 limit)
-   ├── lastFailedAt: timestamp of previous failure
-   └── lastRetryAt: timestamp of retry initiation
-        ↓
-5. Real-time listener updates UI to show new processing status
-```
-
-**Abortable Statuses:**
-- `processing` - Single file or initial processing
-- `chunking` - Chunked file with tasks being enqueued
-- `merging` - Chunks being merged together
-- `reprocessing` - Sequential reprocessing after parallel fallback
-
-**Retry Metadata Fields:**
-- `retryCount` (number): Number of retry attempts (max 3)
-- `lastFailedAt` (ISO timestamp): When the job last failed
-- `lastRetryAt` (ISO timestamp): When retry was last initiated
-- `taskGeneration` (number): Counter incremented on each retry to invalidate stale Cloud Tasks
-
-**Stale Task Detection:**
-
-When a job fails and is retried, orphaned Cloud Tasks from the previous attempt may still be in-flight. Without mitigation, these stale tasks can corrupt the retry by updating progress or status with outdated values.
-
-The `taskGeneration` field solves this:
-1. Each new job starts with `taskGeneration: 1`
-2. Cloud Task payloads include the current `taskGeneration`
-3. On retry, `taskGeneration` is incremented in Firestore
-4. When a task runs, it compares `payload.taskGeneration` vs Firestore's `taskGeneration`
-5. If payload's generation is lower, the task is stale and returns 200 (complete, no-op)
-6. Default: missing `taskGeneration` in payload defaults to 0, so pre-feature tasks are always stale after any retry
-
 **Implementation Files:**
 - `src/services/firestoreService.ts` - `abortProcessing()` client-side abort request
-- `functions/src/retry.ts` - `retryTranscription` callable function
 - `functions/src/transcribe.ts` - `checkAbort()` function and abort checkpoints
-- `functions/src/chunkMerge.ts` - Abort checkpoints in merge flow
-- `src/pages/Library.tsx` - Cancel and Retry UI controls
+- `src/pages/Library.tsx` - Cancel UI controls
 
-### Audio Chunking Module
+### WhisperX Timestamp Chunking
 
-For audio files longer than 30 minutes, the system splits the file into smaller chunks to stay within Cloud Function timeout limits. Each chunk is processed independently, then merged downstream.
+For the HARDY alignment step, audio is split into 10-minute MP3 chunks. This is purely for WhisperX request sizing, not for the transcription pipeline (Gemini processes the full audio in one call).
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                    Audio Chunking Pipeline                            │
-│                                                                       │
-│  ┌─────────────────┐                                                  │
-│  │  Original Audio │                                                  │
-│  │  (>30 minutes)  │                                                  │
-│  └────────┬────────┘                                                  │
-│           │                                                           │
-│           ▼                                                           │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  Silence Detection (ffmpeg -af silencedetect=n=-30dB:d=0.5)     │ │
-│  │  ├── Scans for pauses in speech                                 │ │
-│  │  └── Returns list of silence gaps (start, end, duration)        │ │
-│  └────────┬────────────────────────────────────────────────────────┘ │
-│           │                                                           │
-│           ▼                                                           │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  Chunk Boundary Calculation                                      │ │
-│  │  ├── Target: 10-15 minute chunks                                 │ │
-│  │  ├── Minimum: 2 minutes (prevents tiny chunks)                   │ │
-│  │  └── Snaps to silence gaps for clean cuts                        │ │
-│  └────────┬────────────────────────────────────────────────────────┘ │
-│           │                                                           │
-│           ▼                                                           │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  Chunk Extraction with Overlap                                   │ │
-│  │  ├── Extract each chunk via ffmpeg (-ss/-to/-c copy)            │ │
-│  │  ├── 5-10s overlap at boundaries                                 │ │
-│  │  └── Overlap ensures no words truncated                          │ │
-│  └────────┬────────────────────────────────────────────────────────┘ │
-│           │                                                           │
-│           ▼                                                           │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  Chunk Upload & Task Creation                                    │ │
-│  │  ├── Upload to Storage: chunks/{conversationId}/chunk-NNN.ext   │ │
-│  │  ├── Save metadata to Firestore (chunkMetadata field)           │ │
-│  │  └── Create Cloud Task per chunk (staggered scheduling)         │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
-│                                                                       │
-└──────────────────────────────────────────────────────────────────────┘
-```
-
-**Chunk Metadata Structure:**
-
-Each chunk stores metadata for downstream deduplication and merging:
-
-```typescript
-interface ChunkMetadata {
-  chunkIndex: number; // Zero-indexed chunk number
-  totalChunks: number; // Total chunks for this file
-  startMs: number; // Start time in original audio
-  endMs: number; // End time in original audio
-  overlapBeforeMs: number; // Overlap with previous chunk (0 for first)
-  overlapAfterMs: number; // Overlap with next chunk (0 for last)
-  chunkStoragePath: string; // Storage path: chunks/{id}/chunk-NNN.ext
-  originalStoragePath: string; // Original file path
-  durationMs: number; // Chunk duration (including overlaps)
-}
-```
-
-**Key Files:**
-
-- `functions/src/chunking.ts` - Silence detection, chunk boundary calculation, extraction
-- `functions/src/chunkBounds.ts` - Validation helpers, overlap region utilities
-- `@ffmpeg-installer/ffmpeg` - Provides ffmpeg binary for Cloud Functions
-
-**Configuration (CHUNK_CONFIG):**
-
-- `TARGET_DURATION_SECONDS`: 600 (10 min target)
-- `MAX_DURATION_SECONDS`: 900 (15 min max)
-- `MIN_DURATION_SECONDS`: 120 (2 min floor)
-- `OVERLAP_SECONDS`: 7 (5-10s overlap window)
-- `CHUNKING_THRESHOLD_SECONDS`: 1800 (30 min threshold)
-- `SILENCE_THRESHOLD_DB`: -30dB
-- `SILENCE_MIN_DURATION`: 0.5s
-
-**Benefits:**
-
-- Files of any length can be processed (no timeout issues)
-- Each chunk fits comfortably in 30-minute Cloud Task timeout
-- Silence-based splits prevent mid-word truncation
-- Overlap ensures transcript continuity at boundaries
-- Parallel processing possible with staggered task scheduling
-
-### Chunk Context and Resumable Execution
-
-For long audio files processed in chunks, the system maintains context between chunks to ensure:
-
-1. **Speaker continuity** - The same person keeps the same speaker ID across all chunks
-2. **Metadata deduplication** - Terms, topics, and people aren't duplicated across chunks
-3. **Resumable execution** - Failed chunks can be retried without reprocessing successful ones
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                   Chunk Context State Machine                             │
-│                                                                           │
-│  ┌─────────────────────────────────────────────────────────────────────┐ │
-│  │  transcribeAudio (Storage Trigger)                                   │ │
-│  │  ├── Initializes chunkStatuses: all 'pending'                       │ │
-│  │  ├── Creates empty chunkContexts array                              │ │
-│  │  └── Enqueues Cloud Task per chunk (staggered)                      │ │
-│  └─────────────────────────────────────────────────────────────────────┘ │
-│                              │                                            │
-│                              ▼                                            │
-│  ┌─────────────────────────────────────────────────────────────────────┐ │
-│  │  processTranscription (Cloud Task Handler)                          │ │
-│  │                                                                      │ │
-│  │  For each chunk:                                                     │ │
-│  │  1. Load ChunkContext from previous chunk (or initial for chunk 0)  │ │
-│  │  2. Mark chunk status → 'processing'                                │ │
-│  │  3. Execute transcription pipeline with context                      │ │
-│  │  4. Build nextContext with speaker mappings, metadata IDs            │ │
-│  │  5. Mark chunk status → 'complete', save nextContext                 │ │
-│  │     (or → 'failed' with error on failure)                           │ │
-│  └─────────────────────────────────────────────────────────────────────┘ │
-│                              │                                            │
-│                              ▼                                            │
-│  ┌─────────────────────────────────────────────────────────────────────┐ │
-│  │  Resume Logic (chunkContext.ts)                                      │ │
-│  │  ├── getResumableChunks() → finds pending/failed chunks             │ │
-│  │  ├── Each chunk loads context from last 'complete' predecessor       │ │
-│  │  └── Failed chunks retry with backoff via Cloud Tasks               │ │
-│  └─────────────────────────────────────────────────────────────────────┘ │
-│                                                                           │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-**Firestore Schema - `chunkingMetadata` Field:**
-
-```typescript
-// Stored in conversations/{conversationId}.chunkingMetadata
-interface ChunkingMetadata {
-  chunkingEnabled: boolean; // true if file was chunked
-  totalChunks: number; // Total number of chunks
-  completedChunks: number; // Count of 'complete' chunks
-  chunkStatuses: ChunkStatus[]; // Per-chunk status tracking
-  chunkContexts: ChunkContext[]; // Per-chunk emitted contexts
-  chunkedAt: string; // ISO timestamp
-  originalDurationMs: number; // Original audio duration
-  originalStoragePath: string; // Path to original file
-}
-
-interface ChunkStatus {
-  chunkIndex: number;
-  status: 'pending' | 'processing' | 'complete' | 'failed';
-  startedAt?: string; // When processing started
-  completedAt?: string; // When processing finished
-  error?: string; // Error message if failed
-  retryCount?: number; // Number of retry attempts
-}
-
-interface ChunkContext {
-  emittedByChunkIndex: number; // Which chunk created this context
-  speakerMap: SpeakerMapping[]; // Canonical speaker ID mappings
-  previousSummary: string; // Truncated summary (max 512 chars)
-  knownTermIds: string[]; // Term IDs for deduplication
-  knownTopicIds: string[]; // Topic IDs for deduplication
-  knownPersonIds: string[]; // Person IDs for deduplication
-  cumulativeSegmentCount: number; // Total segments so far
-  lastProcessedMs: number; // Last timestamp processed
-}
-
-interface SpeakerMapping {
-  originalId: string; // e.g., "SPEAKER_00"
-  canonicalId: string; // Consistent ID across chunks
-  displayName?: string; // Inferred name if known
-}
-```
-
-**Key Files:**
-
-- `functions/src/chunkContext.ts` - Context loading, status updates, resume helpers
-- `functions/src/processTranscription.ts` - Chunk-aware task handler
-- `functions/src/transcribe.ts` - Initializes chunk statuses on upload
-- `functions/src/types.ts` - ChunkContext, ChunkStatus, ChunkingMetadata types
-
-**Status Transitions:**
-
-```
-pending ──┬──▶ processing ──┬──▶ complete
-          │                 │
-          │                 └──▶ failed ──▶ (retry) ──▶ processing
-          │
-          └──▶ (blocked by predecessor) ──▶ pending (wait)
-```
-
-**Transaction Safety:**
-
-All status and context updates use Firestore transactions to prevent race conditions:
-
-- Multiple chunk tasks may run concurrently
-- `markChunkComplete()` atomically updates status AND increments `completedChunks`
-- `loadChunkContext()` validates predecessor chunk is complete before returning
-
-**Resume Behavior:**
-
-When a chunk fails and Cloud Tasks retries:
-
-1. `loadChunkContext()` checks if previous chunk is complete
-2. If previous chunk is still `processing` or `pending`, returns error (triggers retry)
-3. If previous chunk is `complete`, loads its emitted context
-4. If previous chunk is `failed`, returns error (dependent failure)
-
-This ensures chunks are processed in dependency order even with concurrent execution.
-
-### Processing Modes (Parallel vs Sequential)
-
-The system supports two processing modes for chunked uploads, controlled by the `processingMode` field:
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                    Processing Mode Comparison                            │
-├──────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  PARALLEL MODE (Default)                 SEQUENTIAL MODE (Legacy)        │
-│  ════════════════════════                ═══════════════════════         │
-│                                                                          │
-│  Chunk 0  ──▶ Process ──▶ Complete      Chunk 0 ──▶ Process ──▶ Complete │
-│  Chunk 1  ──▶ Process ──▶ Complete             │                        │
-│  Chunk 2  ──▶ Process ──▶ Complete             ▼                        │
-│  (All run simultaneously)               Chunk 1 ◀─ Load context          │
-│         │                                      │                        │
-│         ▼                                      ▼                        │
-│  ┌─────────────────────┐                      Process ──▶ Complete       │
-│  │ Speaker Reconcile   │                             │                   │
-│  │ (merge-time)        │                             ▼                   │
-│  └─────────────────────┘                Chunk 2 ◀─ Load context          │
-│         │                                      │                        │
-│         ▼                                      ▼                        │
-│      MERGE                                   Process ──▶ Complete        │
-│                                                    │                    │
-│                                                    ▼                    │
-│                                                 MERGE                    │
-│                                                                          │
-│  ✓ Faster (all chunks process at once)    ✓ Consistent speaker IDs       │
-│  ✓ Best for long files (1hr+ audio)       ✓ No post-hoc reconciliation   │
-│  ⚡ ~60% faster for 6-chunk files          ⏱ ~60% slower (sequential wait) │
-│                                                                          │
-│  Speaker reconciliation at merge uses:    Context propagation ensures:   │
-│  - Inferred names from introductions      - Speaker IDs inherited        │
-│  - Topic/term signatures                  - No ID conflicts at merge     │
-│  - Segment counts per speaker             - Cumulative metadata           │
-│  - Sample quotes for fingerprinting       - Resume-safe state            │
-│                                                                          │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-**Parallel Mode** (default for new uploads):
-- All chunks start processing immediately after upload
-- Each chunk uses a fresh initial context (no waiting)
-- Speaker IDs may differ across chunks (SPEAKER_00 in chunk 0 ≠ SPEAKER_00 in chunk 3)
-- `SpeakerSignature` fingerprints stored with each chunk artifact
-- Merge function reconciles speakers using signatures (future scope)
-
-**Sequential Mode** (legacy behavior):
-- Chunks wait for predecessor to complete before starting
-- Each chunk loads context from previous chunk
-- Speaker IDs remain consistent across all chunks
-- No reconciliation needed at merge time
-- Slower but deterministic speaker tracking
-
-**UI Selection:**
-
-Users choose the processing mode in the upload modal:
-- "Fast" button → `processingMode: 'parallel'`
-- "Legacy" button → `processingMode: 'sequential'`
-
-**Data Flow:**
-
-```
-Upload Modal → createMockConversation(file, { processingMode })
-           → storageService.uploadAudio(..., { processingMode })
-                   ↓ (customMetadata)
-           → transcribeAudio (reads from Storage metadata)
-                   ↓ (Firestore + Cloud Task payload)
-           → processTranscription (branches on mode)
-                   ↓
-           → parallel: createInitialChunkContext()
-           → sequential: loadChunkContext(conversationId, chunkIndex)
-```
-
-**Key Files:**
-
-- `src/pages/Library.tsx` - Upload modal with mode toggle
-- `src/utils/index.ts` - `createMockConversation` with options
-- `src/services/storageService.ts` - Passes mode via customMetadata
-- `functions/src/transcribe.ts` - Reads mode, propagates to Firestore/tasks
-- `functions/src/processTranscription.ts` - Branches on mode
-- `functions/src/chunkContext.ts` - `createInitialChunkContext()` for parallel
-
-**Speaker Signature (Parallel Mode):**
-
-When `processingMode === 'parallel'`, each chunk stores speaker signatures for merge-time reconciliation:
-
-```typescript
-interface SpeakerSignature {
-  speakerId: string;       // "SPEAKER_00" (local to this chunk)
-  chunkIndex: number;      // Which chunk this signature belongs to
-  inferredName?: string;   // Name if speaker introduced themselves
-  topicSignatures: string[]; // Topic IDs where speaker spoke
-  termSignatures: string[];  // Term keys used by this speaker
-  segmentCount: number;    // Segments contributed by speaker
-  sampleQuote: string;     // First ~100 chars for fingerprinting
-}
-```
-
-Signatures are stored in `conversations/{id}/chunks/{chunkIndex}.chunkSpeakerSignatures`.
+**Key Points:**
+- Audio shorter than 10 minutes is sent to WhisperX as a single chunk (no splitting)
+- Splitting uses ffmpeg to create non-overlapping chunks
+- Each chunk gets independent WhisperX timestamps, then HARDY alignment maps Gemini's text onto those timestamps
+- Aligned timestamps are offset back to global time coordinates
 
 ### Alignment Module (HARDY Algorithm)
 
-The Cloud Function includes an integrated alignment module that provides precise timestamps using WhisperX via Replicate:
+The pipeline includes an integrated alignment module that provides precise timestamps using WhisperX via Cloud Run GPU:
 
 ```
-Cloud Function (transcribeAudio)
+newPipeline.ts (processWithNewPipeline)
         │
-        │ 1. Gemini API (transcription + speaker diarization)
+        │ 1. Gemini 3 Flash (diarization + content analysis)
         ▼
 ┌──────────────────────────────┐
 │  Segments with approximate   │
@@ -678,8 +298,9 @@ Cloud Function (transcribeAudio)
                │ 2. alignment.ts (HARDY algorithm)
                ▼
 ┌──────────────────────────────┐
-│  Replicate WhisperX API      │
+│  Cloud Run GPU WhisperX      │
 │  (word-level timestamps)     │
+│  IAM-authenticated HTTP      │
 └──────────────┬───────────────┘
                │
                │ 3. Fuzzy matching + anchor-based alignment
@@ -698,23 +319,23 @@ Cloud Function (transcribeAudio)
   Success           Failure
   alignmentStatus:  alignmentStatus:
   'aligned'         'fallback'
-  (~50ms accuracy)  (uses Gemini
-                    timestamps)
+  (~50ms accuracy)  (uses scaled
+                    Gemini times)
 ```
 
 **Key Components:**
 
 - `functions/src/alignment.ts` - HARDY algorithm implementation
 - Uses `fuzzball` for fuzzy string matching
-- Uses `replicate` SDK for WhisperX API calls
-- `REPLICATE_API_TOKEN` stored as Firebase secret
+- Calls WhisperX via IAM-authenticated HTTP to Cloud Run GPU service
+- `WHISPER_SERVICE_URL` stored as Firebase secret
 
 **Fallback Behavior:**
 
-- If WhisperX times out or fails, the Cloud Function uses Gemini's original timestamps
+- If WhisperX times out or fails for a chunk, the pipeline degrades to scaled Gemini timestamps
 - The `alignmentError` field stores the reason for fallback
 - Client displays "Fallback Sync" badge with tooltip explaining the issue
-- Timestamps are still usable but may be ~5-10 seconds off
+- Partial alignment beats missing segments — some chunks may be aligned while others fall back
 
 ### Playback Flow
 
@@ -1127,61 +748,45 @@ See [Data Model](data-model.md) for detailed schemas.
 
 ### LLM Usage Tracking
 
-Each processing job captures LLM usage from both Gemini and Replicate:
+Each processing job captures LLM usage from Gemini and WhisperX:
 
 ```typescript
 llmUsage: {
   geminiAnalysis: {
     inputTokens: number;           // Total input tokens (backward compat)
-    audioInputTokens?: number;     // Tokens from audio input (pre-analysis)
-    textInputTokens?: number;      // Tokens from text input (transcript analysis)
-    outputTokens: number;
-    model: string;  // e.g., 'gemini-2.5-flash'
-  };
-  geminiSpeakerCorrection: {
-    inputTokens: number;           // Total input tokens (backward compat)
-    audioInputTokens?: number;     // Always 0 for corrections (text-only)
+    audioInputTokens?: number;     // Tokens from audio input (WAV)
     textInputTokens?: number;      // Tokens from text input
     outputTokens: number;
-    model: string;
+    model: string;  // e.g., 'gemini-3-flash'
   };
   whisperx: {
-    predictionId?: string;  // Replicate prediction ID for billing traceability
-    computeTimeSeconds: number;  // Includes speaker diarization (bundled model)
-    model: string;  // 'whisperx-diarization'
+    computeTimeSeconds: number;  // Cloud Run GPU compute time (timestamps only)
+    model: string;  // 'whisperx-timestamps'
   };
-  // Note: diarization field removed in v2.2.0 - now bundled with whisperx
 }
 ```
 
-### Billing Reconciliation
+### Billing Cost Tracking
 
-The cost tracking system supports billing reconciliation through several mechanisms:
+The cost tracking system supports estimated vs. actual cost comparison through several mechanisms:
 
 **BigQuery Billing Sync (v2.2.0+)**: Actual Gemini costs are synced from BigQuery billing exports:
 
 - `syncBillingCosts` Cloud Function runs daily at 4 AM UTC
 - Queries BigQuery billing exports using `conversation_id` labels
 - Updates `_metrics` documents with `actualCost` field for comparison
-- Enables true estimated vs. actual cost reconciliation
 - Admin dashboard shows variance between estimated and actual costs
 
 **Pricing Snapshots**: Each `_metrics` document includes a `pricingSnapshot` capturing:
 
 - The exact rates used for cost calculation
 - The `_pricing` document IDs (or null if not configured)
-- Audio vs. text input rate breakdown (v2.2.0+)
+- Audio vs. text input rate breakdown
 - The timestamp when pricing was looked up
 
 This enables historical cost recalculation even after prices change.
 
-**Important (v2.2.0+)**: Pricing configuration is now **required**. The `_pricing` collection must have records for `gemini-2.5-flash`, `gemini-2.5-flash-text`, and `whisperx`. Missing pricing results in $0 costs with warnings.
-
-**Replicate Prediction IDs**: WhisperX metrics include the actual `predictionId` from Replicate, enabling:
-
-- Direct correlation with Replicate billing data
-- Verification of compute time estimates
-- Traceability for cost audits
+**Important**: Pricing configuration is **required**. The `_pricing` collection must have records for `gemini-3-flash`, `gemini-3-flash-text`, and `whisperx`. Missing pricing results in $0 costs with warnings.
 
 **Vertex AI Request Labels**: All Gemini API calls include billing attribution labels (`functions/src/utils/llmMetadata.ts`):
 
@@ -1190,7 +795,7 @@ This enables historical cost recalculation even after prices change.
 - `call_type`: Distinguishes between different Gemini operations (pre_analysis, analysis, chat, etc.)
 - `environment`: Separates production vs. emulator costs
 
-These labels appear in BigQuery billing exports for automatic cost attribution and reconciliation with usage metrics.
+These labels appear in BigQuery billing exports for automatic cost attribution and comparison with usage metrics.
 
 ### Cost Calculation
 
@@ -1204,13 +809,13 @@ geminiCost =
   (textInputTokens * textInputPricePerMillion) / 1_000_000 +
   (outputTokens * outputPricePerMillion) / 1_000_000;
 
-// Replicate (time-based, includes diarization)
+// Cloud Run GPU (time-based, timestamps only)
 whisperxCost = computeTimeSeconds * pricePerSecond;
 ```
 
 Pricing is looked up by model and timestamp, supporting historical accuracy as prices change. As of v2.2.0, audio and text input tokens are tracked separately for more accurate cost calculation.
 
-**Important**: For Replicate services (WhisperX), we use **actual GPU compute time** from `metrics.predict_time` in the prediction response, not wall-clock duration. Wall-clock time includes queue time (1-2s) and network latency (~10-15s overhead), which would inflate cost estimates by ~3-4x. The actual compute time accurately reflects what Replicate bills for.
+**Important**: For WhisperX, we use **actual GPU compute time** from the Cloud Run response, not wall-clock duration. Wall-clock time includes cold start and network latency, which would inflate cost estimates.
 
 ### User Activity Tracking
 
@@ -1259,8 +864,7 @@ Accessed via `/admin/jobs/:metricId` when clicking a job row in the Jobs tab. Sh
 **LLM Usage:**
 
 - Per-call token counts for Gemini Analysis and Speaker Correction
-- WhisperX compute time with direct links to Replicate predictions for billing verification
-- Diarization compute time (if applicable)
+- WhisperX compute time for billing verification
 
 **Pricing Snapshot:**
 
@@ -1286,12 +890,12 @@ Aggregates chat queries by conversation, showing:
 **Pricing Migration Warning:**
 
 - Displayed when any chat metrics lack `pricingSnapshot` field
-- Indicates billing reconciliation is not yet available for those queries
+- Indicates billing audit data is not yet available for those queries
 - Helps track rollout of pricing snapshot feature
 
-### Cost Reconciliation Report
+### Cost Comparison Report
 
-Accessible at `/admin/reports/cost-reconciliation`. Provides billing verification workflow:
+Accessible at `/admin/reports/cost-comparison`. Provides billing verification workflow:
 
 **Period Summaries:**
 
@@ -1462,7 +1066,7 @@ Behavior:
                                      ┌──────┴──────┐
                                      ▼             ▼
                               ┌──────────┐  ┌──────────┐
-                              │ Gemini   │  │Replicate │
+                              │ Gemini   │  │Cloud Run │
                               │ API      │  │WhisperX  │
                               └──────────┘  └──────────┘
 ```
@@ -1484,11 +1088,11 @@ The application uses the `@google-cloud/vertexai` SDK for Gemini API calls (migr
 
 - The Cloud Functions service account (`PROJECT@appspot.gserviceaccount.com`) requires `roles/aiplatform.endpoints.predict` to call Vertex AI models.
 
-**WhisperX Prediction Tracking:**
+**WhisperX Cloud Run Integration:**
 
-- `transcribeWithWhisperX()` and `transcribeWithWhisperXRobust()` both return `predictionId` from Replicate's predictions API
-- Stored in `_metrics` documents for correlation with Replicate billing data
-- Enables traceability and cost audit for WhisperX transcription jobs
+- `alignTimestamps()` calls the WhisperX Cloud Run GPU service via IAM-authenticated HTTP
+- Compute time tracked in `_metrics` documents for cost attribution
+- `WHISPER_SERVICE_URL` secret stores the Cloud Run service URL
 
 ### Required APIs
 
@@ -1504,7 +1108,7 @@ The application requires the following Google Cloud APIs:
 | `run.googleapis.com`                | Cloud Run           | Functions v2 runtime (functions run as containers)                  |
 | `eventarc.googleapis.com`           | Eventarc            | Route Storage events to Cloud Functions                             |
 | `pubsub.googleapis.com`             | Pub/Sub             | Event message delivery (used by Eventarc)                           |
-| `secretmanager.googleapis.com`      | Secret Manager      | Secure storage for REPLICATE_API_TOKEN and HUGGINGFACE_ACCESS_TOKEN |
+| `secretmanager.googleapis.com`      | Secret Manager      | Secure storage for GEMINI_API_KEY, WHISPER_SERVICE_URL, HF_TOKEN |
 | `firestore.googleapis.com`          | Firestore           | NoSQL database                                                      |
 | `storage.googleapis.com`            | Cloud Storage       | Audio file storage                                                  |
 | `iamcredentials.googleapis.com`     | IAM Credentials     | Workload Identity for CI/CD                                         |
@@ -1547,16 +1151,16 @@ When an audio file is uploaded to Storage, this event pipeline triggers transcri
                                  ▼
                         ┌──────────────────┐
                         │  Secret Manager  │
-                        │  REPLICATE_TOKEN │
-                        │  HUGGINGFACE_    │
-                        │  ACCESS_TOKEN    │
+                        │  GEMINI_API_KEY  │
+                        │  WHISPER_SERVICE │
+                        │  _URL            │
                         └────────┬─────────┘
                                  │
                         ┌────────┴────────┐
                         ▼                 ▼
                 ┌──────────────┐  ┌──────────────┐
-                │  Vertex AI   │  │  Replicate   │
-                │  (Gemini)    │  │  (WhisperX)  │
+                │  Gemini API  │  │  Cloud Run   │
+                │  (Gemini 3)  │  │  (WhisperX)  │
                 └──────┬───────┘  └──────┬───────┘
                        │                 │
                        └────────┬────────┘
@@ -1623,7 +1227,7 @@ These are automatically created and managed by Google Cloud:
 │                         (Runtime SA)                              │
 ├───────────────────────────────────────────────────────────────────┤
 │  roles/secretmanager.secretAccessor → read GEMINI_API_KEY,        │
-│                                         REPLICATE_API_TOKEN       │
+│                                         WHISPER_SERVICE_URL       │
 │  (auto-granted by Firebase during deployment)                     │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -1652,7 +1256,7 @@ These are automatically created and managed by Google Cloud:
 ┌─────────────────────────┐  ┌─────────────────────────┐
 │  Cloud Run (Frontend)   │  │  Firebase Functions     │
 │  - React SPA            │  │  - transcribeAudio      │
-│  - Static assets        │  │  - processTranscription │
+│  - Static assets        │  │  - newPipeline.ts       │
 └─────────────────────────┘  │  - alignment.ts (HARDY) │
                              └─────────────────────────┘
 ```

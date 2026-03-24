@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "audio_transcript_analysis_app",
+  "project_id": "8c08f35c-63d8-426c-a60a-fa9634ba80cd"
+}

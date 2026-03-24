@@ -25,31 +25,21 @@ interface ConversationDoc {
   durationMs: number;
   audioStoragePath: string; // Firebase Storage path
 
-  // Processing Status (Queue-Driven Architecture)
-  status: 'queued' | 'processing' | 'merging' | 'reprocessing' | 'complete' | 'failed' | 'aborted';
+  // Processing Status
+  status: 'queued' | 'processing' | 'complete' | 'failed' | 'aborted' | 'needs_review';
   processingError?: string;
 
-  // Processing Timestamps (Queue-Driven Architecture)
-  queuedAt?: Timestamp;           // When Cloud Task was enqueued
-  processingStartedAt?: Timestamp; // When processTranscription began
+  // Processing Timestamps
+  queuedAt?: Timestamp;           // When upload was received
+  processingStartedAt?: Timestamp; // When pipeline processing began
+
+  // Pipeline Provenance (which pipeline produced this data)
+  processingPipeline?: 'gemini_hybrid';              // Always 'gemini_hybrid' (legacy pipeline removed)
+  pipelineVersion?: string;                          // Freeform version marker
 
   // Alignment Status
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
   alignmentError?: string;      // Reason for fallback if applicable
-
-  // Processing Mode (Chunked Uploads)
-  processingMode?: 'parallel' | 'sequential';  // Controls chunk execution strategy
-
-  // Chunking Metadata (Large File Processing)
-  chunkingMetadata?: ChunkingMetadata;          // Present when file is chunked (>30 min)
-
-  // Speaker Reconciliation (Parallel Mode Only)
-  reconciliationConfidence?: number;           // Overall confidence (0-1) of speaker matching
-  reconciliationDetails?: ReconciliationDetails; // Detailed match evidence per cluster
-  reconciliationMetadata?: ReconciliationMetadata; // Extended observability (signals, durations)
-
-  // Fallback Metadata (Parallel → Sequential Fallback)
-  fallbackMetadata?: FallbackMetadata;         // Present if fallback was triggered
 
   // Abort Control
   abortRequested?: boolean;     // User requested processing stop
@@ -65,17 +55,16 @@ interface ConversationDoc {
 ```
 
 **Processing Status Flow:**
-1. `queued` - Audio uploaded, Cloud Task enqueued (set by `transcribeAudio`)
-2. `processing` - Heavy processing started (set by `processTranscription`)
-3. `merging` - Chunk processing complete, merge in progress (large files only)
-4. `reprocessing` - Parallel fallback triggered, sequential reprocessing in progress
-5. `complete` - Processing succeeded
-6. `failed` - Processing failed (may retry via Cloud Tasks)
-7. `aborted` - User cancelled processing
+1. `queued` - Audio uploaded, processing queued (set by `transcribeAudio`)
+2. `processing` - Hybrid pipeline running (set by `processWithNewPipeline`)
+3. `complete` - Processing succeeded
+4. `failed` - Processing failed
+5. `aborted` - User cancelled processing
+6. `needs_review` - Processing completed but quality gates flagged issues
 
-**New Timestamps:**
-- `queuedAt` - Set when `transcribeAudio` enqueues the Cloud Task
-- `processingStartedAt` - Set when `processTranscription` begins actual processing
+**Timestamps:**
+- `queuedAt` - Set when `transcribeAudio` receives the upload
+- `processingStartedAt` - Set when the hybrid pipeline begins processing
 
 #### conversations/{conversationId}/chatHistory (subcollection)
 
@@ -228,11 +217,9 @@ interface TranscriptionMetricsDoc {
   // Stage timings (milliseconds)
   timingMs: {
     download: number;      // Audio download from Storage
-    whisperx: number;      // WhisperX transcription + diarization
-    buildSegments: number; // Segment construction
-    gemini: number;        // Gemini analysis (topics, terms, etc.)
-    speakerCorrection: number; // Gemini speaker reassignment
-    transform: number;     // Data transformation
+    gemini: number;        // Gemini 3 Flash analysis (diarization + content)
+    whisperx: number;      // WhisperX timestamps + HARDY alignment
+    transform: number;     // Data transformation and assembly
     firestore: number;     // Firestore write
     total: number;         // Total processing time
   };
@@ -276,7 +263,7 @@ interface TranscriptionMetricsDoc {
 
   // Gemini billing labels for cost attribution (added with Vertex AI migration)
   // Array of label objects from each Gemini API call (pre-analysis, analysis, speaker ID, speaker correction)
-  // Maps to BigQuery billing exports for automatic cost reconciliation
+  // Maps to BigQuery billing exports for automatic cost tracking
   geminiLabels?: Array<{
     conversation_id: string;
     user_id: string;
@@ -303,7 +290,7 @@ interface TranscriptionMetricsDoc {
     source: 'bigquery_billing_export';
   };
 
-  // Pricing snapshot for billing reconciliation (added for cost visibility)
+  // Pricing snapshot for billing audit (added for cost visibility)
   // Captures the exact rates used so costs can be audited even after price changes
   // Schema updated in v2.2.0: removed diarization fields, added audio/text rates
   pricingSnapshot?: {
@@ -349,7 +336,7 @@ interface ChatMetricsDoc {
 
   // Gemini billing labels for cost attribution (added with Vertex AI migration)
   // Single label object for this chat query
-  // Maps to BigQuery billing exports for automatic cost reconciliation
+  // Maps to BigQuery billing exports for automatic cost tracking
   geminiLabels?: {
     conversation_id: string;
     user_id: string;
@@ -357,7 +344,7 @@ interface ChatMetricsDoc {
     environment: string;  // 'production' | 'development'
   };
 
-  // Pricing info for billing reconciliation (added for cost visibility)
+  // Pricing info for billing audit (added for cost visibility)
   pricingId?: string | null;    // _pricing doc ID used, or null if default
   pricingSnapshot?: {
     capturedAt: Timestamp;
@@ -513,14 +500,14 @@ LLM pricing configuration for cost estimation.
 **IMPORTANT (v2.2.0+)**: Pricing configuration is **required**. If pricing records are missing, costs will calculate as $0 with warnings logged. There are no longer default fallback values.
 
 **Required pricing records**:
-- `gemini-2.5-flash` - Audio input pricing (inputPricePerMillion for audio, outputPricePerMillion)
-- `gemini-2.5-flash-text` - Text input pricing (inputPricePerMillion for text)
-- `whisperx` - Compute time pricing (pricePerSecond) - includes diarization
+- `gemini-3-flash` - Audio input pricing (inputPricePerMillion for audio, outputPricePerMillion)
+- `gemini-3-flash-text` - Text input pricing (inputPricePerMillion for text)
+- `whisperx` - Compute time pricing (pricePerSecond) - timestamps only
 
 ```typescript
 interface PricingDoc {
-  model: string;  // 'gemini-2.5-flash', 'gemini-2.5-flash-text', 'whisperx'
-  service: 'gemini' | 'cloud-run';
+  model: string;  // 'gemini-3-flash', 'gemini-3-flash-text', 'whisperx'
+  service: 'gemini' | 'cloud-run-gpu';
 
   // Token-based pricing (for Gemini)
   inputPricePerMillion?: number;   // USD per 1M input tokens
@@ -607,12 +594,11 @@ interface Conversation {
   durationMs: number;
   audioUrl?: string;          // Temporary signed URL
   status: 'queued' | 'processing' | 'complete' | 'failed' | 'aborted';
+  processingPipeline?: 'gemini_hybrid';              // Always 'gemini_hybrid' (legacy pipeline removed)
+  pipelineVersion?: string;       // Freeform version marker
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
   alignmentError?: string;    // Reason for fallback
-  processingMode?: 'parallel' | 'sequential';  // Chunk execution strategy
-  reconciliationConfidence?: number;  // Speaker matching confidence (parallel mode)
-  reconciliationDetails?: ReconciliationDetails;  // Match evidence (parallel mode)
-  queuedAt?: string;          // ISO timestamp when Cloud Task enqueued
+  queuedAt?: string;          // ISO timestamp when upload received
   processingStartedAt?: string; // ISO timestamp when processing began
   speakers: Record<string, Speaker>;
   segments: Segment[];
@@ -622,14 +608,6 @@ interface Conversation {
   people: Person[];
 }
 ```
-
-**Processing Mode Values:**
-- `'parallel'` (default): Chunks process independently and concurrently. Faster for long files, but requires speaker reconciliation at merge time. Best for most use cases.
-- `'sequential'`: Chunks wait for predecessor to complete before starting. Slower but maintains consistent speaker IDs across chunks without reconciliation.
-
-**Speaker Reconciliation Metadata (parallel mode only):**
-- `reconciliationConfidence`: Overall confidence score (0-1) for speaker matching. Minimum of all cluster confidences.
-- `reconciliationDetails`: Detailed evidence for how speakers were matched (see `ReconciliationDetails` below).
 
 ### Speaker
 
@@ -792,158 +770,38 @@ interface ProcessingTimeline {
 }
 ```
 
-### ReconciliationDetails
 
-Speaker reconciliation metadata for parallel chunk processing:
+### system
+
+System configuration documents (operator-managed, not user-facing).
+
+#### system/feature_flags
+
+Feature flags for operational controls. Read by Cloud Functions at trigger time.
+
+**Path**: `system/feature_flags`
 
 ```typescript
-interface ReconciliationDetails {
-  clusterCount: number;        // Number of canonical speakers created
-  originalSpeakerCount: number; // Total speakers across all chunks
-  clusters: Array<{
-    canonicalId: string;       // Canonical speaker ID (e.g., "speaker_canonical_0")
-    originalIds: string[];     // Original speaker IDs merged into this cluster
-    confidence: number;        // Cluster confidence (0-1)
-    displayName: string;       // Best display name from cluster
-    matchEvidence: {
-      nameMatches: number;     // Number of name-based matches
-      topicOverlap: number;    // Average topic overlap score
-      termOverlap: number;     // Average term overlap score
-    };
-  }>;
+interface FeatureFlagsDoc {
+  // Context-aware reconciliation (speaker correction strategy)
+  enableContextAwareReconciliation: boolean;     // Kill switch
+  contextAwareRolloutPercentage: number;         // 0-100
+  forceEmbeddingOnlyConversationIds: string[];   // Override list
+
+  // Auto-disable metadata (set by alert handler)
+  disabledAt?: Timestamp;
+  disableReason?: string;
+  updatedAt?: Timestamp;
 }
 ```
 
-**Purpose**: Provides transparency into how speakers were matched across chunks in parallel mode. Includes confidence scores and match evidence for debugging and quality assessment.
+**Deterministic routing**: Rollout uses SHA-256 hashing of the conversation ID to map to a 0-99 bucket. Same conversation always gets the same treatment.
 
-**When present**: Only for conversations processed in parallel mode with multiple chunks. Sequential mode doesn't need reconciliation since speaker IDs are consistent across chunks.
+**Initialization**: Created by `scripts/init-feature-flags.js` during deployment. Existing values are never overwritten.
 
-### ReconciliationMetadata
+**Security**: Only Cloud Functions read this document. Operators modify it via Firebase Console or Admin SDK.
 
-Extended observability data for speaker reconciliation:
-
-```typescript
-interface ReconciliationMetadata {
-  signalsUsed: string[];           // Matching signals used: ['name', 'topic', 'term'] or ['embeddings']
-  fallbackTriggered: boolean;      // True if fallback to sequential occurred
-  speakerMatchConfidences: Array<{
-    canonicalId: string;
-    confidence: number;            // Per-speaker confidence (0-1)
-  }>;
-  reconciliationDurationMs?: number; // Processing time for reconciliation phase
-
-  // Singleton detection and adaptive relaxation (embedding reconciliation only)
-  singletonRatio?: number;         // Singleton clusters / total clusters (0-1)
-  singletonCount?: number;         // Number of singleton clusters
-  estimatedUniqueSpeakers?: number; // Heuristic estimate of unique speakers
-  relaxationTriggered?: boolean;   // Whether adaptive threshold relaxation was triggered
-  finalEdgeThreshold?: number;     // Final edge threshold after relaxation
-  relaxationIterations?: number;   // Number of relaxation iterations performed
-}
-```
-
-**Purpose**: Provides performance and signal data for reconciliation monitoring. Helps identify slow reconciliations and track which signals contributed to matches.
-
-**Singleton Detection** (embedding reconciliation only):
-- **singletonRatio**: Percentage of clusters with only 1 member (indicates over-fragmentation if >40%)
-- **singletonCount**: Absolute count of singleton clusters
-- **estimatedUniqueSpeakers**: Conservative heuristic (max unique speakers in any chunk)
-
-**Adaptive Relaxation** (embedding reconciliation only):
-When singleton ratio >40%, the system automatically relaxes clustering thresholds to reduce over-fragmentation:
-- **relaxationTriggered**: Whether relaxation was needed
-- **finalEdgeThreshold**: Edge threshold after relaxation (starts at base, relaxes by 0.05 steps, floor: 0.45)
-- **relaxationIterations**: Number of relaxation loops (max: 3)
-
-These metrics enable operators to monitor clustering quality and identify conversations with potential speaker fragmentation issues.
-
-### FallbackMetadata
-
-Metadata stored when parallel processing falls back to sequential:
-
-```typescript
-type FallbackReason = 'low_speaker_confidence' | 'reconciliation_error';
-
-interface FallbackMetadata {
-  triggeredAt: string;             // ISO timestamp when fallback was triggered
-  parallelConfidence: number;      // Confidence score that triggered fallback
-  archiveId: string;               // Path to archived parallel chunks
-  reason: FallbackReason;          // Why fallback occurred
-  parallelDurationMs?: number;     // How long the parallel attempt took
-  sequentialDurationMs?: number;   // Populated after sequential completes
-  configuredThreshold: number;     // CONFIDENCE_THRESHOLD at time of trigger
-}
-```
-
-**Purpose**: Provides audit trail for fallback events. Enables:
-- Debugging why fallback occurred (confidence vs threshold)
-- Accessing archived parallel chunks for post-mortem analysis
-- Measuring processing time difference between parallel and sequential
-- Tracking threshold configuration at time of trigger
-
-**When present**: Only on conversations where fallback to sequential was triggered. Can query `fallbackMetadata.triggeredAt IS NOT NULL` to find all fallback occurrences.
-
-### ChunkingMetadata
-
-Metadata tracking chunk processing state for large files. Stored as an embedded object on the conversation document.
-
-```typescript
-interface ChunkingMetadata {
-  totalChunks: number;                          // Total number of audio chunks
-  chunkStatuses: Record<string, ChunkStatus>;   // Per-chunk processing status
-  mergeTaskEnqueued?: boolean;                  // Guard flag: merge task already dispatched
-  mergedAt?: string;                            // ISO timestamp when merge completed
-
-  // Leader-chunk-first dispatch (parallel mode)
-  leaderSpeakerHints?: SpeakerHints;            // Speaker hints extracted from chunk 0
-  pendingFollowerChunks?: PendingFollowerChunk[];  // Followers waiting for leader to complete
-  followersDispatched?: boolean;                // Guard flag: followers already enqueued
-}
-```
-
-**Leader-first fields** (all optional for backward compatibility):
-- `leaderSpeakerHints`: Set after chunk 0 completes, contains speaker count/names/roles extracted from the leader's pipeline results
-- `pendingFollowerChunks`: Set by `transcribeAudio` when dispatching chunk 0, stores serialized follower chunk descriptors (storage paths, overlap info, timestamps)
-- `followersDispatched`: Transactional guard flag set atomically by `dispatchFollowersWithHints()` to prevent duplicate follower dispatch from Cloud Tasks at-least-once delivery
-
-### SpeakerHints
-
-Speaker identity hints extracted from the leader chunk and forwarded to all follower chunks via Cloud Task payloads.
-
-```typescript
-interface SpeakerHints {
-  numSpeakers: number;                // Number of speakers identified by leader
-  speakerNames: string[];             // Deduplicated speaker names from leader
-  speakerNotes?: Array<{              // Per-speaker metadata for Gemini prompting
-    speakerId: string;
-    inferredName?: string;
-    role?: string;
-  }>;
-}
-```
-
-**How hints are used by followers:**
-- `numSpeakers` + `speakerNames` seed WhisperX diarization (skip Gemini pre-analysis)
-- `speakerNotes` seed the Gemini content analysis speaker notes
-- Followers with valid hints bypass the entire Gemini pre-analysis step
-
-### PendingFollowerChunk
-
-Serialized descriptor for a follower chunk waiting to be dispatched after the leader completes.
-
-```typescript
-interface PendingFollowerChunk {
-  chunkIndex: number;           // Chunk position (1..N)
-  totalChunks: number;          // Total chunk count
-  chunkStoragePath: string;     // Firebase Storage path to the chunk audio
-  startMs: number;              // Chunk start time in original audio
-  endMs: number;                // Chunk end time in original audio
-  overlapBeforeMs: number;      // Overlap with previous chunk (ms)
-  overlapAfterMs: number;       // Overlap with next chunk (ms)
-}
-```
-
-**Lifecycle:** Created by `transcribeAudio`, stored in `chunkingMetadata.pendingFollowerChunks`, consumed and deleted by `dispatchFollowersWithHints()` after leader completion.
+> **Note:** Legacy pipeline routing flags were removed in the hard cutover. All uploads now go through the Gemini 3 Flash hybrid pipeline directly. See [migration explainer](../explanation/gemini3-migration.md) for history.
 
 ## Firebase Storage Structure
 

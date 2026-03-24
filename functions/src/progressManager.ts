@@ -13,6 +13,11 @@ export enum ProcessingStep {
   REASSIGNING = 'reassigning',
   ALIGNING = 'aligning',
   FINALIZING = 'finalizing',
+  // New hybrid pipeline steps
+  GEMINI_ANALYSIS = 'gemini_analysis',
+  WHISPERX_ALIGNMENT = 'whisperx_alignment',
+  ASSEMBLY = 'assembly',
+  SAVING = 'saving',
   COMPLETE = 'complete',
   FAILED = 'failed'
 }
@@ -29,6 +34,11 @@ const STEP_PERCENTAGES: Record<ProcessingStep, number> = {
   [ProcessingStep.REASSIGNING]: 75,
   [ProcessingStep.ALIGNING]: 85,
   [ProcessingStep.FINALIZING]: 95,
+  // Hybrid pipeline steps
+  [ProcessingStep.GEMINI_ANALYSIS]: 20,
+  [ProcessingStep.WHISPERX_ALIGNMENT]: 60,
+  [ProcessingStep.ASSEMBLY]: 85,
+  [ProcessingStep.SAVING]: 95,
   [ProcessingStep.COMPLETE]: 100,
   [ProcessingStep.FAILED]: 0
 };
@@ -90,6 +100,27 @@ const STEP_META: Record<ProcessingStep, StepMeta> = {
   [ProcessingStep.FINALIZING]: {
     label: 'Finalizing',
     description: 'Saving results and cleaning up',
+    category: 'active'
+  },
+  // Hybrid pipeline steps
+  [ProcessingStep.GEMINI_ANALYSIS]: {
+    label: 'Analyzing with Gemini',
+    description: 'Running AI analysis for speakers, topics, and transcript',
+    category: 'active'
+  },
+  [ProcessingStep.WHISPERX_ALIGNMENT]: {
+    label: 'Aligning Timestamps',
+    description: 'Generating precise word-level timestamps via WhisperX',
+    category: 'active'
+  },
+  [ProcessingStep.ASSEMBLY]: {
+    label: 'Assembling Results',
+    description: 'Building final transcript from analysis and alignment data',
+    category: 'active'
+  },
+  [ProcessingStep.SAVING]: {
+    label: 'Saving',
+    description: 'Persisting results to database',
     category: 'active'
   },
   [ProcessingStep.COMPLETE]: {

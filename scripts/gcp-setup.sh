@@ -393,8 +393,9 @@ APIS=(
     "generativelanguage.googleapis.com"
     "aiplatform.googleapis.com"  # Required for Vertex AI SDK (Gemini with billing labels)
     "apikeys.googleapis.com"
-    # Cloud Tasks (queue-driven transcription architecture)
-    "cloudtasks.googleapis.com"
+    # Cloud Tasks API — no longer used (processTranscription retired),
+    # but kept enabled in case existing projects have queue resources.
+    # "cloudtasks.googleapis.com"
     # Speech-to-Text v2 (Chirp-3 diarization benchmark)
     "speech.googleapis.com"
 )
@@ -554,38 +555,12 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 10: Create Cloud Tasks Queue for Transcription
+# Step 10: Cloud Tasks Queue — RETIRED
 # -----------------------------------------------------------------------------
-
-log_step "Creating Cloud Tasks queue for transcription..."
-
-QUEUE_NAME="transcription-queue"
-QUEUE_LOCATION="$REGION"
-
-# Check if queue already exists
-if gcloud tasks queues describe "$QUEUE_NAME" \
-    --location="$QUEUE_LOCATION" \
-    --project="$PROJECT_ID" &>/dev/null; then
-    log_skip "Cloud Tasks queue '$QUEUE_NAME' already exists"
-else
-    gcloud tasks queues create "$QUEUE_NAME" \
-        --location="$QUEUE_LOCATION" \
-        --max-dispatches-per-second=10 \
-        --max-concurrent-dispatches=5 \
-        --max-attempts=3 \
-        --min-backoff=60s \
-        --max-backoff=600s \
-        --project="$PROJECT_ID"
-    log_success "Created Cloud Tasks queue: $QUEUE_NAME"
-fi
-
-# Grant Cloud Tasks Enqueuer role to the runtime service account
-# (needed for transcribeAudio to enqueue tasks)
-if sa_exists "$RUNTIME_SA"; then
-    add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/cloudtasks.enqueuer" "$RUNTIME_SA → Cloud Tasks Enqueuer"
-else
-    log_info "Cloud Tasks Enqueuer binding - skipped (runtime SA not yet created)"
-fi
+# The transcription-queue was used by the legacy processTranscription function
+# (Replicate-era pipeline). That function has been deleted and the current
+# hybrid pipeline (Gemini 3 Flash + WhisperX timestamps) processes inline.
+# Existing queues can be paused/deleted manually; new projects don't need one.
 
 # -----------------------------------------------------------------------------
 # Step 10b: Grant BigQuery Access for Billing Sync (Cross-Project)
@@ -705,7 +680,58 @@ CLOUDBUILD_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
 add_service_agent_binding "$CLOUDBUILD_SA" "roles/artifactregistry.writer" "Cloud Build → Artifact Registry Writer"
 add_service_agent_binding "$CLOUDBUILD_SA" "roles/run.admin" "Cloud Build → Cloud Run Admin"
 add_service_agent_binding "$CLOUDBUILD_SA" "roles/iam.serviceAccountUser" "Cloud Build → Service Account User"
+add_service_agent_binding "$CLOUDBUILD_SA" "roles/secretmanager.secretAccessor" "Cloud Build → Secret Manager (HF_TOKEN for model downloads)"
 
+# -----------------------------------------------------------------------------
+# Step 10e: HuggingFace Token for WhisperX Builds
+# -----------------------------------------------------------------------------
+# Pyannote diarization models are gated on HuggingFace and require a token
+# during Docker build. Cloud Build reads this from Secret Manager via the
+# cloudbuild.yaml availableSecrets config. Not needed at runtime (models
+# are pre-cached in the image), only at build time.
+
+log_step "HuggingFace token for WhisperX builds..."
+
+HF_SECRET_NAME="HF_TOKEN"  # pragma: allowlist secret
+
+if gcloud secrets describe "$HF_SECRET_NAME" --project="$PROJECT_ID" &>/dev/null; then
+    log_skip "Secret '$HF_SECRET_NAME' already exists in Secret Manager"
+else
+    HF_TOKEN_VALUE="${HF_TOKEN:-}"
+    if [[ -z "$HF_TOKEN_VALUE" ]]; then
+        log_info "HF_TOKEN not set in environment."
+        log_info "Get a token at: https://huggingface.co/settings/tokens"
+        log_info "Accept the pyannote model licenses:"
+        log_info "  https://huggingface.co/pyannote/speaker-diarization-3.1"
+        log_info "  https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM"
+        read -p "  Enter HuggingFace token (hf_...): " HF_TOKEN_VALUE </dev/tty
+    fi
+
+    if [[ -n "$HF_TOKEN_VALUE" ]]; then
+        printf '%s' "$HF_TOKEN_VALUE" | gcloud secrets create "$HF_SECRET_NAME" \
+            --data-file=- \
+            --project="$PROJECT_ID" \
+            --replication-policy="automatic"
+        log_success "Created secret $HF_SECRET_NAME"
+    else
+        log_info "⚠️  Skipped HF_TOKEN — WhisperX builds will fail without it"
+    fi
+fi
+
+# Grant GitHub Actions SA access to HF_TOKEN for Cloud Build runs.
+# Cloud Build's availableSecrets requires the build's --service-account SA to have
+# secret access, not just the default Cloud Build SA.
+# Use fixed naming convention since GITHUB_SA_EMAIL isn't defined until Step 13.
+GH_SA_FOR_SECRETS="github-actions@${PROJECT_ID}.iam.gserviceaccount.com"  # pragma: allowlist secret
+if gcloud secrets describe "$HF_SECRET_NAME" --project="$PROJECT_ID" &>/dev/null && \
+   gcloud iam service-accounts describe "$GH_SA_FOR_SECRETS" --project="$PROJECT_ID" &>/dev/null; then
+    gcloud secrets add-iam-policy-binding "$HF_SECRET_NAME" \
+        --project="$PROJECT_ID" \
+        --member="serviceAccount:$GH_SA_FOR_SECRETS" \
+        --role="roles/secretmanager.secretAccessor" \
+        --quiet > /dev/null 2>&1 || true
+    log_info "GitHub Actions SA → HF_TOKEN secret accessor"
+fi
 
 # -----------------------------------------------------------------------------
 # Step 11: Initialize Firebase Storage and Configure Bucket Access
@@ -995,8 +1021,9 @@ fi
 # -----------------------------------------------------------------------------
 # Step 15b: Whisper Service URL (Cloud Run WhisperX)
 # -----------------------------------------------------------------------------
-# Diarization models (pyannote) are bundled in the Cloud Run container,
-# so no separate Hugging Face or Replicate tokens are needed.
+# Diarization models (pyannote) are bundled in the Cloud Run container
+# at runtime, but HF_TOKEN is needed at BUILD time to download gated models.
+# See Step 10e above for HF_TOKEN setup.
 
 log_step "Whisper Cloud Run service URL..."
 

@@ -39,19 +39,6 @@ jest.mock('firebase-admin/storage', () => ({
   }))
 }));
 
-jest.mock('@google-cloud/vertexai', () => ({
-  VertexAI: jest.fn(() => ({
-    getGenerativeModel: jest.fn()
-  })),
-  SchemaType: {
-    OBJECT: 'object',
-    ARRAY: 'array',
-    STRING: 'string',
-    INTEGER: 'integer',
-    BOOLEAN: 'boolean'
-  }
-}));
-
 jest.mock('firebase-functions/v2/storage', () => ({
   onObjectFinalized: jest.fn()
 }));
@@ -62,34 +49,9 @@ jest.mock('firebase-functions/params', () => ({
 
 jest.mock('../index', () => ({
   db: {},
-  bucket: { file: jest.fn(), upload: jest.fn() }
 }));
 
-// Silence noisy module-level console.log from index.ts and version loading
-jest.mock('../progressManager', () => ({ ProgressManager: jest.fn(), ProcessingStep: {} }));
-jest.mock('../alignment', () => ({
-  transcribeWithWhisperX: jest.fn(),
-  transcribeWithWhisperXRobust: jest.fn()
-}));
-jest.mock('../metrics', () => ({
-  recordMetrics: jest.fn(),
-  calculateCost: jest.fn(),
-}));
 jest.mock('../userEvents', () => ({ recordUserEvent: jest.fn() }));
-jest.mock('../chunking', () => ({
-  chunkAudioFile: jest.fn(),
-  cleanupChunks: jest.fn(),
-  reencodeForPlayback: jest.fn()
-}));
-jest.mock('../chunkBounds', () => ({ validateChunkSequence: jest.fn() }));
-jest.mock('../chunkContext', () => ({
-  createInitialChunkStatuses: jest.fn(),
-  sanitizeForFirestore: jest.fn()
-}));
-jest.mock('../speakerQuality', () => ({
-  computeSpeakerQualityMapFromWhisperXSegments: jest.fn()
-}));
-jest.mock('../utils/llmMetadata', () => ({ buildGeminiLabels: jest.fn(() => ({})) }));
 
 // Now it's safe to pull in the functions under test
 import { fixSegmentBoundaries, applySpeakerReassignments } from '../transcribe';
