@@ -16,6 +16,7 @@ import { recordUserEvent } from './userEvents';
 import { ProcessingMode } from './types';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
+const geminiApiKey = defineSecret('GEMINI_API_KEY');
 const whisperServiceUrl = defineSecret('WHISPER_SERVICE_URL');
 
 /**
@@ -63,7 +64,7 @@ interface SpeakerCorrection {
  */
 export const transcribeAudio = onObjectFinalized(
   {
-    secrets: [whisperServiceUrl],
+    secrets: [geminiApiKey, whisperServiceUrl],
     memory: '2GiB',
     timeoutSeconds: 540, // 9 minutes (max for event-driven triggers, even 2nd gen)
     region: 'us-central1'
