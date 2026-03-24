@@ -242,23 +242,6 @@ function computeSimilarity(geminiText: string, whisperxText: string, enableDiagn
   );
 }
 
-function computeSimilarityFast(geminiText: string, whisperxText: string): number {
-  /**
-   * Lightweight similarity for the sliding window inner loop.
-   * Uses only the two most discriminative metrics — token_set_ratio
-   * (handles extra/missing words) and partial_ratio (handles substrings).
-   * ~60% faster than the full 5-metric version on 400+ char strings.
-   */
-  const gNorm = normalizeText(geminiText);
-  const wNorm = normalizeText(whisperxText);
-
-  if (!gNorm || !wNorm) return 0.0;
-
-  const tokenSet = fuzz.token_set_ratio(gNorm, wNorm) / 100.0;
-  const partial = fuzz.partial_ratio(gNorm, wNorm) / 100.0;
-
-  return 0.55 * tokenSet + 0.45 * partial;
-}
 
 function simpleRatio(s1: string, s2: string): number {
   /** Simple Levenshtein-based ratio (0-1) - DEPRECATED: use sequenceMatcherRatio for better accuracy */
@@ -890,11 +873,7 @@ function findBestMatch(
         continue;
       }
 
-      // Full 5-metric similarity for anchor candidates (diagnostics enabled),
-      // fast 2-metric for the region alignment inner loop
-      const score = enableDiagnostics
-        ? computeSimilarity(text, windowText, enableDiagnostics)
-        : computeSimilarityFast(text, windowText);
+      const score = computeSimilarity(text, windowText, enableDiagnostics);
 
       if (score > bestScore) {
         bestScore = score;
