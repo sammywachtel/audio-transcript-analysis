@@ -907,6 +907,7 @@ else
         "roles/cloudbuild.builds.builder"
         "roles/storage.admin"
         "roles/iam.serviceAccountUser"
+        "roles/secretmanager.secretVersionManager"  # Deploy workflow updates WHISPER_SERVICE_URL after Cloud Run deploy
     )
 
     for role in "${GITHUB_SA_ROLES[@]}"; do
