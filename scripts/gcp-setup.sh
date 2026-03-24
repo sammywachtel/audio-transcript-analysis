@@ -908,6 +908,7 @@ else
         "roles/storage.admin"
         "roles/iam.serviceAccountUser"
         "roles/secretmanager.secretVersionManager"  # Deploy workflow updates WHISPER_SERVICE_URL after Cloud Run deploy
+        "roles/iam.serviceAccountTokenCreator"      # Health check mints ID tokens via --impersonate-service-account
     )
 
     for role in "${GITHUB_SA_ROLES[@]}"; do
