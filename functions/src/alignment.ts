@@ -22,7 +22,11 @@ import fuzz from 'fuzzball';
 // Anchor detection thresholds
 const ANCHOR_MIN_CONFIDENCE = 0.75;  // Minimum similarity for anchor points (lowered from 0.85)
 const ANCHOR_MIN_WORDS = 2;  // Minimum words for an anchor (lowered from 3)
-const ANCHOR_MAX_WORDS = 20;  // Maximum words for an anchor (raised from 15)
+const ANCHOR_MAX_WORDS = 20;  // Max words for direct anchor matching (short segments)
+const ANCHOR_WINDOW_SIZE = 15;  // Words to extract from long segments for sub-segment anchoring
+
+// Performance limits — prevent O(n²) blowup on large search spaces
+const MAX_MATCH_ITERATIONS = 3000;  // Hard cap on sliding window comparisons per findBestMatch call
 
 // Search window configuration - FIXED: use absolute values, not percentages
 const TIME_WINDOW_SECONDS = 30;  // Search ±30 seconds around time hint
@@ -237,6 +241,7 @@ function computeSimilarity(geminiText: string, whisperxText: string, enableDiagn
     0.10 * ngram
   );
 }
+
 
 function simpleRatio(s1: string, s2: string): number {
   /** Simple Levenshtein-based ratio (0-1) - DEPRECATED: use sequenceMatcherRatio for better accuracy */
@@ -464,7 +469,7 @@ function findAnchors(
   const anchors: Anchor[] = [];
   let lastAnchorWordIdx = 0;
   let segmentsSkippedShort = 0;
-  let segmentsSkippedLong = 0;
+  let segmentsSubSegment = 0;
   let segmentsNoMatch = 0;
   let segmentsLowConfidence = 0;
 
@@ -476,14 +481,29 @@ function findAnchors(
     const segment = segments[segIdx];
 
     // Skip very short segments - not reliable anchors
-    const wordCount = segment.text.split(/\s+/).length;
+    const segmentWords = segment.text.split(/\s+/);
+    const wordCount = segmentWords.length;
     if (wordCount < ANCHOR_MIN_WORDS) {
       segmentsSkippedShort++;
       continue;
     }
+
+    // For long segments, extract a window from the middle for anchoring.
+    // Gemini 3 Flash produces full speaker turns (40-100+ words) that are
+    // excellent anchor material — we just can't search for the whole thing
+    // without blowing the time budget.
+    let anchorText = segment.text;
+    let anchorWordCount = wordCount;
+    let isSubSegment = false;
     if (wordCount > ANCHOR_MAX_WORDS) {
-      segmentsSkippedLong++;
-      continue;
+      const midIdx = Math.floor(segmentWords.length / 2);
+      const halfWindow = Math.floor(ANCHOR_WINDOW_SIZE / 2);
+      const windowStart = Math.max(0, midIdx - halfWindow);
+      const windowEnd = Math.min(segmentWords.length, windowStart + ANCHOR_WINDOW_SIZE);
+      anchorText = segmentWords.slice(windowStart, windowEnd).join(' ');
+      anchorWordCount = windowEnd - windowStart;
+      isSubSegment = true;
+      segmentsSubSegment++;
     }
 
     // Determine search strategy: global vs anchor-based
@@ -549,20 +569,28 @@ function findAnchors(
     }
 
     // Ensure minimum search range
-    if (wordEndIdx - wordStartIdx < wordCount + 10) {
-      wordEndIdx = Math.min(validWords.length, wordStartIdx + wordCount + 20);
+    if (wordEndIdx - wordStartIdx < anchorWordCount + 10) {
+      wordEndIdx = Math.min(validWords.length, wordStartIdx + anchorWordCount + 20);
     }
 
-    // Search for best match (enable diagnostics for first 5 anchor attempts)
+    // Search for best match — use sub-segment text for long segments
     const enableDiagnostics = segIdx < 5;
     const match = findBestMatch(
-      segment.text,
+      anchorText,
       validWords,
       wordStartIdx,
       wordEndIdx,
-      wordCount,
+      anchorWordCount,
       enableDiagnostics
     );
+
+    if (isSubSegment && match) {
+      // Log that we used sub-segment anchoring
+      console.debug(
+        `[Anchors] Sub-segment anchor for segment ${segIdx} (${wordCount} words): ` +
+        `extracted ${anchorWordCount}-word window, conf=${match.confidence.toFixed(3)}`
+      );
+    }
 
     if (match && match.confidence >= ANCHOR_MIN_CONFIDENCE) {
       // Validate that matched words have valid timestamps
@@ -622,13 +650,13 @@ function findAnchors(
   console.debug(
     `[Anchors] Skip stats: ` +
     `skipped_short(<${ANCHOR_MIN_WORDS}words)=${segmentsSkippedShort}, ` +
-    `skipped_long(>${ANCHOR_MAX_WORDS}words)=${segmentsSkippedLong}, ` +
+    `sub_segment(>${ANCHOR_MAX_WORDS}words)=${segmentsSubSegment}, ` +
     `no_match=${segmentsNoMatch}, ` +
     `low_confidence=${segmentsLowConfidence}`
   );
 
   // DIAGNOSTIC: Confidence distribution histogram for ALL attempted matches
-  const attemptedMatches = segments.length - segmentsSkippedShort - segmentsSkippedLong;
+  const attemptedMatches = segments.length - segmentsSkippedShort;
   if (attemptedMatches > 0) {
     console.debug(
       `[DIAGNOSTIC] Confidence distribution for ${attemptedMatches} attempted matches: ` +
@@ -809,30 +837,39 @@ function findBestMatch(
 
   let bestMatch: MatchResult | null = null;
   let bestScore = 0.0;
+  let iterations = 0;
 
-  // Window sizes to try - balanced between accuracy and speed
+  // Window sizes to try — exact first, then ±1, ±2, then a shorter window.
+  // Fewer sizes than before: 4 instead of 6 (removed 0.7x, it rarely wins)
   const windowSizes = Array.from(new Set([
     expectedWordCount,
     Math.max(1, expectedWordCount - 1),
     expectedWordCount + 1,
     Math.max(1, expectedWordCount - 2),
-    expectedWordCount + 2,
-    Math.max(1, Math.floor(expectedWordCount * 0.7))
   ])).sort((a, b) => a - b);
 
   // Early exit threshold - stop on excellent match
   const EARLY_EXIT_THRESHOLD = 0.95;
+  // Good-enough threshold — stop trying more window sizes once we have a solid match
+  const GOOD_ENOUGH_THRESHOLD = 0.80;
 
   for (const windowSize of windowSizes) {
     if (windowSize <= 0) continue;
+    // Once we have a good match, don't try more window sizes
+    if (bestScore >= GOOD_ENOUGH_THRESHOLD) break;
 
     for (let i = searchStart; i < actualSearchEnd - windowSize + 1; i++) {
+      // Hard cap — bail out before we burn the function's time budget
+      if (++iterations > MAX_MATCH_ITERATIONS) {
+        return bestMatch;
+      }
+
       const windowWords = words.slice(i, i + windowSize);
       const windowText = windowWords.map(w => w.word).join(' ');
 
-      // Quick pre-filter - only skip very bad matches
+      // Quick pre-filter with cheap partial_ratio — skip obvious non-matches
       const quickScore = fuzz.partial_ratio(normText, normalizeText(windowText));
-      if (quickScore < 35) {  // Very permissive threshold
+      if (quickScore < 35) {
         continue;
       }
 
