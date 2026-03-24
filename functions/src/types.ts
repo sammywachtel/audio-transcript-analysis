@@ -100,6 +100,9 @@ export interface Conversation {
   updatedAt: string;
   durationMs: number;
   audioUrl?: string;
+  // Legacy statuses 'chunking' | 'merging' | 'reprocessing' are no longer set by the
+  // current Gemini hybrid pipeline, but may exist on historical Firestore documents.
+  // Do NOT remove them — frontend status guards and Firestore reads depend on the union.
   status: 'processing' | 'chunking' | 'merging' | 'reprocessing' | 'needs_review' | 'complete' | 'failed' | 'aborted';
   abortRequested?: boolean;
   speakers: Record<string, Speaker>;
@@ -125,6 +128,10 @@ export interface Conversation {
   fallbackMetadata?: FallbackMetadata;
   // Quality warnings (non-blocking issues surfaced to user)
   warnings?: TranscriptWarning[];
+  // Pipeline provenance — which pipeline produced this data
+  processingPipeline?: 'legacy' | 'gemini_hybrid';
+  pipelineVersion?: string;
+
   // Retry tracking metadata
   retryCount?: number;
   lastFailedAt?: string;

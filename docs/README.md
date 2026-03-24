@@ -34,6 +34,7 @@ Technical descriptions and specifications.
 Background and context for design decisions.
 
 - **[Design Decisions](explanation/design-decisions.md)** - Why we built it this way
+- **[Gemini 3 Migration](explanation/gemini3-migration.md)** - Why and how we migrated to the Gemini 3 Flash hybrid pipeline
 
 ## Quick Links
 
@@ -54,7 +55,7 @@ See [conversation-transcript-context-prd.md](conversation-transcript-context-prd
 
 - **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS
 - **Backend**: Firebase (Firestore, Storage, Cloud Functions)
-- **AI**: Google Gemini 2.5 Flash (transcription) + WhisperX via Replicate (timestamp alignment)
+- **AI**: Google Gemini 3 Flash (transcription, diarization, content analysis) + WhisperX via Cloud Run GPU (timestamp alignment)
 - **Auth**: Firebase Authentication (Google Sign-In)
 - **Deployment**: Cloud Run (frontend), Firebase Functions (backend)
 - **CI/CD**: GitHub Actions (parallel frontend + functions deployment)

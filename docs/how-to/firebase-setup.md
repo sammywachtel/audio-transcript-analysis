@@ -45,17 +45,16 @@ The script is **idempotent** - safe to rerun if it fails partway through. It wil
 4. Enables all required APIs (including Generative Language API for Gemini)
 5. Configures IAM bindings (deployment SA, runtime SA)
 6. Initializes Firestore database
-7. Creates Cloud Tasks queue for transcription
-8. Creates Artifact Registry repository for Whisper GPU container images
-9. Grants IAM roles for Whisper Cloud Run GPU service (runtime SA → `roles/run.invoker`, Cloud Build SA → Artifact Registry + Cloud Run permissions)
-10. Detects Firebase Storage bucket (provides setup instructions if not found)
-11. Configures Storage bucket permissions for Eventarc triggers (if bucket exists)
-12. Configures CORS for audio file access (if bucket exists)
-13. Sets up Workload Identity Federation for GitHub Actions (if `github-repo` provided)
-14. Creates GitHub Actions service account with Cloud Run permissions
-15. Optionally creates service account key for Firebase CI/CD (interactive prompt)
-16. Optionally creates Gemini API key in-project and stores in Secret Manager (interactive prompt)
-17. Optionally registers Firebase Web App (interactive prompt)
+7. Creates Artifact Registry repository for Whisper GPU container images
+8. Grants IAM roles for Whisper Cloud Run GPU service (runtime SA → `roles/run.invoker`, Cloud Build SA → Artifact Registry + Cloud Run permissions)
+9. Detects Firebase Storage bucket (provides setup instructions if not found)
+10. Configures Storage bucket permissions for Eventarc triggers (if bucket exists)
+11. Configures CORS for audio file access (if bucket exists)
+12. Sets up Workload Identity Federation for GitHub Actions (if `github-repo` provided)
+13. Creates GitHub Actions service account with Cloud Run permissions
+14. Optionally creates service account key for Firebase CI/CD (interactive prompt)
+15. Optionally creates Gemini API key in-project and stores in Secret Manager (interactive prompt)
+16. Optionally registers Firebase Web App (interactive prompt)
 
 > **Note:** The Gemini API key is created within your GCP project (not via AI Studio), keeping all resources in one place. Service agent IAM bindings are configured automatically by the GitHub Actions workflow on each deployment.
 
@@ -320,9 +319,9 @@ npx firebase functions:secrets:set GEMINI_API_KEY
 npx firebase functions:secrets:set WHISPER_SERVICE_URL
 ```
 
-### Speaker Diarization (Cloud Run WhisperX)
+### Speaker Diarization and Timestamps
 
-Speaker diarization (detecting multiple speakers) is handled by the Cloud Run WhisperX service. The pyannote diarization models are bundled directly in the container — no separate Hugging Face token is required.
+Speaker diarization (detecting who spoke when) is handled by **Gemini 3 Flash** as part of its single-pass analysis of the full audio. WhisperX running on Cloud Run GPU provides precise word-level timestamps only — it does not perform diarization.
 
 The Cloud Run service URL is configured via the `WHISPER_SERVICE_URL` secret (see table above).
 
@@ -542,7 +541,7 @@ npx firebase deploy --only firestore:rules --project=$PROJECT_ID
 
 ### WhisperX fails with "'NoneType' object has no attribute 'eval'"
 
-**Cause**: The Cloud Run WhisperX container's pyannote models failed to load. This typically indicates a container build issue.
+**Cause**: The Cloud Run WhisperX container's models failed to load. This typically indicates a container build issue.
 
 **Solution**: Verify the Cloud Run WhisperX service is healthy:
 ```bash

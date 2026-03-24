@@ -1,0 +1,65 @@
+# Cloud Build configuration for WhisperX GPU service
+#
+# Builds the WhisperX Docker image with pre-cached models. The pyannote
+# models are gated on HuggingFace, so HF_TOKEN is pulled from Secret
+# Manager and injected via BuildKit secret mount — never baked into layers.
+#
+# Usage (from repo root):
+#   gcloud builds submit \
+#     --config=cloud-run-whisper/cloudbuild.yaml \
+#     --substitutions="_IMAGE_NAME=us-east4-docker.pkg.dev/PROJECT/whisper-gpu/whisperx,_TAG=latest" \
+#     cloud-run-whisper/
+#
+# The build takes 20-40 minutes (downloading ~20GB of models). Grab coffee.
+
+steps:
+  # Build with BuildKit so the Dockerfile's --mount=type=secret works.
+  # HF_TOKEN arrives via Cloud Build's secretEnv, gets written to a file,
+  # and Docker mounts it at /run/secrets/hf_token during the RUN step.
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "$$HF_TOKEN" > /workspace/.hf_token
+        DOCKER_BUILDKIT=1 docker build \
+          --platform linux/amd64 \
+          --secret id=hf_token,src=/workspace/.hf_token \
+          --build-arg WHISPER_MODEL="${_WHISPER_MODEL}" \
+          --build-arg WHISPER_HF_REPO="${_WHISPER_HF_REPO}" \
+          --build-arg CACHE_PYANNOTE="${_CACHE_PYANNOTE}" \
+          -t "${_IMAGE_NAME}:${_TAG}" \
+          -t "${_IMAGE_NAME}:latest" \
+          .
+        rm -f /workspace/.hf_token
+    secretEnv: ['HF_TOKEN']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${_IMAGE_NAME}:${_TAG}']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${_IMAGE_NAME}:latest']
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/HF_TOKEN/versions/latest
+      env: 'HF_TOKEN'
+
+substitutions:
+  _IMAGE_NAME: ''
+  _TAG: 'latest'
+  _WHISPER_MODEL: 'large-v3-turbo'
+  _WHISPER_HF_REPO: 'deepdml/faster-whisper-large-v3-turbo-ct2'
+  _CACHE_PYANNOTE: 'true'
+
+images:
+  - '${_IMAGE_NAME}:${_TAG}'
+  - '${_IMAGE_NAME}:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  # Model downloads are CPU-bound (decompression), so give it some muscle
+  machineType: 'E2_HIGHCPU_32'
+
+# 45 minutes — the image is ~20GB with all the model weights
+timeout: '2700s'

@@ -10,6 +10,9 @@
  *
  * Deterministic rollout: Same conversation always gets same treatment
  * using consistent hashing. No per-run drift.
+ *
+ * Note: Hybrid pipeline routing was removed in the hard cutover (scope -06).
+ * All uploads now go through the hybrid pipeline directly.
  */
 
 import { getFirestore, Timestamp, FieldValue } from 'firebase-admin/firestore';
@@ -65,7 +68,7 @@ const FEATURE_FLAGS_DOC_PATH = 'system/feature_flags';
 const DEFAULT_FLAGS: FeatureFlags = {
   enableContextAwareReconciliation: false,
   contextAwareRolloutPercentage: 0,
-  forceEmbeddingOnlyConversationIds: []
+  forceEmbeddingOnlyConversationIds: [],
 };
 
 // ============================================================================
@@ -97,7 +100,7 @@ export async function getFeatureFlags(): Promise<FeatureFlags> {
       forceEmbeddingOnlyConversationIds: data.forceEmbeddingOnlyConversationIds ?? DEFAULT_FLAGS.forceEmbeddingOnlyConversationIds,
       disabledAt: data.disabledAt,
       disableReason: data.disableReason,
-      updatedAt: data.updatedAt
+      updatedAt: data.updatedAt,
     };
   } catch (error) {
     console.error('[FeatureFlags] Failed to read feature flags:', error);
@@ -264,6 +267,11 @@ export async function enableContextAwareReconciliation(
 
   console.log('[FeatureFlags] Context-aware reconciliation enabled');
 }
+
+// Hybrid pipeline routing (shouldUseHybridPipeline, dispatchByFeatureFlags,
+// getPipelineRoutingDecision, PipelineChoice, PipelineRoutingDecision) removed
+// in hard cutover — scope gemini_hybrid_06_hard_cutover. All uploads now go
+// through the hybrid pipeline directly via transcribe.ts → processWithNewPipeline.
 
 /**
  * Update rollout percentage.

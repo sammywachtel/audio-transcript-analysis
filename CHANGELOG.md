@@ -8,19 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Gemini 3 Flash Pipeline PoC** - Validated new transcription architecture: Gemini 3 Flash (WAV) for speaker diarization + naming + content analysis, WhisperX for precise timestamps, HARDY alignment to bridge them
-  - Tested across 5 conversations (9.9-44.8 min, 2-8 speakers) — all successful
-  - Gemini identifies 5-6 speakers by name, uses only 6-31% of output token budget
-  - WAV audio format critical for detecting all speakers (MP3 misses quiet voices)
-  - HARDY alignment achieves median 1.1s timestamp precision vs ground truth
-  - PoC scripts: `poc-combined-pipeline.ts`, `poc-gemini3-fullpass.ts`, `poc-chirp3-benchmark.ts`, etc.
-- **Chirp-3 Speech-to-Text benchmark** - Evaluated Google Cloud Speech-to-Text v2 (Chirp-3) for diarization — found insufficient (3/6 speakers), transcription quality good
-- **GCP setup for Speech-to-Text** - Added `speech.googleapis.com` API and `roles/speech.client` IAM bindings to `gcp-setup.sh`
-- **Implementation requirements** - Created/updated 6 implementation scopes (`gemini_hybrid_01` through `_06`) based on PoC findings, archived `_07` (pyannote upgrade — no longer relevant)
+- **Gemini 3 Flash + WhisperX Hybrid Pipeline** — Production implementation of the new transcription architecture that replaces the legacy chunked pipeline
+  - `newPipeline.ts`: Orchestrates Gemini 3 Flash (diarization + content) → WhisperX (timestamps) → HARDY alignment, with 10-minute chunked alignment and quality gates
+  - `gemini3Pipeline.ts`: Gemini 3 Flash API client — sends full audio as WAV for single-pass diarization, speakers, terms, topics, and persons extraction
+  - `audioUtils.ts`: Audio duration detection via ffprobe with streaming fallback
+  - `firestoreUtils.ts`: Firestore document sanitization (undefined removal, NaN handling)
+  - Quality gates reject zero-speaker/zero-segment output; chunk-level failures fall back to scaled Gemini timestamps
+- **WhisperX Cloud Run GPU deployment** — Cloud Build config (`cloudbuild.yaml`) and GitHub Actions workflow (`deploy-whisper.yml`) for automated WhisperX service deployment
+- **New test suites** — Tests for the hybrid pipeline (`gemini3Pipeline.test.ts`, `newPipeline.test.ts`), feature flags (`featureFlags.test.ts`)
+- **`AGENTS.md`** — AI agent development guidance for the project
+- **`.beads/` metadata system** — Project metadata tracking with git hooks
 
 ### Changed
-- **Pipeline re-architecture plan** - Updated `02_implementation_gemini_hybrid.md` from Chirp-3-primary to Gemini-3-Flash-primary architecture based on PoC results
-- **PoC findings documented** - Created `03_poc_findings.md` with comprehensive results across all test phases
+- **Pipeline routing** — `transcribe.ts` now routes to the hybrid pipeline via `newPipeline.ts` instead of the legacy `processTranscription.ts`
+- **Alignment module** — `alignment.ts` updated for hybrid pipeline integration (WhisperX timestamps-only mode)
+- **Feature flags** — New flags for pipeline control and gradual rollout
+- **Progress tracking** — `progressManager.ts` updated with hybrid pipeline processing steps
+- **WhisperX Cloud Run service** — Updated Dockerfile, FastAPI app, predict module, and requirements for timestamps-only mode
+- **Documentation overhaul** — Architecture, data model, design decisions, deployment, cost tracking, Firebase setup, and local development docs all updated for the hybrid pipeline
+- **GCP setup** — `gcp-setup.sh` updated with new API enablement and IAM bindings
+- **Migration explanation** — New `docs/explanation/gemini3-migration.md` documents why and how the pipeline was redesigned
+
+### Removed
+- **Legacy chunked pipeline** — `processTranscription.ts`, `chunking.ts`, `chunkBounds.ts`, `chunkContext.ts`, `chunkMerge.ts`, `retry.ts` — no longer needed with single-pass Gemini diarization
+- **Speaker reconciliation system** — `speakerReconciliation.ts`, `speakerReconciliationEmbeddings.ts`, `speakerNameResolution.ts`, `speakerQuality.ts` — cross-chunk speaker matching is eliminated entirely
+- **Legacy tests** — `chunkMerge.test.ts`, `leaderChunk.test.ts`, `speakerNameResolution.test.ts`, `speakerQuality.test.ts`, `speakerQualityIntegration.test.ts`, `speakerReconciliation.test.ts`
+- **Obsolete documentation** — `chunk-merge.md`, `speaker-reconciliation-rollout.md`, `reconciliation-queries.md`
 
 ## [2.14.0] - 2026-03-06
 

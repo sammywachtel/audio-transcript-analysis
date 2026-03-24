@@ -61,21 +61,23 @@ check_secrets() {
     echo ""
     echo "Checking Secret Manager secrets..."
 
-    if gcloud secrets describe REPLICATE_API_TOKEN &>/dev/null; then
-        echo -e "  ${GREEN}✓${NC} REPLICATE_API_TOKEN exists in Secret Manager"
+    # Active secrets for the hybrid Gemini + WhisperX architecture
+    REQUIRED_SECRETS=(
+        "GEMINI_API_KEY"
+        "WHISPER_SERVICE_URL"
+        "HF_TOKEN"
+    )
 
-        # Check if service account has access
-        SA_EMAIL=$(gcloud config get-value account 2>/dev/null)
-        if gcloud secrets get-iam-policy REPLICATE_API_TOKEN --format="value(bindings.members)" 2>/dev/null | grep -q "secretAccessor"; then
-            echo -e "  ${GREEN}✓${NC} Secret has secretAccessor role binding"
+    for secret_name in "${REQUIRED_SECRETS[@]}"; do
+        if gcloud secrets describe "$secret_name" &>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} $secret_name exists in Secret Manager"
         else
-            echo -e "  ${YELLOW}⚠${NC}  Warning: No secretAccessor role binding found"
+            echo -e "  ${RED}✗${NC} $secret_name not found in Secret Manager"
+            echo "      Set it with: npx firebase functions:secrets:set $secret_name"
+            ALL_CHECKS_PASSED=false
         fi
-    else
-        echo -e "  ${RED}✗${NC} REPLICATE_API_TOKEN not found in Secret Manager"
-        echo "      Create it with: echo -n 'your-token' | gcloud secrets create REPLICATE_API_TOKEN --data-file=-"
-        ALL_CHECKS_PASSED=false
-    fi
+    done
+
 }
 
 check_service_account() {
@@ -123,34 +125,41 @@ check_workload_identity() {
         fi
     else
         echo -e "  ${YELLOW}⚠${NC}  No Workload Identity Pool found"
-        echo "      See docs/CLOUD_RUN_DEPLOYMENT.md for setup instructions"
+        echo "      See docs/how-to/deploy.md for setup instructions"
     fi
 }
 
 check_github_workflow() {
     echo ""
-    echo "Checking GitHub Actions workflow..."
+    echo "Checking GitHub Actions workflows..."
 
+    # Frontend deployment workflow
     if [ -f ".github/workflows/deploy.yml" ]; then
         echo -e "  ${GREEN}✓${NC} deploy.yml exists"
 
-        # Check for both jobs
         if grep -q "deploy-frontend:" ".github/workflows/deploy.yml"; then
             echo -e "  ${GREEN}✓${NC} Frontend deployment job configured"
         else
-            echo -e "  ${RED}✗${NC} Frontend deployment job not found"
-            ALL_CHECKS_PASSED=false
-        fi
-
-        if grep -q "deploy-alignment-service:" ".github/workflows/deploy.yml"; then
-            echo -e "  ${GREEN}✓${NC} Alignment service deployment job configured"
-        else
-            echo -e "  ${RED}✗${NC} Alignment service deployment job not found"
+            echo -e "  ${RED}✗${NC} Frontend deployment job not found in deploy.yml"
             ALL_CHECKS_PASSED=false
         fi
     else
         echo -e "  ${RED}✗${NC} .github/workflows/deploy.yml not found"
         ALL_CHECKS_PASSED=false
+    fi
+
+    # WhisperX GPU service deployment workflow (separate file)
+    if [ -f ".github/workflows/deploy-whisper.yml" ]; then
+        echo -e "  ${GREEN}✓${NC} deploy-whisper.yml exists"
+
+        if grep -q "deploy-whisper:" ".github/workflows/deploy-whisper.yml"; then
+            echo -e "  ${GREEN}✓${NC} Whisper deployment job configured"
+        else
+            echo -e "  ${RED}✗${NC} Whisper deployment job not found in deploy-whisper.yml"
+            ALL_CHECKS_PASSED=false
+        fi
+    else
+        echo -e "  ${YELLOW}⚠${NC}  deploy-whisper.yml not found (needed for WhisperX GPU deploys)"
     fi
 }
 
@@ -165,10 +174,10 @@ check_cloudbuild_configs() {
         ALL_CHECKS_PASSED=false
     fi
 
-    if [ -f "alignment-service/cloudbuild.yaml" ]; then
-        echo -e "  ${GREEN}✓${NC} alignment-service/cloudbuild.yaml exists"
+    if [ -f "cloud-run-whisper/cloudbuild.yaml" ]; then
+        echo -e "  ${GREEN}✓${NC} cloud-run-whisper/cloudbuild.yaml exists (WhisperX GPU)"
     else
-        echo -e "  ${RED}✗${NC} alignment-service/cloudbuild.yaml not found"
+        echo -e "  ${RED}✗${NC} cloud-run-whisper/cloudbuild.yaml not found"
         ALL_CHECKS_PASSED=false
     fi
 }
@@ -190,12 +199,12 @@ if [ "$ALL_CHECKS_PASSED" = true ]; then
     echo -e "${GREEN}✓ All critical checks passed!${NC}"
     echo ""
     echo "Next steps:"
-    echo "1. Configure GitHub secrets (see docs/CLOUD_RUN_DEPLOYMENT.md)"
+    echo "1. Configure GitHub secrets (see docs/how-to/deploy.md)"
     echo "2. Push to main branch to trigger deployment"
     echo "3. Monitor deployment in GitHub Actions tab"
 else
     echo -e "${RED}✗ Some checks failed${NC}"
     echo ""
-    echo "Review the errors above and see docs/CLOUD_RUN_DEPLOYMENT.md for setup instructions"
+    echo "Review the errors above and see docs/how-to/deploy.md for setup instructions"
     exit 1
 fi

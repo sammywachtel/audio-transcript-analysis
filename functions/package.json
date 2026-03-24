@@ -22,12 +22,11 @@
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@ffprobe-installer/ffprobe": "^2.1.2",
     "@google-cloud/bigquery": "^7.9.1",
-    "@google-cloud/tasks": "^6.2.1",
     "@google-cloud/vertexai": "^1.10.0",
+    "@google/genai": "^1.46.0",
     "firebase-admin": "^12.7.0",
     "firebase-functions": "^7.0.2",
     "fuzzball": "^2.0.0",
-    "jsonrepair": "^3.11.2",
     "undici": "^6.21.0"
   },
   "devDependencies": {

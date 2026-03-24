@@ -8,11 +8,11 @@ This document explains the CI/CD pipeline for deploying the application, includi
 ```
 Push to main
     ├─► Build & Deploy Frontend (~2.5-3 min)     [Cloud Run]
-    └─► Build & Deploy Functions (~2-3 min)       [Firebase]
-                                                      │
-                                                      ├─ transcribeAudio
-                                                      ├─ processTranscription
-                                                      └─ alignment.ts (HARDY)
+    ├─► Build & Deploy Functions (~2-3 min)       [Firebase]
+    │                                                 │
+    │                                                 ├─ transcribeAudio
+    │                                                 └─ alignment.ts (HARDY)
+    └─► Build & Deploy WhisperX (on change)      [Cloud Run GPU]
 Total: ~3-4 minutes (parallel execution)
 ```
 
@@ -38,18 +38,18 @@ The alignment functionality is now integrated directly into Firebase Cloud Funct
 
 ### Secrets Strategy
 
-**Decision:** Store `REPLICATE_API_TOKEN` as a Firebase secret (same as `GEMINI_API_KEY`).
+**Decision:** Store `WHISPER_SERVICE_URL` and `HF_TOKEN` alongside `GEMINI_API_KEY` using Firebase/GCP Secret Manager.
 
 **Implementation:**
 ```bash
-# Set the secret (one-time)
-npx firebase functions:secrets:set REPLICATE_API_TOKEN
+# Set the WhisperX Cloud Run service URL (one-time, auto-detected by gcp-setup.sh)
+npx firebase functions:secrets:set WHISPER_SERVICE_URL
 
-# Verify it exists
-npx firebase functions:secrets:access REPLICATE_API_TOKEN
+# HF_TOKEN is stored in GCP Secret Manager for Cloud Build (WhisperX image builds)
+# Created automatically by gcp-setup.sh Step 10e
 ```
 
-Firebase automatically grants the runtime service account access to secrets during deployment.
+Firebase automatically grants the runtime service account access to secrets during deployment. The `WHISPER_SERVICE_URL` is read by `alignment.ts` to call the Cloud Run GPU WhisperX service via IAM-authenticated HTTP.
 
 ## Pipeline Configuration
 
@@ -80,35 +80,34 @@ The alignment module requires these npm packages in `functions/package.json`:
 ```json
 {
   "dependencies": {
-    "fuzzball": "^2.0.0",
-    "replicate": "^0.29.0"
+    "fuzzball": "^2.0.0"
   }
 }
 ```
 
-- `fuzzball` - JavaScript port of Python's fuzzywuzzy for fuzzy string matching
-- `replicate` - Replicate SDK for WhisperX API calls
+- `fuzzball` - JavaScript port of Python's fuzzywuzzy for fuzzy string matching (used by HARDY alignment)
+
+WhisperX is called via IAM-authenticated HTTP to the Cloud Run GPU service — no SDK dependency needed.
 
 ## One-Time Setup
 
 ### Prerequisites
 
 1. Firebase project configured (see [Firebase Setup](../how-to/firebase-setup.md))
-2. Replicate account with API token
+2. WhisperX Cloud Run GPU service deployed (see [Deployment Guide](../how-to/deploy.md#whisper-gpu-service-cloud-run))
+3. HuggingFace token for gated WhisperX models
 
-### Set REPLICATE_API_TOKEN Secret
+### Set WHISPER_SERVICE_URL Secret
 
 ```bash
-# Get your token from https://replicate.com/account/api-tokens
+# After deploying the WhisperX Cloud Run service, store its URL:
+npx firebase functions:secrets:set WHISPER_SERVICE_URL
+# Value: https://whisperx-service-XXXXX-XX.a.run.app
 
-# Set the secret
-npx firebase functions:secrets:set REPLICATE_API_TOKEN
-
-# Verify
-npx firebase functions:secrets:access REPLICATE_API_TOKEN
+# The gcp-setup.sh script auto-detects and sets this automatically.
 ```
 
-This must be done before the first deployment with alignment functionality.
+This must be done before the first deployment with alignment functionality. The Cloud Functions service account must also have `roles/run.invoker` on the WhisperX service for IAM authentication.
 
 ## Performance Metrics
 
@@ -125,12 +124,12 @@ This must be done before the first deployment with alignment functionality.
 
 **Error:**
 ```
-Error: Failed to load function definition from source: Failed to lookup secret value for "REPLICATE_API_TOKEN"
+Error: Failed to load function definition from source: Failed to lookup secret value for "WHISPER_SERVICE_URL"
 ```
 
 **Solution:**
 ```bash
-npx firebase functions:secrets:set REPLICATE_API_TOKEN
+npx firebase functions:secrets:set WHISPER_SERVICE_URL
 ```
 
 ### Functions Deploy Fails: TypeScript Errors
@@ -159,7 +158,8 @@ npx firebase functions:log --only transcribeAudio
 ```
 
 **Common issues:**
-- Replicate API token expired or invalid
+- WhisperX Cloud Run service not deployed or URL misconfigured
+- Cloud Functions service account missing `roles/run.invoker` on WhisperX service
 - Audio file too long (>30 min may timeout)
 - Audio format not supported
 
@@ -187,43 +187,19 @@ cd functions && du -sh node_modules/
 | Compute | ~30-60s per file | Free tier: 400K GB-s/month |
 | Memory | 256MB-1GB | Included in compute |
 
-### Replicate (WhisperX)
+### WhisperX (Cloud Run GPU)
 
-- ~$0.02 per 10-minute audio file
-- Billed by Replicate, not Google Cloud
+- NVIDIA L4 GPU on Cloud Run, billed per second of compute
+- ~$0.0023/sec compute time
+- Scales to zero when idle (no cost between uploads)
 
 ### Total Per Upload
 
 | Component | Cost |
 |-----------|------|
 | Firebase Function | ~$0.001 |
-| Replicate WhisperX | ~$0.02 |
+| WhisperX Cloud Run GPU | ~$0.02 |
 | **Total** | ~$0.021 |
-
-## Migration Notes
-
-### From Separate Alignment Service
-
-If you previously deployed the standalone alignment-service on Cloud Run:
-
-1. **Keep it running** until you verify the new Functions-based alignment works
-2. **Test the new deployment** with a few audio uploads
-3. **Verify alignment quality** (check `alignmentStatus: 'aligned'` in Firestore)
-4. **Delete the old service**:
-   ```bash
-   gcloud run services delete alignment-service --region=us-west1
-   ```
-5. **Remove old secret** (optional):
-   ```bash
-   # Only if you were using Secret Manager for the old service
-   gcloud secrets delete REPLICATE_API_TOKEN
-   ```
-
-### Environment Variables to Remove
-
-If you have these in GitHub Secrets, they're no longer needed:
-- `ALIGNMENT_SERVICE_URL` - Functions call alignment directly
-- `VITE_ALIGNMENT_SERVICE_URL` - Frontend doesn't call alignment
 
 ## Related Documentation
 

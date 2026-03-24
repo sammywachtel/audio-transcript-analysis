@@ -60,3 +60,8 @@ CLAUDE.md
 /.local_docs/
 # Forked Replicate model (local copy, deployed separately)
 cog-whisper-diarization/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

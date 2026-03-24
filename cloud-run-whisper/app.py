@@ -71,7 +71,7 @@ async def lifespan(app: FastAPI):
     from predict import WhisperDiarizer
 
     _predictor = WhisperDiarizer()
-    _predictor.setup()
+    _predictor.setup_whisper()
 
     gpu_info = _get_gpu_utilization()
     if gpu_info:
@@ -122,6 +122,13 @@ class PredictRequest(BaseModel):
         ),
         ge=0.0,
         le=5.0,
+    )
+    timestamps_only: bool = Field(
+        False,
+        description=(
+            "Skip diarization and embeddings, return timestamps"
+            " only with generic speaker labels."
+        ),
     )
 
 
@@ -175,6 +182,7 @@ async def predict(request: PredictRequest, raw_request: Request):
             "num_speakers": request.num_speakers,
             "language": request.language,
             "group_segments_gap": request.group_segments_gap,
+            "timestamps_only": request.timestamps_only,
         },
     )
 
@@ -205,6 +213,7 @@ async def predict(request: PredictRequest, raw_request: Request):
                     language=request.language,
                     prompt=request.prompt,
                     group_segments_gap=request.group_segments_gap,
+                    timestamps_only=request.timestamps_only,
                 ),
             ),
             timeout=HARD_TIMEOUT_S,

@@ -2,10 +2,12 @@
 
 ## Problem Statement
 
-Gemini 2.5 Flash produces excellent transcription content (text, speakers, terms, topics) but unreliable timestamps:
-- **Observed drift**: 8-10 seconds off in a 2-minute file
+Gemini 3 Flash produces excellent transcription content (text, speakers, terms, topics) but unreliable timestamps:
+- **Observed drift**: Timestamps drift ~1.6x relative to actual audio time
 - **Pattern**: Linear drift that worsens over time (systematic, not random)
 - **Root cause**: Gemini likely estimates timestamps from text features rather than actual audio analysis
+
+This problem existed with Gemini 2.5 Flash and persists with Gemini 3 Flash. The solution is the same: use WhisperX for precise timestamps and HARDY alignment to bridge the two.
 
 ## Expert Analysis Summary
 
@@ -26,7 +28,7 @@ A multi-expert analysis was conducted with perspectives from:
 ## Phased Implementation Plan
 
 ### Phase 1: Client-Side Drift Compensation (Immediate)
-**Status**: ✅ Complete
+**Status**: Complete
 **Effort**: 1-2 hours
 **Accuracy Target**: <2 seconds (down from 8-10)
 
@@ -45,69 +47,58 @@ function compensateDrift(segments, audioDuration) {
 
 This leverages the existing drift detection code but applies it more aggressively.
 
-### Phase 2: WhisperX via Replicate API (Queue-Driven Architecture)
-**Status**: ✅ Complete (Queue-Driven)
+### Phase 2: WhisperX via Cloud Run GPU (Current Architecture)
+**Status**: Complete
 **Effort**: 14-21 hours initial, then consolidated into Functions
 **Accuracy Target**: <1 second (~50ms with forced alignment)
 
-Architecture (Current - Two-Stage Queue-Driven):
+Architecture (Current - Direct Pipeline):
 ```
-┌─────────────────┐     ┌──────────────────────────────────────────────┐
-│  React Client   │────▶│            Firebase Cloud Functions          │
-│                 │     │                                              │
-│                 │     │  ┌────────────────┐    ┌──────────────────┐  │
-│                 │     │  │ transcribeAudio│    │Cloud Tasks Queue │  │
-│                 │     │  │ (Storage Trig) │───▶│transcription-    │  │
-│                 │     │  │  - validate    │    │queue             │  │
-│                 │     │  │  - enqueue     │    └────────┬─────────┘  │
-│                 │◀────│  │  - 540s max    │             │            │
-│                 │     │  └────────────────┘             ▼            │
-│                 │     │                       ┌──────────────────┐   │
-│                 │     │                       │processTranscript │   │
-│                 │     │                       │ (HTTP Function)  │   │
-│                 │     │                       │  - 3600s timeout │   │
-│                 │     │                       │  - 1GiB memory   │   │
-│                 │     │                       │  - invoker:private│  │
-│                 │     │                       └────────┬─────────┘   │
-│                 │     └────────────────────────────────┼─────────────┘
-│                 │                                      │
-└─────────────────┘                                      ▼
-                                                ┌─────────────────┐
-                                                │  Replicate API  │
-                                                │  (WhisperX)     │
-                                                └─────────────────┘
+┌─────────────────┐     ┌──────────────────────────────────────────────────┐
+│  React Client   │────▶│            Firebase Cloud Functions              │
+│                 │     │                                                  │
+│                 │     │  ┌────────────────┐                              │
+│                 │     │  │ transcribeAudio│                              │
+│                 │     │  │ (Storage Trig) │                              │
+│                 │     │  │  - 540s max    │                              │
+│                 │◀────│  └───────┬────────┘                              │
+│                 │     │          │                                       │
+│                 │     │          ▼                                       │
+│                 │     │  ┌──────────────────────┐                        │
+│                 │     │  │processWithNewPipeline │                       │
+│                 │     │  │  - Gemini 3 Flash    │                        │
+│                 │     │  │  - Split MP3 chunks  │                        │
+│                 │     │  │  - Per-chunk HARDY   │                        │
+│                 │     │  │  - Assemble + save   │                        │
+│                 │     │  └───────┬──────────────┘                        │
+│                 │     └──────────┼────────────────────────────────────────┘
+│                 │                │
+└─────────────────┘                ▼
+                           ┌──────────────────┐
+                           │  Cloud Run GPU   │
+                           │  (WhisperX)      │
+                           │  IAM-auth HTTP   │
+                           └──────────────────┘
 ```
 
-**Why Queue-Driven Architecture?**
-- Storage triggers have a hard 540s (9 minute) timeout limit—even 2nd gen Cloud Functions can't exceed this for event-driven triggers
-- Large audio files (46MB+) can take 10-15+ minutes to process with Gemini + WhisperX
-- HTTP functions can have up to 3600s (60 minute) timeout
-- Cloud Tasks provides automatic retry with exponential backoff on failures
-
-**Two-Stage Flow:**
-1. **transcribeAudio (Storage Trigger)**: Lightweight validation and enqueue (~5 seconds)
-   - Validates the uploaded audio file
-   - Updates Firestore status to `queued` with `queuedAt` timestamp
-   - Enqueues a Cloud Task with conversation payload
-   - Completes within 540s timeout limit
-
-2. **processTranscription (HTTP Function)**: Heavy processing (up to 60 minutes)
-   - Invoked by Cloud Tasks with OIDC authentication
-   - Updates status to `processing` with `processingStartedAt`
-   - Downloads audio, calls Gemini + WhisperX, saves results
-   - Returns 200 on success (no retry) or 500 on failure (triggers retry)
+**Why Cloud Run GPU instead of a third-party API?**
+- IAM-authenticated HTTP (no API keys to manage)
+- NVIDIA L4 GPU for fast inference
+- Scale-to-zero when idle (no cost when not processing)
+- Full control over model version and configuration
+- Max 3 instances as cost safeguard
 
 **Why WhisperX over OpenAI Whisper API?**
 - OpenAI's API has word-level timestamps but they can still drift on long-form audio
 - WhisperX adds **forced alignment** with wav2vec2 phoneme model
 - Forced alignment matches audio waveforms to phonemes = ~50ms accuracy
 
-**Implementation (Consolidated):**
+**Implementation:**
 1. **functions/src/alignment.ts** - HARDY algorithm in TypeScript
    - Complete port from Python `aligner.py`
    - Uses `fuzzball` npm package for fuzzy matching
-   - Uses `replicate` npm package for WhisperX API calls
-   - Called directly by `transcribe.ts` (no HTTP overhead)
+   - Calls Cloud Run WhisperX service via IAM-authenticated HTTP
+   - Called by `newPipeline.ts` for each 10-minute audio chunk
 
 2. **Server-side processing:**
    - Alignment runs automatically during transcription
@@ -120,11 +111,11 @@ Architecture (Current - Two-Stage Queue-Driven):
    - **Level 3**: Regional Alignment (DTW-style matching per region)
    - **Level 4**: Validation & Fallback (quality gates, graceful degradation)
 
-**Cost:** ~$0.02 per 10-minute audio file
-**Latency:** Eliminated HTTP overhead by running in-process
+**Cost:** ~$0.02 per 10-minute audio file (Cloud Run GPU compute)
+**Accuracy:** Median 1.1s error vs ground truth (down from ~1.6x drift)
 
 ### Phase 3: Manual Offset Control (Optional)
-**Status**: ✅ Complete
+**Status**: Complete
 **Effort**: 4-8 hours
 
 Add UI slider for users to manually fine-tune sync if automated alignment isn't perfect.
@@ -143,72 +134,47 @@ Add UI slider for users to manually fine-tune sync if automated alignment isn't 
 |----------|---------------------|----------|----------|
 | Phase 1 (ratio scaling) | $0 | 2 hours | ~2 seconds |
 | AssemblyAI API | $0.65 | 8 hours | <0.5 seconds |
-| Self-hosted WhisperX | $0.0125 | 40 hours | <0.5 seconds |
-| Replicate Whisper | $0.03 | 4 hours | <0.5 seconds |
-
-## Decision
-
-**Proceed with Phase 1 immediately**, then evaluate if Phase 2 is needed based on user feedback.
-
-Rationale:
-- Phase 1 provides immediate improvement with zero infrastructure changes
-- Linear drift pattern suggests ratio scaling will be effective
-- Can measure improvement before investing in backend infrastructure
+| Cloud Run WhisperX | ~$0.12 | 14 hours | <0.5 seconds |
 
 ## Implementation Notes
 
 ### Phase 1 Changes Completed
 
 1. **Enhanced drift correction** in `useAudioPlayer.ts`:
-   - ✅ Lowered threshold from >5% AND >2s to just >1s difference
-   - ✅ Added drift metrics tracking: `driftRatio`, `driftCorrectionApplied`, `driftMs`
-   - ✅ Improved rounding with `Math.round()` instead of `Math.floor()`
-   - ✅ Added detailed console logging for debugging
+   - Lowered threshold from >5% AND >2s to just >1s difference
+   - Added drift metrics tracking: `driftRatio`, `driftCorrectionApplied`, `driftMs`
+   - Improved rounding with `Math.round()` instead of `Math.floor()`
+   - Added detailed console logging for debugging
 
 2. **Added sync indicator** in UI (`ViewerHeader.tsx`):
-   - ✅ "⚡ Sync Adjusted" badge appears when drift correction was applied
-   - ✅ Tooltip shows percentage adjustment and milliseconds of drift detected
-   - ✅ "Auto-Syncing" spinner shows during correction
-
-3. **Testing** (remaining):
-   - Short (2 min), medium (10 min), long (1+ hour)
-   - Different audio qualities and speaker counts
+   - "Sync Adjusted" badge appears when drift correction was applied
+   - Tooltip shows percentage adjustment and milliseconds of drift detected
+   - "Auto-Syncing" spinner shows during correction
 
 ### Success Metrics
 
 - Timestamp accuracy within 2 seconds (Phase 1)
 - Timestamp accuracy within 1 second (Phase 2)
 - No user-reported sync issues
-- Processing time under 30 seconds for 2-hour files
 
-## Deployment Instructions (Consolidated Architecture)
+## Deployment Instructions (Current Architecture)
 
 ### Prerequisites
 1. Firebase project with Cloud Functions enabled
-2. Replicate account with API token
-
-### One-Time Setup: Set REPLICATE_API_TOKEN Secret
-
-```bash
-# Set the Replicate API token as a Firebase secret
-npx firebase functions:secrets:set REPLICATE_API_TOKEN
-# Enter your token when prompted (get from https://replicate.com/account/api-tokens)
-
-# Verify the secret was created
-npx firebase functions:secrets:access REPLICATE_API_TOKEN
-```
+2. WhisperX Cloud Run GPU service deployed (see [Deployment Guide](../how-to/deploy.md#whisper-gpu-service-cloud-run))
+3. `WHISPER_SERVICE_URL` secret set in Firebase
 
 ### Deployment (Automated via CI/CD)
 
-Alignment is now part of Firebase Functions and deploys automatically:
+Alignment is part of Firebase Functions and deploys automatically:
 
 1. **On merge to main**: GitHub Actions runs `deploy-firebase-functions` job
 2. **Job steps**:
-   - `npm ci` - Install dependencies (including `fuzzball`, `replicate`)
+   - `npm ci` - Install dependencies (including `fuzzball`)
    - `npm run build` - Compile TypeScript
    - `firebase deploy --only functions` - Deploy to Firebase
 
-No separate alignment service deployment needed.
+No separate alignment service deployment needed (WhisperX runs on Cloud Run independently).
 
 ### Manual Deployment
 
@@ -236,14 +202,13 @@ npx firebase functions:log --only transcribeAudio
 
 # Look for:
 # [Alignment] Preparing request...
-# [WhisperX] ✅ Transcription complete
-# [HARDY] ✅ Alignment complete, avg_confidence=X.XXX
+# [WhisperX] Transcription complete
+# [HARDY] Alignment complete, avg_confidence=X.XXX
 ```
 
 ## References
 
 - [WhisperX GitHub](https://github.com/m-bain/whisperX)
-- [Replicate WhisperX](https://replicate.com/victor-upmeet/whisperx)
 - [Montreal Forced Aligner](https://montreal-forced-aligner.readthedocs.io/)
 - [Gentle Forced Aligner](https://github.com/lowerquality/gentle)
 - [stable-ts (Stable Whisper)](https://github.com/jianfch/stable-ts)

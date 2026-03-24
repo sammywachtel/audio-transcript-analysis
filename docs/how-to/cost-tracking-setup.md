@@ -227,24 +227,25 @@ console.log('BigQuery actual:', actualFromQuery);
 console.log('Difference:', Math.abs(estimate - actualFromQuery));
 ```
 
-## Verify Replicate (WhisperX) Costs
+## Verify WhisperX (Cloud Run GPU) Costs
 
-Replicate doesn't export to BigQuery, so verify on their website:
+WhisperX runs on Cloud Run with an NVIDIA L4 GPU. Costs are included in your GCP billing export alongside other Cloud Run charges.
 
-1. Go to [replicate.com](https://replicate.com)
-2. Navigate to your account → **Billing**
-3. Find the prediction ID from your `_metrics` document:
-   ```json
-   {
-     "llmUsage": {
-       "whisperx": {
-         "predictionId": "abc123xyz",
-         "computeTimeSeconds": 21.3
-       }
-     }
-   }
+1. Query Cloud Run costs in BigQuery:
+   ```sql
+   SELECT
+     SUM(cost) AS whisperx_cost_usd,
+     DATE(usage_start_time) AS date
+   FROM `my-org-ops.billing_export.gcp_billing_export_v1_*`
+   WHERE
+     project.id = 'audio-transcript-analyzer-01'
+     AND service.description = 'Cloud Run'
+     AND resource.name LIKE '%whisperx%'
+     AND _TABLE_SUFFIX >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY))
+   GROUP BY date
+   ORDER BY date DESC;
    ```
-4. Compare `computeTimeSeconds × $0.0023/sec` to Replicate's charge
+2. Compare `computeTimeSeconds × $0.0023/sec` from your `_metrics` document to the actual Cloud Run charge
 
 ## Create Project-Specific Views (Optional)
 
@@ -282,7 +283,7 @@ Our application uses these rates (from [Vertex AI Pricing](https://cloud.google.
 - **Gemini 2.5 Flash**:
   - Input: $0.15 per 1M tokens (< 200K context)
   - Output: $0.60 per 1M tokens (no reasoning)
-- **WhisperX (Replicate)**:
+- **WhisperX (Cloud Run GPU)**:
   - Compute: $0.0023 per second (~$0.14/min)
 
 ### Manual Verification Example
