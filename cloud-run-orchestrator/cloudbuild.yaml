@@ -1,0 +1,13 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--no-cache'
+      - '-f'
+      - 'cloud-run-orchestrator/Dockerfile'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/orchestrator/orchestrator:latest'
+      - '.'
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/orchestrator/orchestrator:latest'
+timeout: 600s

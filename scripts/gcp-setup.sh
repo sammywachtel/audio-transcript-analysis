@@ -665,9 +665,12 @@ fi
 log_step "IAM grants for Whisper Cloud Run GPU service..."
 
 # Runtime SA needs roles/run.invoker so Cloud Functions can call the
-# Whisper Cloud Run service with IAM authentication
+# Whisper Cloud Run service and the transcription orchestrator with IAM auth
 if sa_exists "$RUNTIME_SA"; then
     add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/run.invoker" "$RUNTIME_SA → Cloud Run Invoker"
+    # Token Creator lets the orchestrator generate signed URLs for Storage downloads.
+    # The SDK's file.download() hangs on Cloud Run; signed URL + fetch is the workaround.
+    add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/iam.serviceAccountTokenCreator" "$RUNTIME_SA → Token Creator (signed URLs)"
 else
     log_info "Cloud Run Invoker binding - skipped (runtime SA not yet created)"
 fi

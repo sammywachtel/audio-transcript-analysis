@@ -771,38 +771,6 @@ interface ProcessingTimeline {
 ```
 
 
-### system
-
-System configuration documents (operator-managed, not user-facing).
-
-#### system/feature_flags
-
-Feature flags for operational controls. Read by Cloud Functions at trigger time.
-
-**Path**: `system/feature_flags`
-
-```typescript
-interface FeatureFlagsDoc {
-  // Context-aware reconciliation (speaker correction strategy)
-  enableContextAwareReconciliation: boolean;     // Kill switch
-  contextAwareRolloutPercentage: number;         // 0-100
-  forceEmbeddingOnlyConversationIds: string[];   // Override list
-
-  // Auto-disable metadata (set by alert handler)
-  disabledAt?: Timestamp;
-  disableReason?: string;
-  updatedAt?: Timestamp;
-}
-```
-
-**Deterministic routing**: Rollout uses SHA-256 hashing of the conversation ID to map to a 0-99 bucket. Same conversation always gets the same treatment.
-
-**Initialization**: Created by `scripts/init-feature-flags.js` during deployment. Existing values are never overwritten.
-
-**Security**: Only Cloud Functions read this document. Operators modify it via Firebase Console or Admin SDK.
-
-> **Note:** Legacy pipeline routing flags were removed in the hard cutover. All uploads now go through the Gemini 3 Flash hybrid pipeline directly. See [migration explainer](../explanation/gemini3-migration.md) for history.
-
 ## Firebase Storage Structure
 
 ```

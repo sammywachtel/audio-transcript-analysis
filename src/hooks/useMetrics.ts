@@ -23,18 +23,12 @@ import {
   getDateRange,
   getMetricById,
   getChatMetrics,
-  getFeatureFlagsState,
-  getReconciliationMetrics,
-  calculateReconciliationStats,
   GlobalStats,
   DailyStats,
   UserStats,
   ProcessingMetric,
   ChatMetric,
-  PricingConfig,
-  ReconciliationMetric,
-  ReconciliationStats,
-  FeatureFlagsState
+  PricingConfig
 } from '../services/metricsService';
 import { Timestamp } from 'firebase/firestore';
 
@@ -679,80 +673,4 @@ export function useReconciliationData(options: {
   }, [user, isAdmin, days, startDate, endDate, refetchTrigger]);
 
   return { metrics, pricingConfigs, loading, error, refetch };
-}
-
-// =============================================================================
-// Reconciliation Quality Metrics Hook (Admin - Quality Tab)
-// =============================================================================
-
-/**
- * Fetch reconciliation metrics and feature flags for Quality tab
- * Provides both raw metrics and aggregated stats
- */
-export function useReconciliationQuality(options: {
-  maxResults?: number;
-  strategy?: 'context-aware' | 'embedding-only';
-} = {}): {
-  metrics: ReconciliationMetric[];
-  stats: ReconciliationStats | null;
-  flagsState: FeatureFlagsState | null;
-  loading: boolean;
-  error: Error | null;
-  refetch: () => void;
-} {
-  const { isAdmin } = useAuth();
-  const [metrics, setMetrics] = useState<ReconciliationMetric[]>([]);
-  const [flagsState, setFlagsState] = useState<FeatureFlagsState | null>(null);
-  const [stats, setStats] = useState<ReconciliationStats | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
-  const [refetchTrigger, setRefetchTrigger] = useState(0);
-
-  const refetch = useCallback(() => {
-    setRefetchTrigger(prev => prev + 1);
-  }, []);
-
-  const { maxResults = 100, strategy } = options;
-
-  useEffect(() => {
-    if (!isAdmin) {
-      setMetrics([]);
-      setFlagsState(null);
-      setStats(null);
-      setLoading(false);
-      setError(new Error('Admin access required'));
-      return;
-    }
-
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-
-    // Fetch both reconciliation metrics and feature flags in parallel
-    Promise.all([
-      getReconciliationMetrics({ maxResults, strategy }),
-      getFeatureFlagsState()
-    ])
-      .then(([metricsData, flagsData]) => {
-        if (!cancelled) {
-          setMetrics(metricsData);
-          setFlagsState(flagsData);
-          setStats(calculateReconciliationStats(metricsData, flagsData));
-          setLoading(false);
-        }
-      })
-      .catch(err => {
-        if (!cancelled) {
-          console.error('[useReconciliationQuality] Failed to fetch:', err);
-          setError(err);
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isAdmin, maxResults, strategy, refetchTrigger]);
-
-  return { metrics, stats, flagsState, loading, error, refetch };
 }

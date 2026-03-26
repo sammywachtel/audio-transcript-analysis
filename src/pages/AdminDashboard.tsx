@@ -16,7 +16,7 @@
 
 import React, { useState } from 'react';
 import { Button } from '../components/Button';
-import { ArrowLeft, Activity, Users, Loader2, DollarSign, TrendingUp, Clock, FileAudio, RefreshCw, Zap, MessageSquare, Shield, AlertTriangle, CheckCircle } from 'lucide-react';
+import { ArrowLeft, Activity, Users, Loader2, DollarSign, TrendingUp, Clock, FileAudio, RefreshCw, Zap, MessageSquare } from 'lucide-react';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 
 // Hooks
@@ -26,8 +26,7 @@ import {
   useAllUserStatsSummaries,
   useRecentMetrics,
   useUserStats,
-  useChatMetrics,
-  useReconciliationQuality
+  useChatMetrics
 } from '../hooks/useMetrics';
 
 // Components
@@ -48,7 +47,7 @@ interface AdminDashboardProps {
   onJobClick?: (metricId: string) => void;
 }
 
-type TabId = 'overview' | 'users' | 'jobs' | 'chat' | 'quality' | 'pricing';
+type TabId = 'overview' | 'users' | 'jobs' | 'chat' | 'pricing';
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, onJobClick }) => {
   const [activeTab, setActiveTab] = useState<TabId>('overview');
@@ -67,7 +66,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, onJobCli
     { id: 'users', label: 'Users', icon: <Users size={16} /> },
     { id: 'jobs', label: 'Jobs', icon: <Clock size={16} /> },
     { id: 'chat', label: 'Chat', icon: <MessageSquare size={16} /> },
-    { id: 'quality', label: 'Quality', icon: <Shield size={16} /> },
     { id: 'pricing', label: 'Pricing', icon: <DollarSign size={16} /> },
   ];
 
@@ -132,10 +130,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, onJobCli
 
         {activeTab === 'chat' && (
           <ChatTab chatMetrics={chatMetrics} />
-        )}
-
-        {activeTab === 'quality' && (
-          <QualityTab />
         )}
 
         {activeTab === 'pricing' && (
@@ -900,249 +894,6 @@ const ChatTab: React.FC<ChatTabProps> = ({ chatMetrics }) => {
       </div>
 
       <ChatMetricsTable metrics={metrics} showPricingWarning={hasMissingPricing} />
-    </div>
-  );
-};
-
-// =============================================================================
-// Quality Tab (Speaker Reconciliation)
-// =============================================================================
-
-const QualityTab: React.FC = () => {
-  const { metrics, stats, flagsState, loading, error, refetch } = useReconciliationQuality({ maxResults: 100 });
-
-  if (error) {
-    return (
-      <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700">
-        Failed to load quality metrics: {error.message}
-      </div>
-    );
-  }
-
-  if (loading) {
-    return (
-      <div className="animate-pulse space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="bg-white rounded-xl border border-slate-200 p-4 h-24" />
-          ))}
-        </div>
-        <div className="bg-white rounded-xl border border-slate-200 p-6 h-64" />
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      {/* Header with controls */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold text-slate-900">Speaker Reconciliation Quality</h2>
-          <p className="text-sm text-slate-500 mt-1">
-            Context-aware reconciliation rollout status and metrics
-          </p>
-        </div>
-        <Button variant="ghost" size="sm" onClick={refetch} className="gap-2">
-          <RefreshCw size={14} />
-          Refresh
-        </Button>
-      </div>
-
-      {/* Feature Flag Status Banner */}
-      {flagsState && (
-        <div className={`rounded-xl border p-4 ${
-          flagsState.disabledAt
-            ? 'bg-red-50 border-red-200'
-            : flagsState.enableContextAwareReconciliation
-            ? 'bg-green-50 border-green-200'
-            : 'bg-slate-50 border-slate-200'
-        }`}>
-          <div className="flex items-center gap-3">
-            {flagsState.disabledAt ? (
-              <AlertTriangle className="text-red-600" size={20} />
-            ) : flagsState.enableContextAwareReconciliation ? (
-              <CheckCircle className="text-green-600" size={20} />
-            ) : (
-              <Shield className="text-slate-400" size={20} />
-            )}
-            <div className="flex-1">
-              <p className={`font-medium ${
-                flagsState.disabledAt
-                  ? 'text-red-900'
-                  : flagsState.enableContextAwareReconciliation
-                  ? 'text-green-900'
-                  : 'text-slate-700'
-              }`}>
-                {flagsState.disabledAt
-                  ? 'Context-Aware Reconciliation Auto-Disabled'
-                  : flagsState.enableContextAwareReconciliation
-                  ? `Context-Aware Reconciliation Active (${flagsState.contextAwareRolloutPercentage}% rollout)`
-                  : 'Context-Aware Reconciliation Disabled'}
-              </p>
-              {flagsState.disableReason && (
-                <p className="text-sm text-red-700 mt-1">{flagsState.disableReason}</p>
-              )}
-              {flagsState.disabledAt && (
-                <p className="text-xs text-red-600 mt-1">
-                  Disabled at: {flagsState.disabledAt.toDate?.().toLocaleString() || 'Unknown'}
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Stats Cards */}
-      {stats && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard
-            label="Total Reconciliations"
-            value={stats.totalCount.toString()}
-            sublabel={`${stats.contextAwareCount} context-aware, ${stats.embeddingOnlyCount} embedding-only`}
-            icon={<Activity size={20} className="text-blue-500" />}
-          />
-          <StatCard
-            label="Average Confidence"
-            value={`${(stats.avgConfidence * 100).toFixed(1)}%`}
-            sublabel={`${stats.lowConfidenceCount} below 65% threshold`}
-            icon={stats.lowConfidenceCount > 0
-              ? <AlertTriangle size={20} className="text-amber-500" />
-              : <CheckCircle size={20} className="text-green-500" />}
-          />
-          <StatCard
-            label="Warnings"
-            value={stats.warningCount.toString()}
-            sublabel={`${((stats.warningCount / Math.max(stats.totalCount, 1)) * 100).toFixed(1)}% of reconciliations`}
-            icon={stats.warningCount > 0
-              ? <AlertTriangle size={20} className="text-amber-500" />
-              : <CheckCircle size={20} className="text-green-500" />}
-          />
-          <StatCard
-            label="Average Latency"
-            value={formatDuration(stats.avgLatencyMs)}
-            sublabel={`P95: ${formatDuration(stats.p95LatencyMs)}`}
-            icon={<Clock size={20} className="text-slate-400" />}
-          />
-        </div>
-      )}
-
-      {/* Strategy Breakdown */}
-      {stats && stats.totalCount > 0 && (
-        <div className="bg-white rounded-xl border border-slate-200 p-6">
-          <h3 className="text-sm font-medium text-slate-700 mb-4">Strategy Distribution</h3>
-          <div className="flex gap-4">
-            <div className="flex-1">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-slate-600">Context-Aware</span>
-                <span className="text-sm font-medium text-slate-900">
-                  {stats.contextAwareCount} ({((stats.contextAwareCount / stats.totalCount) * 100).toFixed(1)}%)
-                </span>
-              </div>
-              <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-blue-500 transition-all duration-300"
-                  style={{ width: `${(stats.contextAwareCount / stats.totalCount) * 100}%` }}
-                />
-              </div>
-            </div>
-            <div className="flex-1">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-slate-600">Embedding-Only</span>
-                <span className="text-sm font-medium text-slate-900">
-                  {stats.embeddingOnlyCount} ({((stats.embeddingOnlyCount / stats.totalCount) * 100).toFixed(1)}%)
-                </span>
-              </div>
-              <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-slate-400 transition-all duration-300"
-                  style={{ width: `${(stats.embeddingOnlyCount / stats.totalCount) * 100}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Recent Reconciliations Table */}
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-200">
-          <h3 className="text-sm font-medium text-slate-700">Recent Reconciliations</h3>
-        </div>
-        {metrics.length === 0 ? (
-          <div className="p-12 text-center text-slate-500">
-            No reconciliation metrics recorded yet
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-slate-50">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                    Time
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                    Conversation
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                    Strategy
-                  </th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-500 uppercase tracking-wider">
-                    Clusters
-                  </th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-500 uppercase tracking-wider">
-                    Confidence
-                  </th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-500 uppercase tracking-wider">
-                    Latency
-                  </th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-500 uppercase tracking-wider">
-                    Status
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {metrics.map((metric) => (
-                  <tr key={metric.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-3 text-slate-600 whitespace-nowrap">
-                      {metric.timestamp?.toDate?.()?.toLocaleString() || '--'}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-slate-900">
-                      {metric.conversationId.slice(0, 12)}...
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                        metric.strategy === 'context-aware'
-                          ? 'bg-blue-100 text-blue-800'
-                          : 'bg-slate-100 text-slate-700'
-                      }`}>
-                        {metric.strategy}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right text-slate-600">
-                      {metric.clusterCount}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <span className={metric.confidence < 0.65 ? 'text-amber-600 font-medium' : 'text-slate-600'}>
-                        {(metric.confidence * 100).toFixed(1)}%
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right text-slate-600">
-                      {formatDuration(metric.latencyMs)}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      {metric.hasWarning ? (
-                        <AlertTriangle size={16} className="text-amber-500 inline" />
-                      ) : (
-                        <CheckCircle size={16} className="text-green-500 inline" />
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
     </div>
   );
 };

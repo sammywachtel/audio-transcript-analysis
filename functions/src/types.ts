@@ -7,7 +7,7 @@
 
 /**
  * Processing mode for chunked audio uploads.
- * - 'parallel': Chunks process independently (fast, speaker reconciliation at merge)
+ * - 'parallel': Chunks process independently (fast)
  * - 'sequential': Chunks wait for predecessor context (legacy, consistent speaker IDs)
  */
 export type ProcessingMode = 'parallel' | 'sequential';
@@ -119,15 +119,10 @@ export interface Conversation {
   lastSyncedAt?: string;
   // Processing mode for chunked uploads (defaults to 'parallel' for new uploads)
   processingMode?: ProcessingMode;
-  // Speaker reconciliation metadata (parallel mode only)
-  reconciliationConfidence?: number;
-  reconciliationDetails?: ReconciliationDetails;
-  // Extended reconciliation observability (parallel mode)
-  reconciliationMetadata?: ReconciliationMetadata;
-  // Fallback metadata (when parallel → sequential fallback occurred)
-  fallbackMetadata?: FallbackMetadata;
   // Quality warnings (non-blocking issues surfaced to user)
   warnings?: TranscriptWarning[];
+  // Error details — string for legacy, StructuredError for orchestrator-managed failures
+  processingError?: string | StructuredError;
   // Pipeline provenance — which pipeline produced this data
   processingPipeline?: 'legacy' | 'gemini_hybrid';
   pipelineVersion?: string;
@@ -334,32 +329,6 @@ export interface ChunkPipelineResult {
   segmentCount: number;
   /** Last timestamp processed in this chunk (ms) */
   lastTimestampMs: number;
-  /** Speaker signatures for parallel mode reconciliation (keyed by speakerId) */
-  chunkSpeakerSignatures?: SpeakerSignature[];
-}
-
-/**
- * Speaker signature for parallel mode reconciliation.
- * Captures fingerprint data for each speaker so downstream merge
- * can correlate speakers across independently-processed chunks.
- */
-export interface SpeakerSignature {
-  /** Speaker ID within this chunk (e.g., "SPEAKER_00") */
-  speakerId: string;
-  /** Chunk index where this speaker appeared */
-  chunkIndex: number;
-  /** Inferred display name (if speaker introduced themselves) */
-  inferredName?: string;
-  /** Topic IDs where this speaker spoke (subset for fingerprinting) */
-  topicSignatures: string[];
-  /** Term keys this speaker used (subset for fingerprinting) */
-  termSignatures: string[];
-  /** Number of segments this speaker contributed */
-  segmentCount: number;
-  /** Sample quote from this speaker (first ~100 chars) */
-  sampleQuote: string;
-  /** Composite quality score for this speaker (0-1, optional) */
-  quality?: number;
 }
 
 /**
@@ -405,31 +374,6 @@ export interface ChunkArtifact {
   /** Context emitted for the next chunk */
   emittedContext: ChunkContext;
 
-  /**
-   * Speaker signatures for parallel mode reconciliation.
-   * Present when processingMode is 'parallel'; used by merge to correlate speakers.
-   */
-  chunkSpeakerSignatures?: SpeakerSignature[];
-
-  /**
-   * Voice embeddings for embedding-based speaker reconciliation.
-   * 256-dimensional vectors from pyannote/embedding model.
-   * Present when WhisperX fork with embedding extraction is used.
-   * Format: { "SPEAKER_00": [0.123, -0.456, ...], "SPEAKER_01": [...] }
-   */
-  speakerEmbeddings?: {
-    [speakerId: string]: number[];
-  };
-
-  /**
-   * Quality scores for each speaker in this chunk.
-   * Used to weight embedding similarity and filter low-quality segments.
-   * Present when quality assessment is enabled.
-   */
-  speakerQuality?: {
-    [speakerId: string]: SpeakerQuality;
-  };
-
   // Metadata
   /** When this chunk artifact was created */
   createdAt: string;
@@ -437,158 +381,69 @@ export interface ChunkArtifact {
   storagePath: string;
 }
 
+// =============================================================================
+// Cloud Run Orchestrator Contract Types
+// =============================================================================
+// Mirrored from cloud-run-orchestrator/src/contracts.ts — keep in sync.
+
 /**
- * Quality assessment for a speaker's audio in a chunk.
- * Used to weight embedding similarity and filter unreliable segments.
+ * Machine-readable failure codes for the orchestrator pipeline.
+ * Used in both the HTTP response and Firestore processingError field.
  */
-export interface SpeakerQuality {
-  /** SNR proxy from WhisperX word confidence scores [0-1] */
-  snrProxy: number;
-  /** Speech clarity from timing consistency and filler detection [0-1] */
-  clarityScore: number;
-  /** True if segment has excessive speaker overlap */
-  isContaminated: boolean;
-  /** Composite quality score [0-1]: 0.4*snr + 0.3*clarity + 0.3*(1-overlap) */
-  compositeScore: number;
+export type OrchestratorErrorCode =
+  | 'GEMINI_TIMEOUT'
+  | 'GEMINI_PARSE_FAILED'
+  | 'WHISPERX_UNAVAILABLE'
+  | 'WHISPERX_TIMEOUT'
+  | 'ALIGNMENT_FAILED'
+  | 'QUALITY_GATE_FAILED'
+  | 'STORAGE_ERROR'
+  | 'ABORTED'
+  | 'UNKNOWN';
+
+/** Pipeline stage where a failure occurred. */
+export type PipelineStage =
+  | 'download'
+  | 'gemini_analysis'
+  | 'whisperx_timestamps'
+  | 'hardy_alignment'
+  | 'quality_gates'
+  | 'firestore_write';
+
+/** Structured error payload — replaces freeform processingError strings. */
+export interface StructuredError {
+  code: OrchestratorErrorCode;
+  stage: PipelineStage;
+  message: string;
+  retryable: boolean;
 }
 
-// =============================================================================
-// Speaker Reconciliation Types (Parallel Mode)
-// =============================================================================
-
-/**
- * Overall confidence score and per-cluster breakdown for speaker reconciliation.
- * Used to assess the quality of speaker matching across chunks.
- */
-export interface ReconciliationConfidence {
-  /** Overall confidence (0-1, minimum of cluster confidences) */
-  overall: number;
-  /** Per-cluster confidence scores */
-  clusters: Array<{
-    canonicalId: string;
-    confidence: number;
-  }>;
+/** POST /transcribe request body sent by the dispatcher. */
+export interface TranscribeRequest {
+  conversationId: string;
+  audioStoragePath: string;
+  userId: string;
 }
 
-/**
- * Detailed match evidence for speaker reconciliation.
- * Provides transparency into how speakers were matched.
- */
-export interface ReconciliationDetails {
-  /** Number of clusters (canonical speakers) created */
-  clusterCount: number;
-  /** Total number of original speakers across all chunks */
-  originalSpeakerCount: number;
-  /** Per-cluster match evidence */
-  clusters: Array<{
-    canonicalId: string;
-    originalIds: string[];
-    confidence: number;
-    displayName: string;
-    matchEvidence: {
-      nameMatches: number;
-      topicOverlap: number;
-      termOverlap: number;
-    };
-  }>;
+/** Immediate 202 acknowledgement from POST /transcribe. */
+export interface TranscribeAccepted {
+  status: 'accepted';
+  conversationId: string;
 }
 
-// =============================================================================
-// Fallback & Observability Types
-// =============================================================================
-
-/**
- * Reasons why fallback to sequential reprocessing was triggered.
- */
-export type FallbackReason = 'low_speaker_confidence' | 'reconciliation_error';
-
-/**
- * Metadata stored when parallel processing falls back to sequential.
- * Provides audit trail and debugging information for operators.
- */
-export interface FallbackMetadata {
-  /** When fallback was triggered (ISO timestamp) */
-  triggeredAt: string;
-  /** The confidence score that triggered fallback */
-  parallelConfidence: number;
-  /** Reference to archived parallel chunks (subcollection path) */
-  archiveId: string;
-  /** Reason for fallback */
-  reason: FallbackReason;
-  /** How long the parallel attempt took (ms) */
-  parallelDurationMs?: number;
-  /** How long the sequential reprocessing took (ms) - populated after completion */
-  sequentialDurationMs?: number;
-  /** Confidence threshold that was configured at the time */
-  configuredThreshold: number;
+/** POST /transcribe outcome (logged by orchestrator, not returned to dispatcher). */
+export interface TranscribeResponse {
+  status: 'accepted' | 'complete' | 'failed';
+  conversationId?: string;
+  segments?: number;
+  speakers?: number;
+  durationMs?: number;
+  error?: StructuredError;
 }
 
-/**
- * Extended reconciliation metadata for observability.
- * Stored on conversation records for post-mortem analysis.
- */
-export interface ReconciliationMetadata {
-  /** Which matching signals were used (e.g., ['name', 'topic', 'term']) */
-  signalsUsed: string[];
-  /** Whether fallback to sequential was triggered */
-  fallbackTriggered: boolean;
-  /** Per-speaker confidence scores for matched clusters */
-  speakerMatchConfidences: Array<{
-    canonicalId: string;
-    confidence: number;
-  }>;
-  /** Processing duration for reconciliation phase (ms) */
-  reconciliationDurationMs?: number;
-  /** Singleton ratio: singleton clusters / total clusters (embedding reconciliation) */
-  singletonRatio?: number;
-  /** Number of singleton clusters (embedding reconciliation) */
-  singletonCount?: number;
-  /** Estimated unique speakers (heuristic from chunk artifacts) */
-  estimatedUniqueSpeakers?: number;
-  /** Whether adaptive relaxation was triggered to reduce over-fragmentation */
-  relaxationTriggered?: boolean;
-  /** Final edge threshold after relaxation (if triggered) */
-  finalEdgeThreshold?: number;
-  /** Number of relaxation iterations performed */
-  relaxationIterations?: number;
-  /** Number of cross-chunk same-name pairs that received a similarity boost */
-  nameBoostCount?: number;
-}
-
-// =============================================================================
-// Speaker Name Resolution Types (Context-Aware Reconciliation)
-// =============================================================================
-
-/**
- * Evidence for a name assignment to a canonical speaker.
- */
-export interface NameEvidence {
-  /** The candidate name */
-  name: string;
-  /** Evidence type that found this name */
-  evidenceType: 'self_introduction' | 'direct_address_confirmed' | 'direct_address_unconfirmed' | 'gemini_guess';
-  /** Weight of this evidence (1.0, 0.8, 0.5, or 0.3) */
-  weight: number;
-  /** Which segment ID this evidence came from */
-  segmentId: string;
-  /** The matched text that yielded this name */
-  matchedText: string;
-}
-
-/**
- * Name resolution result for a canonical speaker.
- */
-export interface NameResolutionResult {
-  /** The canonical speaker ID */
-  canonicalId: string;
-  /** The resolved display name (either a name or role label) */
-  resolvedName: string;
-  /** Confidence level: 'high' if weight >= 0.8, 'medium' if >= 0.5, 'low' if < 0.5 */
-  confidence: 'high' | 'medium' | 'low';
-  /** All evidence collected for this speaker */
-  evidence: NameEvidence[];
-  /** Total weight of best candidate name */
-  totalWeight: number;
-  /** Whether a name was actually assigned (vs role label preserved) */
-  nameAssigned: boolean;
+/** GET /health response from the orchestrator. */
+export interface HealthResponse {
+  status: 'ok';
+  version: string;
+  uptime: number;
 }

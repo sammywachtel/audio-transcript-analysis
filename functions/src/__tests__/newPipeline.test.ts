@@ -959,3 +959,149 @@ describe('newPipeline', () => {
   // All uploads now go directly through processWithNewPipeline.
   // Legacy fallback tests are no longer applicable.
 });
+
+// =============================================================================
+// Dispatcher ↔ Orchestrator Contract Tests
+// =============================================================================
+
+describe('dispatcher/orchestrator contract', () => {
+  // These tests verify the typed shapes that flow across the Cloud Function →
+  // Cloud Run boundary. If someone changes the contract types without updating
+  // both sides, these tests catch the drift.
+
+  describe('TranscribeRequest shape', () => {
+    it('requires conversationId, audioStoragePath, userId', () => {
+      // Type-level test — if this compiles, the contract is intact.
+      // Also verifiable at runtime for defense-in-depth.
+      const request: import('../types').TranscribeRequest = {
+        conversationId: 'conv-123',
+        audioStoragePath: 'audio/uid/conv-123.mp3',
+        userId: 'uid-abc',
+      };
+
+      expect(request.conversationId).toBe('conv-123');
+      expect(request.audioStoragePath).toBe('audio/uid/conv-123.mp3');
+      expect(request.userId).toBe('uid-abc');
+    });
+  });
+
+  describe('TranscribeAccepted shape', () => {
+    it('represents the immediate 202 acknowledgement', () => {
+      const accepted: import('../types').TranscribeAccepted = {
+        status: 'accepted',
+        conversationId: 'conv-123',
+      };
+
+      expect(accepted.status).toBe('accepted');
+      expect(accepted.conversationId).toBe('conv-123');
+    });
+  });
+
+  describe('TranscribeResponse shape', () => {
+    it('represents a successful pipeline result', () => {
+      const response: import('../types').TranscribeResponse = {
+        status: 'complete',
+        segments: 42,
+        speakers: 3,
+        durationMs: 2700000,
+      };
+
+      expect(response.status).toBe('complete');
+      expect(response.segments).toBe(42);
+    });
+
+    it('represents a failed pipeline result with structured error', () => {
+      const response: import('../types').TranscribeResponse = {
+        status: 'failed',
+        error: {
+          code: 'GEMINI_TIMEOUT',
+          stage: 'gemini_analysis',
+          message: 'Gemini API timed out after 300s',
+          retryable: true,
+        },
+      };
+
+      expect(response.status).toBe('failed');
+      expect(response.error?.code).toBe('GEMINI_TIMEOUT');
+      expect(response.error?.retryable).toBe(true);
+    });
+
+    it('includes accepted as a valid status for the union type', () => {
+      // The response type is a union: the orchestrator logs the final outcome
+      // but returns 'accepted' immediately to the dispatcher.
+      const accepted: import('../types').TranscribeResponse = {
+        status: 'accepted',
+        conversationId: 'conv-123',
+      };
+
+      expect(accepted.status).toBe('accepted');
+    });
+  });
+
+  describe('StructuredError shape', () => {
+    it('covers all expected error codes', () => {
+      const codes: import('../types').OrchestratorErrorCode[] = [
+        'GEMINI_TIMEOUT',
+        'GEMINI_PARSE_FAILED',
+        'WHISPERX_UNAVAILABLE',
+        'WHISPERX_TIMEOUT',
+        'ALIGNMENT_FAILED',
+        'QUALITY_GATE_FAILED',
+        'STORAGE_ERROR',
+        'ABORTED',
+        'UNKNOWN',
+      ];
+
+      // All codes should be valid strings
+      expect(codes).toHaveLength(9);
+      codes.forEach(code => expect(typeof code).toBe('string'));
+    });
+
+    it('covers all expected pipeline stages', () => {
+      const stages: import('../types').PipelineStage[] = [
+        'download',
+        'gemini_analysis',
+        'whisperx_timestamps',
+        'hardy_alignment',
+        'quality_gates',
+        'firestore_write',
+      ];
+
+      expect(stages).toHaveLength(6);
+      stages.forEach(stage => expect(typeof stage).toBe('string'));
+    });
+
+    it('has retryable flag for automated retry decisions', () => {
+      const retryableError: import('../types').StructuredError = {
+        code: 'GEMINI_TIMEOUT',
+        stage: 'gemini_analysis',
+        message: 'timeout',
+        retryable: true,
+      };
+
+      const nonRetryableError: import('../types').StructuredError = {
+        code: 'ABORTED',
+        stage: 'download',
+        message: 'user aborted',
+        retryable: false,
+      };
+
+      expect(retryableError.retryable).toBe(true);
+      expect(nonRetryableError.retryable).toBe(false);
+    });
+  });
+
+  describe('HealthResponse shape', () => {
+    it('includes version and uptime for deploy verification', () => {
+      const health: import('../types').HealthResponse = {
+        status: 'ok',
+        version: 'abc1234 (main)',
+        uptime: 3600,
+      };
+
+      expect(health.status).toBe('ok');
+      expect(health.version).toContain('abc1234');
+      expect(health.uptime).toBeGreaterThan(0);
+    });
+  });
+});
