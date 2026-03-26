@@ -1,0 +1,30 @@
+{
+  "name": "cloud-run-orchestrator",
+  "description": "Cloud Run transcription orchestrator — runs the Gemini hybrid pipeline with generous timeout",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "prebuild": "node scripts/generate-version.js && bash scripts/copy-functions-modules.sh",
+    "build": "tsc && tsc-alias",
+    "start": "node lib/server.js",
+    "dev": "npx ts-node src/server.ts"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@google/genai": "^1.46.0",
+    "express": "^4.21.0",
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^7.0.2",
+    "fuzzball": "^2.0.0",
+    "google-auth-library": "^9.14.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.17.12",
+    "tsc-alias": "^1.8.16",
+    "typescript": "^5.7.2"
+  }
+}

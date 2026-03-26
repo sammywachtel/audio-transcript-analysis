@@ -20,6 +20,7 @@ import { getStorage } from 'firebase-admin/storage';
 import { log } from './logger';
 import { Speaker, Segment, Term, TermOccurrence, Topic, Person } from './types';
 import { sanitizeForFirestore } from './firestoreUtils';
+import { GoogleGenAI, createPartFromUri } from '@google/genai';
 
 const execFileAsync = promisify(execFile);
 
@@ -150,8 +151,17 @@ const PROCESSING_POLL_INTERVAL_MS = 2000;
 // =============================================================================
 
 async function getFfmpegPath(): Promise<string> {
-  const ffmpegInstaller = await import('@ffmpeg-installer/ffmpeg');
-  return ffmpegInstaller.default.path;
+  // Prefer system ffmpeg (installed via apt in the Cloud Run Dockerfile).
+  // Fall back to the npm-bundled binary for Cloud Functions where system
+  // ffmpeg isn't available.
+  try {
+    const { execFileSync } = await import('child_process');
+    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
+    return 'ffmpeg';
+  } catch {
+    const ffmpegInstaller = await import('@ffmpeg-installer/ffmpeg');
+    return ffmpegInstaller.default.path;
+  }
 }
 
 // =============================================================================
@@ -165,10 +175,16 @@ async function downloadAudioFromStorage(
   const ctx = { conversationId, stage: 'gemini3-download' };
   log.info(`Downloading audio from Storage: ${storagePath}`, ctx);
 
-  const bucket = getStorage().bucket();
+  // On Cloud Run, storageBucket is set in initializeApp() from FIREBASE_STORAGE_BUCKET.
+  // On Cloud Functions, it's auto-discovered. Either way, bucket() works.
+  const bucketName = process.env.FIREBASE_STORAGE_BUCKET;
+  const bucket = bucketName ? getStorage().bucket(bucketName) : getStorage().bucket();
   const file = bucket.file(storagePath);
 
+  log.info(`Checking file exists (bucket: ${bucket.name})...`, ctx);
+  const t0 = Date.now();
   const [exists] = await file.exists();
+  log.info(`file.exists() returned ${exists} in ${Date.now() - t0}ms`, ctx);
   if (!exists) {
     throw new GeminiPipelineError(
       `Audio file not found in Storage: ${storagePath}`,
@@ -180,10 +196,36 @@ async function downloadAudioFromStorage(
   const ext = path.extname(storagePath) || '.mp3';
   const tmpPath = path.join(tmpDir, `gemini3-${Date.now()}${ext}`);
 
-  await file.download({ destination: tmpPath });
+  // Node's HTTP stack (fetch, gaxios, file.download) hangs on large downloads
+  // from Cloud Run containers. Shell out to curl which uses its own TLS/DNS stack.
+  // On Cloud Functions, fall back to the SDK since curl may not be available.
+  const downloadStart = Date.now();
+  const { GoogleAuth } = await import('google-auth-library');
+  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+  const accessToken = await auth.getAccessToken();
+  log.info(`Got access token in ${Date.now() - downloadStart}ms, downloading via curl...`, ctx);
+
+  const encodedPath = encodeURIComponent(storagePath);
+  const downloadUrl = `https://storage.googleapis.com/storage/v1/b/${bucket.name}/o/${encodedPath}?alt=media`;
+
+  try {
+    const { execFileSync } = await import('child_process');
+    execFileSync('curl', [
+      '-sS', '--fail',
+      '--http1.1',  // HTTP/2 streams reset prematurely on GCS large downloads
+      '-o', tmpPath,
+      '-H', `Authorization: Bearer ${accessToken}`,
+      downloadUrl,
+    ], { timeout: 120_000 });
+  } catch (curlErr) {
+    throw new GeminiPipelineError(
+      `Storage download failed: ${curlErr instanceof Error ? curlErr.message : String(curlErr)}`,
+      'DOWNLOAD_FAILED'
+    );
+  }
 
   const stats = fs.statSync(tmpPath);
-  log.info(`Downloaded ${(stats.size / 1024 / 1024).toFixed(1)}MB to temp file`, ctx);
+  log.info(`Downloaded ${(stats.size / 1024 / 1024).toFixed(1)}MB to temp file (${Date.now() - downloadStart}ms)`, ctx);
 
   return tmpPath;
 }
@@ -655,7 +697,7 @@ export async function processWithGemini3Flash(
   let mp3Path: string | null = null;
   let wavPath: string | null = null;
   let uploadedFileName: string | null = null;
-  let ai: InstanceType<typeof import('@google/genai').GoogleGenAI> | null = null;
+  let ai: GoogleGenAI | null = null;
 
   try {
     // Get API key from environment (Firebase Secrets)
@@ -666,9 +708,6 @@ export async function processWithGemini3Flash(
         'GENERATION_FAILED'
       );
     }
-
-    // Dynamic import to avoid CommonJS/ESM issues
-    const { GoogleGenAI, createPartFromUri } = await import('@google/genai');
 
     ai = new GoogleGenAI({
       apiKey,

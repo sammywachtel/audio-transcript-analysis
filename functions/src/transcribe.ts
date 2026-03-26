@@ -1,8 +1,10 @@
 /**
- * Transcription Cloud Function
+ * Transcription Cloud Function — Thin Dispatcher
  *
  * Triggered when an audio file is uploaded to Firebase Storage.
- * Routes to the Gemini hybrid pipeline (Gemini 3 Flash + WhisperX + HARDY).
+ * Validates the upload event, writes initial processing state, and
+ * dispatches an authenticated HTTP request to the Cloud Run orchestrator.
+ * Returns within 60s/256MiB — the orchestrator owns the actual pipeline.
  *
  * Also exports segment boundary repair and speaker correction utilities
  * used by the pipeline and tested independently.
@@ -11,13 +13,20 @@
 import { onObjectFinalized } from 'firebase-functions/v2/storage';
 import { defineSecret } from 'firebase-functions/params';
 import { FieldValue } from 'firebase-admin/firestore';
+import { GoogleAuth } from 'google-auth-library';
 import { db } from './index';
 import { recordUserEvent } from './userEvents';
-import { ProcessingMode } from './types';
+import { ProcessingMode, TranscribeRequest, StructuredError } from './types';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
+// Gemini/Whisper secrets are still declared so the emulator path works.
+// The Cloud Run orchestrator reads them from its own env vars.
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
 const whisperServiceUrl = defineSecret('WHISPER_SERVICE_URL');
+
+// Cloud Run orchestrator URL — set via firebase functions:config or env var.
+// In production, this is the authenticated Cloud Run service URL.
+const orchestratorUrl = defineSecret('ORCHESTRATOR_URL');
 
 /**
  * Custom error for abort requests - allows clean exit from processing
@@ -58,15 +67,89 @@ interface SpeakerCorrection {
   newSpeaker?: string;
 }
 
+// Lazy-initialized Google Auth client for IAM-authenticated dispatch
+let _authClient: GoogleAuth | null = null;
+function getAuthClient(): GoogleAuth {
+  if (!_authClient) {
+    _authClient = new GoogleAuth();
+  }
+  return _authClient;
+}
+
+/**
+ * Get an OIDC identity token for the Cloud Run orchestrator.
+ * The Cloud Function's service account must have `roles/run.invoker`
+ * on the target Cloud Run service.
+ */
+async function getIdTokenForOrchestrator(targetAudience: string): Promise<string> {
+  const auth = getAuthClient();
+  const client = await auth.getIdTokenClient(targetAudience);
+  const headers = await client.getRequestHeaders();
+  return headers.Authorization?.replace('Bearer ', '') || '';
+}
+
+/**
+ * Dispatch to the Cloud Run orchestrator and wait for acceptance.
+ *
+ * The orchestrator validates the request and returns 202 Accepted
+ * immediately — before the pipeline starts. This lets us confirm
+ * the request was received without blocking on a 10-minute pipeline.
+ * Results go straight to Firestore; we never see them here.
+ */
+async function dispatchToOrchestrator(
+  orchestratorBaseUrl: string,
+  payload: TranscribeRequest,
+): Promise<void> {
+  const url = `${orchestratorBaseUrl}/transcribe`;
+  const idToken = await getIdTokenForOrchestrator(orchestratorBaseUrl);
+
+  const DISPATCH_TIMEOUT_MS = 30_000; // 30s to get acceptance
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DISPATCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${idToken}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (response.status !== 202) {
+      // Read the error body for diagnostics (it's small — validation errors only)
+      const body = await response.text().catch(() => '(unreadable)');
+      throw new Error(
+        `Orchestrator returned ${response.status} (expected 202): ${body}`
+      );
+    }
+
+    console.log('[Dispatcher] Orchestrator accepted request:', {
+      conversationId: payload.conversationId,
+      status: response.status,
+    });
+  } catch (err) {
+    clearTimeout(timeout);
+    throw err;
+  }
+}
+
 /**
  * Triggered when an audio file is uploaded to storage.
  * Path pattern: audio/{userId}/{conversationId}.{extension}
+ *
+ * Production: thin dispatcher that validates and hands off to Cloud Run.
+ * Emulator: runs the pipeline inline (Cloud Run isn't available locally).
  */
 export const transcribeAudio = onObjectFinalized(
   {
-    secrets: [geminiApiKey, whisperServiceUrl],
-    memory: '2GiB',
-    timeoutSeconds: 540, // 9 minutes (max for event-driven triggers, even 2nd gen)
+    secrets: [geminiApiKey, whisperServiceUrl, orchestratorUrl],
+    memory: '256MiB',
+    timeoutSeconds: 60, // Thin dispatcher — 60s is plenty
     region: 'us-central1'
   },
   async (event) => {
@@ -104,28 +187,42 @@ export const transcribeAudio = onObjectFinalized(
     const conversationId = fileName.split('.')[0];
     const fileExtension = fileName.split('.').pop();
 
-    // Early exit for duplicate triggers - Cloud Storage fires "at least once"
-    // Check if we've already started processing before doing any work
-    // NOTE: Frontend sets status='processing' immediately on upload, so we can't use that alone.
-    // Instead, check for queuedAt (set by us) or terminal states.
-    const existingConversation = await db.collection('conversations').doc(conversationId).get();
-    const existingData = existingConversation.data();
-    const existingStatus = existingData?.status;
-    const alreadyQueued = existingData?.queuedAt !== undefined;  // We set this when enqueueing
-    const taskAlreadyEnqueued = existingData?.taskEnqueued === true;
+    // Atomic dedup: use a Firestore transaction to claim this conversation.
+    // Cloud Storage fires "at least once" — we routinely get 3 triggers for one upload.
+    // A simple read-then-write has a race window where all 3 pass the check.
+    // The transaction ensures exactly one trigger wins.
+    const conversationRef = db.collection('conversations').doc(conversationId);
+    // Returns the existing processingMode if we should proceed, or null if duplicate
+    const existingProcessingMode = await db.runTransaction(async (txn) => {
+      const doc = await txn.get(conversationRef);
+      const data = doc.data();
+      const existingStatus = data?.status;
+      const alreadyQueued = data?.queuedAt !== undefined;
+      const taskAlreadyEnqueued = data?.taskEnqueued === true;
 
-    // Skip if we've already enqueued this (queuedAt is set by us, not frontend)
-    // Or if it's in a terminal/active-processing state
-    if (alreadyQueued || taskAlreadyEnqueued ||
-        existingStatus === 'chunking' || existingStatus === 'merging' ||
-        existingStatus === 'complete' || existingStatus === 'failed' ||
-        existingStatus === 'aborted') {
-      console.log('[Transcribe] Skipping duplicate trigger - already processing:', {
-        conversationId,
-        existingStatus,
-        alreadyQueued,
-        taskAlreadyEnqueued
-      });
+      if (alreadyQueued || taskAlreadyEnqueued ||
+          existingStatus === 'chunking' || existingStatus === 'merging' ||
+          existingStatus === 'complete' || existingStatus === 'failed' ||
+          existingStatus === 'aborted') {
+        console.log('[Transcribe] Skipping duplicate trigger - already claimed:', {
+          conversationId,
+          existingStatus,
+          alreadyQueued,
+          taskAlreadyEnqueued,
+        });
+        return null;
+      }
+
+      // Claim it — set queuedAt so the other triggers see it and bail out
+      txn.set(conversationRef, {
+        queuedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      // Return stored mode for legacy upload compat
+      return data?.processingMode ?? undefined;
+    });
+
+    if (existingProcessingMode === null) {
       return;
     }
 
@@ -138,13 +235,11 @@ export const transcribeAudio = onObjectFinalized(
       : 'parallel';
 
     // Honor stored legacy mode when Storage metadata is absent
-    // Reuse the existingConversation we already fetched for dedup check
     if (!customMetadata?.processingMode) {
-      const storedMode = existingConversation.data()?.processingMode;
-      if (storedMode === 'sequential') {
-        processingMode = 'sequential';
-        console.log('[Transcribe] Using stored sequential mode from Firestore (no Storage metadata)');
-      }
+      if (existingProcessingMode === 'sequential') {
+          processingMode = 'sequential';
+          console.log('[Transcribe] Using stored sequential mode from Firestore (no Storage metadata)');
+        }
     }
 
     console.log('[Transcribe] Audio file uploaded - enqueuing for processing:', {
@@ -165,49 +260,51 @@ export const transcribeAudio = onObjectFinalized(
       await db.collection('conversations').doc(conversationId).set({
         conversationId,
         userId,
-        status: 'queued',
+        status: 'processing',
         processingMode,
         taskGeneration: 1,
         queuedAt: FieldValue.serverTimestamp(),
+        processingStartedAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp()
       }, { merge: true });
 
       const isEmulator = process.env.FUNCTIONS_EMULATOR === 'true';
 
       if (isEmulator) {
-        console.log('[Transcribe] 🧪 Emulator detected - processing directly');
+        // Emulator: run pipeline inline — Cloud Run isn't available locally.
+        console.log('[Dispatcher] Emulator detected — running pipeline directly');
 
-        await db.collection('conversations').doc(conversationId).update({
-          status: 'processing',
-          processingStartedAt: FieldValue.serverTimestamp(),
-          updatedAt: FieldValue.serverTimestamp()
-        });
-
-        // Direct hybrid pipeline — no feature-flag routing since hard cutover.
         const { processWithNewPipeline } = await import('./newPipeline');
         await processWithNewPipeline(conversationId, filePath, userId);
-        console.log('[Transcribe] ✅ Gemini hybrid pipeline complete:', { conversationId });
+        console.log('[Dispatcher] Pipeline complete:', { conversationId });
       } else {
-        // Production: Direct hybrid pipeline.
-        // Transition to 'processing' first so the frontend sees a familiar status
-        // before hybrid-specific progress steps kick in.
-        await db.collection('conversations').doc(conversationId).update({
-          status: 'processing',
-          processingStartedAt: FieldValue.serverTimestamp(),
-          updatedAt: FieldValue.serverTimestamp()
-        });
+        // Production: dispatch to Cloud Run orchestrator, fire-and-forget.
+        // The orchestrator writes all progress/results to Firestore directly.
+        const orchestratorBaseUrl = process.env.ORCHESTRATOR_URL;
+        if (!orchestratorBaseUrl) {
+          throw new Error('ORCHESTRATOR_URL secret not configured');
+        }
 
-        const { processWithNewPipeline } = await import('./newPipeline');
-        await processWithNewPipeline(conversationId, filePath, userId);
-        console.log('[Transcribe] ✅ Gemini hybrid pipeline complete:', { conversationId });
+        const payload: TranscribeRequest = {
+          conversationId,
+          audioStoragePath: filePath,
+          userId,
+        };
+
+        await dispatchToOrchestrator(orchestratorBaseUrl, payload);
+
+        console.log('[Dispatcher] Dispatched to Cloud Run orchestrator:', {
+          conversationId,
+          orchestratorBaseUrl: orchestratorBaseUrl.replace(/\/\/.*@/, '//***@'), // don't log tokens
+        });
       }
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      // Check if this was an abort request (not a real failure)
+      // Check if this was an abort request (emulator path only)
       if (error instanceof AbortRequestedError) {
-        console.log('[Transcribe] Processing was aborted by user:', { conversationId });
+        console.log('[Dispatcher] Processing was aborted by user:', { conversationId });
         await db.collection('conversations').doc(conversationId).update({
           status: 'aborted',
           processingError: 'Processing cancelled by user',
@@ -216,17 +313,24 @@ export const transcribeAudio = onObjectFinalized(
         return;
       }
 
-      console.error('[Transcribe] \u274c Failed to process transcription:', {
+      console.error('[Dispatcher] Failed to dispatch transcription:', {
         conversationId,
         errorType: error instanceof Error ? error.constructor.name : typeof error,
         errorMessage,
-        errorStack: error instanceof Error ? error.stack : undefined
       });
 
-      // Update Firestore to mark as failed
+      // Dispatch failure → write structured error so the frontend
+      // can show a meaningful message and the user can retry.
+      const structuredError: StructuredError = {
+        code: 'UNKNOWN',
+        stage: 'download',
+        message: `Dispatch failed: ${errorMessage}`,
+        retryable: true,
+      };
+
       await db.collection('conversations').doc(conversationId).update({
         status: 'failed',
-        processingError: `Failed to process transcription: ${errorMessage}`,
+        processingError: structuredError,
         updatedAt: FieldValue.serverTimestamp()
       });
 
@@ -236,7 +340,7 @@ export const transcribeAudio = onObjectFinalized(
         userId,
         conversationId,
         metadata: {
-          errorMessage: `Processing failed: ${errorMessage}`
+          errorMessage: `Dispatch failed: ${errorMessage}`
         }
       });
     }

@@ -15,23 +15,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `firestoreUtils.ts`: Firestore document sanitization (undefined removal, NaN handling)
   - Quality gates reject zero-speaker/zero-segment output; chunk-level failures fall back to scaled Gemini timestamps
 - **WhisperX Cloud Run GPU deployment** — Cloud Build config (`cloudbuild.yaml`) and GitHub Actions workflow (`deploy-whisper.yml`) for automated WhisperX service deployment
-- **New test suites** — Tests for the hybrid pipeline (`gemini3Pipeline.test.ts`, `newPipeline.test.ts`), feature flags (`featureFlags.test.ts`)
+- **Cloud Run Orchestrator** — New Express service for running the Gemini hybrid pipeline independently from Cloud Functions, with better resource isolation and independent scaling
+- **New test suites** — Tests for the hybrid pipeline (`gemini3Pipeline.test.ts`, `newPipeline.test.ts`)
 - **`AGENTS.md`** — AI agent development guidance for the project
 - **`.beads/` metadata system** — Project metadata tracking with git hooks
 
 ### Changed
-- **Pipeline routing** — `transcribe.ts` now routes to the hybrid pipeline via `newPipeline.ts` instead of the legacy `processTranscription.ts`
-- **Alignment module** — `alignment.ts` updated for hybrid pipeline integration (WhisperX timestamps-only mode)
-- **Feature flags** — New flags for pipeline control and gradual rollout
+- **Pipeline routing** — All uploads now route unconditionally through the hybrid pipeline (Gemini 3 Flash + WhisperX + HARDY alignment) — no more feature flag gating
+- **Alignment module** — `alignment.ts` hardened for production: expanded iteration limits (3k→50k) to fix timeouts on long segments, relaxed anchor thresholds for better matching, reverted fast scoring to keep PoC-validated 5-metric similarity
 - **Progress tracking** — `progressManager.ts` updated with hybrid pipeline processing steps
 - **WhisperX Cloud Run service** — Updated Dockerfile, FastAPI app, predict module, and requirements for timestamps-only mode
 - **Documentation overhaul** — Architecture, data model, design decisions, deployment, cost tracking, Firebase setup, and local development docs all updated for the hybrid pipeline
-- **GCP setup** — `gcp-setup.sh` updated with new API enablement and IAM bindings
+- **GCP setup** — `gcp-setup.sh` updated with new API enablement, IAM bindings, and Cloud Run orchestrator requirements
 - **Migration explanation** — New `docs/explanation/gemini3-migration.md` documents why and how the pipeline was redesigned
+
+### Fixed
+- **HARDY alignment timeout** — Processing failures on long conversations caused by alignment exhausting iteration budget mid-pipeline
+- **Gemini API key wiring** — Transcription jobs failing silently due to missing `GEMINI_API_KEY` secret configuration in Cloud Functions
 
 ### Removed
 - **Legacy chunked pipeline** — `processTranscription.ts`, `chunking.ts`, `chunkBounds.ts`, `chunkContext.ts`, `chunkMerge.ts`, `retry.ts` — no longer needed with single-pass Gemini diarization
 - **Speaker reconciliation system** — `speakerReconciliation.ts`, `speakerReconciliationEmbeddings.ts`, `speakerNameResolution.ts`, `speakerQuality.ts` — cross-chunk speaker matching is eliminated entirely
+- **Feature flag system** — `featureFlags.ts`, tests, and init script removed; the hybrid pipeline is now the only pipeline
+- **Reconciliation alert handler** — `handleReconciliationAlert.ts` superseded by the new pipeline's built-in handling
 - **Legacy tests** — `chunkMerge.test.ts`, `leaderChunk.test.ts`, `speakerNameResolution.test.ts`, `speakerQuality.test.ts`, `speakerQualityIntegration.test.ts`, `speakerReconciliation.test.ts`
 - **Obsolete documentation** — `chunk-merge.md`, `speaker-reconciliation-rollout.md`, `reconciliation-queries.md`
 

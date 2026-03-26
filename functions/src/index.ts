@@ -71,6 +71,3 @@ export { computeDailyStats, triggerStatsComputation } from './statsAggregator';
 
 // Export billing sync functions (query actual costs from BigQuery)
 export { syncBillingCosts, triggerBillingSync, diagnoseBillingLabels } from './billingSync';
-
-// Export reconciliation alert handler (auto-disable on high error rate)
-export { handleReconciliationAlert } from './handleReconciliationAlert';

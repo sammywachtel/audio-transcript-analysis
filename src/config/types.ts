@@ -80,10 +80,46 @@ export interface Segment {
 
 /**
  * Processing mode for chunked audio uploads.
- * - 'parallel': Chunks process independently (fast, speaker reconciliation at merge)
+ * - 'parallel': Chunks process independently (fast)
  * - 'sequential': Chunks wait for predecessor context (legacy, consistent speaker IDs)
  */
 export type ProcessingMode = 'parallel' | 'sequential';
+
+// =============================================================================
+// Structured Error Types (from Cloud Run orchestrator)
+// =============================================================================
+
+/** Machine-readable failure codes from the orchestrator pipeline. */
+export type OrchestratorErrorCode =
+  | 'GEMINI_TIMEOUT'
+  | 'GEMINI_PARSE_FAILED'
+  | 'WHISPERX_UNAVAILABLE'
+  | 'WHISPERX_TIMEOUT'
+  | 'ALIGNMENT_FAILED'
+  | 'QUALITY_GATE_FAILED'
+  | 'STORAGE_ERROR'
+  | 'ABORTED'
+  | 'UNKNOWN';
+
+/** Pipeline stage where a failure occurred. */
+export type PipelineStage =
+  | 'download'
+  | 'gemini_analysis'
+  | 'whisperx_timestamps'
+  | 'hardy_alignment'
+  | 'quality_gates'
+  | 'firestore_write';
+
+/**
+ * Structured error payload written to Firestore by the orchestrator.
+ * Replaces the old freeform string processingError for orchestrator-managed failures.
+ */
+export interface StructuredError {
+  code: OrchestratorErrorCode;
+  stage: PipelineStage;
+  message: string;
+  retryable: boolean;
+}
 
 export interface Conversation {
   conversationId: string;
@@ -110,16 +146,12 @@ export interface Conversation {
   alignmentError?: string; // Error message if alignment failed (for fallback status)
   // Processing mode for chunked uploads (defaults to 'parallel' for new uploads)
   processingMode?: ProcessingMode;
-  // Speaker reconciliation metadata (parallel mode only)
-  reconciliationConfidence?: number;
-  reconciliationDetails?: ReconciliationDetails;
-  // Extended reconciliation observability (parallel mode)
-  reconciliationMetadata?: ReconciliationMetadata;
-  // Fallback metadata (when parallel → sequential fallback occurred)
-  fallbackMetadata?: FallbackMetadata;
 
   // Quality warnings (non-blocking issues surfaced to user)
   warnings?: TranscriptWarning[];
+
+  // Error details — string for legacy, StructuredError for orchestrator-managed failures
+  processingError?: string | StructuredError;
 
   // Pipeline provenance — which pipeline produced this data
   processingPipeline?: 'legacy' | 'gemini_hybrid';
@@ -312,81 +344,6 @@ export interface ChunkPipelineResult {
   segmentCount: number;
   /** Last timestamp processed in this chunk (ms) */
   lastTimestampMs: number;
-}
-
-// =============================================================================
-// Speaker Reconciliation Types (Parallel Mode)
-// =============================================================================
-
-/**
- * Detailed match evidence for speaker reconciliation.
- * Provides transparency into how speakers were matched across chunks.
- */
-export interface ReconciliationDetails {
-  /** Number of clusters (canonical speakers) created */
-  clusterCount: number;
-  /** Total number of original speakers across all chunks */
-  originalSpeakerCount: number;
-  /** Per-cluster match evidence */
-  clusters: Array<{
-    canonicalId: string;
-    originalIds: string[];
-    confidence: number;
-    displayName: string;
-    matchEvidence: {
-      nameMatches: number;
-      topicOverlap: number;
-      termOverlap: number;
-    };
-  }>;
-}
-
-// =============================================================================
-// Fallback & Observability Types
-// =============================================================================
-
-/**
- * Reasons why fallback to sequential reprocessing was triggered.
- */
-export type FallbackReason = 'low_speaker_confidence' | 'reconciliation_error';
-
-/**
- * Metadata stored when parallel processing falls back to sequential.
- * Provides audit trail and debugging information for operators.
- */
-export interface FallbackMetadata {
-  /** When fallback was triggered (ISO timestamp) */
-  triggeredAt: string;
-  /** The confidence score that triggered fallback */
-  parallelConfidence: number;
-  /** Reference to archived parallel chunks (subcollection path) */
-  archiveId: string;
-  /** Reason for fallback */
-  reason: FallbackReason;
-  /** How long the parallel attempt took (ms) */
-  parallelDurationMs?: number;
-  /** How long the sequential reprocessing took (ms) - populated after completion */
-  sequentialDurationMs?: number;
-  /** Confidence threshold that was configured at the time */
-  configuredThreshold: number;
-}
-
-/**
- * Extended reconciliation metadata for observability.
- * Stored on conversation records for post-mortem analysis.
- */
-export interface ReconciliationMetadata {
-  /** Which matching signals were used (e.g., ['name', 'topic', 'term']) */
-  signalsUsed: string[];
-  /** Whether fallback to sequential was triggered */
-  fallbackTriggered: boolean;
-  /** Per-speaker confidence scores for matched clusters */
-  speakerMatchConfidences: Array<{
-    canonicalId: string;
-    confidence: number;
-  }>;
-  /** Processing duration for reconciliation phase (ms) */
-  reconciliationDurationMs?: number;
 }
 
 // =============================================================================

@@ -25,8 +25,10 @@ const ANCHOR_MIN_WORDS = 2;  // Minimum words for an anchor (lowered from 3)
 const ANCHOR_MAX_WORDS = 20;  // Max words for direct anchor matching (short segments)
 const ANCHOR_WINDOW_SIZE = 15;  // Words to extract from long segments for sub-segment anchoring
 
-// Performance limits — prevent O(n²) blowup on large search spaces
-const MAX_MATCH_ITERATIONS = 3000;  // Hard cap on sliding window comparisons per findBestMatch call
+// Performance limits — prevent O(n²) blowup on large search spaces.
+// Raised from 3000 → 50000 after Cloud Run extraction gave us more time budget.
+// The old cap was causing premature bailout on long Gemini segments.
+const MAX_MATCH_ITERATIONS = 50000;
 
 // Search window configuration - FIXED: use absolute values, not percentages
 const TIME_WINDOW_SECONDS = 30;  // Search ±30 seconds around time hint
@@ -44,6 +46,10 @@ const MIN_SEGMENT_CONFIDENCE = 0.40;  // Per-segment minimum to accept (lowered 
 const MAX_OVERLAP_MS = 2000;  // Max overlap between consecutive segments (raised from 1000)
 const MIN_MS_PER_WORD = 20;  // Minimum milliseconds per word (lowered from 30)
 const MAX_MS_PER_WORD = 800;  // Maximum milliseconds per word (raised from 600)
+
+// How often to poll Firestore for abort requests during HARDY alignment.
+// 5 seconds is responsive enough for user-initiated cancel without hammering Firestore.
+const ABORT_POLL_INTERVAL_MS = 5_000;
 
 // Cloud Run request timeout (3 minutes) - aligned with Cloud Run server hard kill
 const CLOUD_RUN_TIMEOUT_MS = 180_000;
@@ -859,8 +865,13 @@ function findBestMatch(
     if (bestScore >= GOOD_ENOUGH_THRESHOLD) break;
 
     for (let i = searchStart; i < actualSearchEnd - windowSize + 1; i++) {
-      // Hard cap — bail out before we burn the function's time budget
+      // Hard cap — bail out before we burn the time budget
       if (++iterations > MAX_MATCH_ITERATIONS) {
+        console.warn(
+          `[findBestMatch] Hit iteration cap (${MAX_MATCH_ITERATIONS}) — ` +
+          `returning best match so far (score=${bestScore.toFixed(3)}, ` +
+          `searchRange=${searchStart}-${actualSearchEnd}, windowSize=${windowSize})`
+        );
         return bestMatch;
       }
 
@@ -897,15 +908,20 @@ function findBestMatch(
   return bestMatch;
 }
 
-function alignRegion(
+async function alignRegion(
   region: Region,
   words: Word[],
-  allSegments: Segment[]
-): AlignedSegment[] {
+  allSegments: Segment[],
+  abortChecker?: () => Promise<void>,
+  abortState?: { lastCheck: number },
+): Promise<AlignedSegment[]> {
   /**
    * Align all segments within a region independently.
    *
    * Uses time hints from Gemini and region boundaries as constraints.
+   * Checks for abort between individual segments — much finer-grained than
+   * between regions. A single findBestMatch call is bounded by
+   * MAX_MATCH_ITERATIONS so each segment takes seconds, not minutes.
    */
   if (region.segments.length === 0) {
     return [];
@@ -922,6 +938,13 @@ function alignRegion(
   let interpolatedCount = 0;
 
   for (let i = 0; i < region.segments.length; i++) {
+    // Per-segment abort polling — 5s throttle shared with the region-level checker.
+    // This is the fine-grained check that catches aborts during long regions.
+    if (abortChecker && abortState && Date.now() - abortState.lastCheck >= ABORT_POLL_INTERVAL_MS) {
+      await abortChecker();
+      abortState.lastCheck = Date.now();
+    }
+
     const segment = region.segments[i];
     const expectedWords = segment.text.split(/\s+/).length;
 
@@ -1181,10 +1204,11 @@ function computeRegionConfidence(aligned: AlignedSegment[]): number {
 // Main Alignment Pipeline
 // =============================================================================
 
-function alignSegmentsHardy(
+async function alignSegmentsHardy(
   segments: Segment[],
-  words: Word[]
-): AlignedSegment[] {
+  words: Word[],
+  abortChecker?: () => Promise<void>,
+): Promise<AlignedSegment[]> {
   /**
    * HARDY alignment algorithm - main entry point.
    *
@@ -1238,9 +1262,20 @@ function alignSegmentsHardy(
     };
   }
 
-  // Then align regions
+  // Shared abort state — tracks last poll time across both region and segment
+  // boundaries. The object is passed into alignRegion so the per-segment
+  // checks share the same throttle clock as the per-region checks.
+  const abortState = { lastCheck: Date.now() };
+
   for (const region of regions) {
-    const regionAligned = alignRegion(region, words, segments);
+    // Between-region abort polling (coarse)
+    if (abortChecker && Date.now() - abortState.lastCheck >= ABORT_POLL_INTERVAL_MS) {
+      await abortChecker();
+      abortState.lastCheck = Date.now();
+    }
+
+    // alignRegion also polls abort between individual segments (fine-grained)
+    const regionAligned = await alignRegion(region, words, segments, abortChecker, abortState);
 
     for (let j = 0; j < regionAligned.length; j++) {
       const globalIdx = region.startSegmentIdx + j;
@@ -2060,7 +2095,8 @@ function parseWhisperXOutput(output: unknown): {
 export async function alignTimestamps(
   audioBuffer: Buffer,
   segments: { speakerId: string; text: string; startMs: number; endMs: number }[],
-  serviceUrl: string
+  serviceUrl: string,
+  abortChecker?: () => Promise<void>,
 ): Promise<AlignmentResult> {
   /**
    * DEPRECATED: This function implements the OLD Gemini-first approach.
@@ -2113,9 +2149,9 @@ export async function alignTimestamps(
       `now running HARDY alignment`
     );
 
-    // Run HARDY alignment
+    // Run HARDY alignment (now async to support abort polling)
     const startTimeHardy = Date.now();
-    const aligned = alignSegmentsHardy(inputSegments, words);
+    const aligned = await alignSegmentsHardy(inputSegments, words, abortChecker);
     const durationHardy = ((Date.now() - startTimeHardy) / 1000).toFixed(3);
     console.debug(`[Timer] align_segments_hardy: ${durationHardy}s`);
 

@@ -75,6 +75,8 @@ export default [
       'functions/**',
       'coverage/**',
       '.local_docs/**',
+      'cloud-run-orchestrator/lib/**',
+      'cloud-run-orchestrator/src/_functions/**',
     ],
   },
 ];
