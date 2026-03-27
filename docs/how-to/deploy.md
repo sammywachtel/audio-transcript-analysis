@@ -194,13 +194,6 @@ gcloud projects add-iam-policy-binding $BILLING_PROJECT \
 
 The `gcp-setup.sh` script handles this automatically when run with the billing project configured.
 
-## Cloud Tasks Queue (Retired)
-
-> The `transcription-queue` was part of the legacy chunked pipeline and is no longer used.
-> The current hybrid pipeline (Gemini 3 Flash + WhisperX timestamps) processes everything
-> directly within `transcribeAudio` without Cloud Tasks. The queue may still exist in your
-> GCP project but can be safely paused or deleted.
-
 ## Whisper GPU Service (Cloud Run)
 
 The WhisperX service runs on Cloud Run with an NVIDIA L4 GPU. It provides **word-level timestamps only** — speaker diarization is handled by Gemini 3 Flash.

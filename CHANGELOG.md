@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reconciliation alert handler** — `handleReconciliationAlert.ts` superseded by the new pipeline's built-in handling
 - **Legacy tests** — `chunkMerge.test.ts`, `leaderChunk.test.ts`, `speakerNameResolution.test.ts`, `speakerQuality.test.ts`, `speakerQualityIntegration.test.ts`, `speakerReconciliation.test.ts`
 - **Obsolete documentation** — `chunk-merge.md`, `speaker-reconciliation-rollout.md`, `reconciliation-queries.md`
+- **Stale Cloud Tasks references** — Removed retired `cloudtasks.googleapis.com` API comment and legacy `transcription-queue` / `processTranscription` comment block from `gcp-setup.sh`; removed retired "Cloud Tasks Queue" section from deployment docs
 
 ## [2.14.0] - 2026-03-06
 
