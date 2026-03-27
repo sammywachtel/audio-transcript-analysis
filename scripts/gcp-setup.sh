@@ -393,9 +393,6 @@ APIS=(
     "generativelanguage.googleapis.com"
     "aiplatform.googleapis.com"  # Required for Vertex AI SDK (Gemini with billing labels)
     "apikeys.googleapis.com"
-    # Cloud Tasks API — no longer used (processTranscription retired),
-    # but kept enabled in case existing projects have queue resources.
-    # "cloudtasks.googleapis.com"
     # Speech-to-Text v2 (Chirp-3 diarization benchmark)
     "speech.googleapis.com"
 )
@@ -555,15 +552,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 10: Cloud Tasks Queue — RETIRED
-# -----------------------------------------------------------------------------
-# The transcription-queue was used by the legacy processTranscription function
-# (Replicate-era pipeline). That function has been deleted and the current
-# hybrid pipeline (Gemini 3 Flash + WhisperX timestamps) processes inline.
-# Existing queues can be paused/deleted manually; new projects don't need one.
-
-# -----------------------------------------------------------------------------
-# Step 10b: Grant BigQuery Access for Billing Sync (Cross-Project)
+# Step 10: Grant BigQuery Access for Billing Sync (Cross-Project)
 # -----------------------------------------------------------------------------
 
 log_step "BigQuery billing sync access (cross-project)..."
