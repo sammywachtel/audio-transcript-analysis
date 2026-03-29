@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **New test suites** — Tests for the hybrid pipeline (`gemini3Pipeline.test.ts`, `newPipeline.test.ts`)
 - **`AGENTS.md`** — AI agent development guidance for the project
 - **`.beads/` metadata system** — Project metadata tracking with git hooks
+- Automated CI/CD deployment pipeline for the Cloud Run orchestrator service via GitHub Actions, supporting both push triggers and manual dispatch with `deploy_only` mode.
+- GCP infrastructure provisioning for the orchestrator: Artifact Registry repository, dedicated runtime service account with scoped IAM bindings, and `ORCHESTRATOR_URL` secret management with idempotent compare-before-update behavior.
+- Immutable image tagging in Cloud Build (`_IMAGE_NAME`/`_TAG` substitutions) so deployments can target specific image versions rather than always pulling `:latest`.
 
 ### Changed
 - **Pipeline routing** — All uploads now route unconditionally through the hybrid pipeline (Gemini 3 Flash + WhisperX + HARDY alignment) — no more feature flag gating

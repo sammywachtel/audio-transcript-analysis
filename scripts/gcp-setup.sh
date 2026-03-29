@@ -726,6 +726,116 @@ if gcloud secrets describe "$HF_SECRET_NAME" --project="$PROJECT_ID" &>/dev/null
 fi
 
 # -----------------------------------------------------------------------------
+# Step 10f: Artifact Registry Repository for Orchestrator Images
+# (used by Cloud Run service: transcription-orchestrator)
+# -----------------------------------------------------------------------------
+
+log_step "Artifact Registry repository for Orchestrator images (transcription-orchestrator)..."
+
+ORCHESTRATOR_AR_REPO="orchestrator"
+
+if gcloud artifacts repositories describe "$ORCHESTRATOR_AR_REPO" \
+    --location="$REGION" \
+    --project="$PROJECT_ID" &>/dev/null; then
+    log_skip "Artifact Registry repo '$ORCHESTRATOR_AR_REPO' already exists in $REGION"
+else
+    gcloud artifacts repositories create "$ORCHESTRATOR_AR_REPO" \
+        --repository-format=docker \
+        --location="$REGION" \
+        --description="Transcription orchestrator service images" \
+        --project="$PROJECT_ID"
+    log_success "Created Artifact Registry repo: $ORCHESTRATOR_AR_REPO ($REGION)"
+fi
+
+# Cloud Build SA needs AR write access to push orchestrator images.
+# Reuse same CLOUDBUILD_SA already set in Step 10d.
+add_service_agent_binding "$CLOUDBUILD_SA" "roles/artifactregistry.writer" "Cloud Build → Artifact Registry Writer (orchestrator)"
+
+# -----------------------------------------------------------------------------
+# Step 10g: Orchestrator Runtime Service Account
+# -----------------------------------------------------------------------------
+
+log_step "Orchestrator runtime service account..."
+
+ORCHESTRATOR_RUNTIME_SA_NAME="orchestrator-runtime"
+ORCHESTRATOR_RUNTIME_SA="orchestrator-runtime@${PROJECT_ID}.iam.gserviceaccount.com"
+
+if gcloud iam service-accounts describe "$ORCHESTRATOR_RUNTIME_SA" --project="$PROJECT_ID" &>/dev/null; then
+    log_skip "Orchestrator runtime service account exists"
+else
+    gcloud iam service-accounts create "$ORCHESTRATOR_RUNTIME_SA_NAME" \
+        --project="$PROJECT_ID" \
+        --display-name="Transcription Orchestrator Runtime"
+    log_success "Created orchestrator runtime service account: $ORCHESTRATOR_RUNTIME_SA"
+fi
+
+# Runtime permissions: Firestore, Storage, WhisperX invocation, Gemini secret access
+if sa_exists "$ORCHESTRATOR_RUNTIME_SA"; then
+    add_iam_binding "serviceAccount:$ORCHESTRATOR_RUNTIME_SA" "roles/run.invoker" \
+        "$ORCHESTRATOR_RUNTIME_SA → Cloud Run Invoker (WhisperX calls)"
+    add_iam_binding "serviceAccount:$ORCHESTRATOR_RUNTIME_SA" "roles/secretmanager.secretAccessor" \
+        "$ORCHESTRATOR_RUNTIME_SA → Secret Accessor (GEMINI_API_KEY, WHISPER_SERVICE_URL)"
+    add_iam_binding "serviceAccount:$ORCHESTRATOR_RUNTIME_SA" "roles/datastore.user" \
+        "$ORCHESTRATOR_RUNTIME_SA → Firestore User"
+    add_iam_binding "serviceAccount:$ORCHESTRATOR_RUNTIME_SA" "roles/storage.objectAdmin" \
+        "$ORCHESTRATOR_RUNTIME_SA → Storage Object Admin (audio downloads)"
+    # Token Creator lets the orchestrator generate signed URLs for Storage downloads.
+    # node-fetch v2 hangs on large Cloud Storage downloads; signed URL + curl is the fix.
+    add_iam_binding "serviceAccount:$ORCHESTRATOR_RUNTIME_SA" "roles/iam.serviceAccountTokenCreator" \
+        "$ORCHESTRATOR_RUNTIME_SA → Token Creator (signed URLs)"
+else
+    log_info "Orchestrator runtime SA permissions - skipped (SA not yet created, retry after SA propagates)"
+fi
+
+# -----------------------------------------------------------------------------
+# Step 10h: ORCHESTRATOR_URL Secret + GitHub Actions Deploy Permissions
+# -----------------------------------------------------------------------------
+
+log_step "ORCHESTRATOR_URL secret and GitHub Actions deploy permissions..."
+
+# Placeholder URL — the deploy workflow overwrites this on first successful deploy.
+# An empty string would cause gcloud secrets create to fail, so we seed it with
+# a recognizable placeholder that makes broken state obvious in logs.
+manage_secret "ORCHESTRATOR_URL" ""
+
+# GitHub Actions SA deploy permissions for the orchestrator.
+# roles/run.admin + roles/iam.serviceAccountUser are the minimum to deploy a
+# Cloud Run service with --service-account. roles/secretmanager.secretVersionManager
+# lets the workflow update ORCHESTRATOR_URL after each deploy (same pattern as
+# WHISPER_SERVICE_URL in the Whisper workflow).
+GH_SA_ORCHESTRATOR="github-actions@${PROJECT_ID}.iam.gserviceaccount.com"  # pragma: allowlist secret
+
+if gcloud iam service-accounts describe "$GH_SA_ORCHESTRATOR" --project="$PROJECT_ID" &>/dev/null; then
+    add_iam_binding "serviceAccount:$GH_SA_ORCHESTRATOR" "roles/run.admin" \
+        "GitHub Actions SA → Cloud Run Admin (orchestrator deploy)"
+    add_iam_binding "serviceAccount:$GH_SA_ORCHESTRATOR" "roles/iam.serviceAccountUser" \
+        "GitHub Actions SA → Service Account User (orchestrator runtime SA)"
+
+    # Allow the deploy workflow to update ORCHESTRATOR_URL secret version.
+    # secretVersionManager covers both add and destroy; secretVersionAdder is read-only add.
+    # We want the compare-before-update pattern to work, so we need both add and access.
+    if gcloud secrets describe "ORCHESTRATOR_URL" --project="$PROJECT_ID" &>/dev/null; then
+        gcloud secrets add-iam-policy-binding "ORCHESTRATOR_URL" \
+            --project="$PROJECT_ID" \
+            --member="serviceAccount:$GH_SA_ORCHESTRATOR" \
+            --role="roles/secretmanager.secretVersionManager" \
+            --quiet > /dev/null 2>&1 || true
+        log_success "GitHub Actions SA → ORCHESTRATOR_URL secret version manager"
+        # secretAccessor is required for the compare-before-update step in the deploy workflow
+        # (gcloud secrets versions access latest --secret=ORCHESTRATOR_URL). Without it the
+        # read fails with permission denied even though secretVersionManager covers writes.
+        gcloud secrets add-iam-policy-binding "ORCHESTRATOR_URL" \
+            --project="$PROJECT_ID" \
+            --member="serviceAccount:$GH_SA_ORCHESTRATOR" \
+            --role="roles/secretmanager.secretAccessor" \
+            --quiet > /dev/null 2>&1 || true
+        log_success "GitHub Actions SA → ORCHESTRATOR_URL secret accessor (compare-before-update read)"
+    fi
+else
+    log_info "GitHub Actions SA permissions for orchestrator - skipped (SA not yet created, run Step 13 first)"
+fi
+
+# -----------------------------------------------------------------------------
 # Step 11: Initialize Firebase Storage and Configure Bucket Access
 # -----------------------------------------------------------------------------
 
