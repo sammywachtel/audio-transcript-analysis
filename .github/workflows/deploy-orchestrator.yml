@@ -1,0 +1,248 @@
+# =============================================================================
+# GitHub Actions Workflow: Deploy Transcription Orchestrator
+#
+# Builds the orchestrator Docker image via Cloud Build (repo-root context —
+# the Dockerfile copies functions/src/ at build time, so you MUST submit
+# from the repo root or the COPY step fails) and deploys to Cloud Run.
+# No GPU, no drama. 2 CPU / 2Gi RAM / 900s timeout for full pipeline runs.
+#
+# Triggers:
+#   - Push to main (when orchestrator source or copied functions modules change)
+#   - Manual dispatch (deploy from any branch, optionally skip build)
+#
+# Required GitHub Secrets:
+#   - GCP_WORKLOAD_IDENTITY_PROVIDER: Workload Identity Federation provider
+#   - GCP_SERVICE_ACCOUNT: Service account email (github-actions@...)
+#   - GCP_PROJECT_ID: GCP project ID
+#   - FIREBASE_STORAGE_BUCKET: Storage bucket name (env var at runtime)
+#
+# Runtime secrets injected from Secret Manager at deploy time:
+#   - GEMINI_API_KEY: Gemini API key
+#   - WHISPER_SERVICE_URL: WhisperX Cloud Run service URL
+#   - ORCHESTRATOR_URL: Updated by this workflow after each successful deploy
+# =============================================================================
+
+name: Deploy Orchestrator
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'cloud-run-orchestrator/**'
+      - '.github/workflows/deploy-orchestrator.yml'
+      - 'functions/src/gemini3Pipeline.ts'
+      - 'functions/src/alignment.ts'
+      - 'functions/src/audioUtils.ts'
+      - 'functions/src/logger.ts'
+      - 'functions/src/types.ts'
+      - 'functions/src/firestoreUtils.ts'
+
+  workflow_dispatch:
+    inputs:
+      deploy_only:
+        description: 'Skip build, deploy existing latest image'
+        required: false
+        default: false
+        type: boolean
+      image_tag:
+        description: 'Image tag to build/deploy (default: git SHA)'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: deploy-orchestrator-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ORCHESTRATOR_REGION: us-central1
+  SERVICE_NAME: transcription-orchestrator
+  AR_REPO: orchestrator
+
+jobs:
+  deploy-orchestrator:
+    name: Build & Deploy Orchestrator
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Determine image tag
+        id: image
+        env:
+          INPUT_TAG: ${{ github.event.inputs.image_tag }}
+          GIT_SHA: ${{ github.sha }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          TAG="${INPUT_TAG}"
+          if [ -z "$TAG" ]; then
+            TAG="$GIT_SHA"
+          fi
+          IMAGE_NAME="${ORCHESTRATOR_REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/orchestrator"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "full_image=$IMAGE_NAME:$TAG" >> "$GITHUB_OUTPUT"
+
+      # -------------------------------------------------------------------
+      # Build via Cloud Build (repo-root context required — Dockerfile
+      # copies functions/src/ which lives outside cloud-run-orchestrator/)
+      # -------------------------------------------------------------------
+      - name: Build orchestrator image via Cloud Build
+        if: github.event.inputs.deploy_only != 'true'
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          echo "Building orchestrator image from repo root (Dockerfile needs functions/src/)..."
+          # Submit from repo root so COPY functions/src/ works in the Dockerfile.
+          # --service-account ensures the build SA has secret access if needed.
+          gcloud builds submit \
+            --config=cloud-run-orchestrator/cloudbuild.yaml \
+            --substitutions="_IMAGE_NAME=${IMAGE_NAME},_TAG=${IMAGE_TAG}" \
+            --service-account="projects/${PROJECT_ID}/serviceAccounts/${SERVICE_ACCOUNT}" \
+            --project="$PROJECT_ID" \
+            --quiet \
+            .
+
+      # -------------------------------------------------------------------
+      # Deploy to Cloud Run (no GPU — just brains and network calls)
+      # -------------------------------------------------------------------
+      - name: Deploy to Cloud Run
+        id: deploy
+        env:
+          DEPLOY_ONLY: ${{ github.event.inputs.deploy_only }}
+          FULL_IMAGE: ${{ steps.image.outputs.full_image }}
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+        run: |
+          if [ "$DEPLOY_ONLY" = "true" ]; then
+            DEPLOY_IMAGE="${IMAGE_NAME}:latest"
+          else
+            DEPLOY_IMAGE="$FULL_IMAGE"
+          fi
+
+          # Runtime SA for the orchestrator — see scripts/gcp-setup.sh for IAM grants.
+          # Using the github-actions SA here would be wrong; this is the service identity
+          # the container itself runs as (Firestore, Storage, Secret Manager, WhisperX).
+          ORCHESTRATOR_RUNTIME_SA="orchestrator-runtime@${PROJECT_ID}.iam.gserviceaccount.com"
+
+          gcloud run deploy "$SERVICE_NAME" \
+            --project="$PROJECT_ID" \
+            --region="$ORCHESTRATOR_REGION" \
+            --image="$DEPLOY_IMAGE" \
+            --cpu=2 \
+            --memory=2Gi \
+            --timeout=900 \
+            --concurrency=1 \
+            --min-instances=0 \
+            --max-instances=3 \
+            --no-allow-unauthenticated \
+            --service-account="$ORCHESTRATOR_RUNTIME_SA" \
+            --set-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest,WHISPER_SERVICE_URL=WHISPER_SERVICE_URL:latest" \
+            --set-env-vars="FIREBASE_STORAGE_BUCKET=${FIREBASE_STORAGE_BUCKET}" \
+            --quiet
+
+          SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" \
+            --project="$PROJECT_ID" \
+            --region="$ORCHESTRATOR_REGION" \
+            --format="value(status.url)")
+          echo "url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+
+      # -------------------------------------------------------------------
+      # Update ORCHESTRATOR_URL secret (Cloud Functions reads this to
+      # know where to send transcription jobs)
+      # -------------------------------------------------------------------
+      - name: Update service URL secret
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.url }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          SECRET_NAME="ORCHESTRATOR_URL"
+
+          CURRENT=$(gcloud secrets versions access latest \
+            --secret="$SECRET_NAME" \
+            --project="$PROJECT_ID" 2>/dev/null) || CURRENT=""
+
+          if [ "$CURRENT" = "$SERVICE_URL" ]; then
+            echo "Secret $SECRET_NAME already up to date"
+          else
+            echo -n "$SERVICE_URL" | gcloud secrets versions add "$SECRET_NAME" \
+              --data-file=- \
+              --project="$PROJECT_ID"
+            echo "Updated secret $SECRET_NAME"
+          fi
+
+      # -------------------------------------------------------------------
+      # Health check — no GPU cold start, so 6 attempts × 10s is plenty
+      # -------------------------------------------------------------------
+      - name: Health check
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.url }}
+          SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          echo "Waiting for orchestrator to come up..."
+
+          for i in {1..6}; do
+            # WIF credentials can't mint identity tokens directly —
+            # impersonate the SA to get one (tokens expire, so mint fresh each attempt)
+            TOKEN=$(gcloud auth print-identity-token \
+              --impersonate-service-account="$SERVICE_ACCOUNT" \
+              --audiences="$SERVICE_URL" 2>/dev/null) || {
+              echo "Attempt $i/6: Failed to mint identity token, retrying in 10s..."
+              sleep 10
+              continue
+            }
+
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer $TOKEN" \
+              "$SERVICE_URL/health" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed!"
+              curl -s -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/health" | jq .
+              exit 0
+            fi
+            echo "Attempt $i/6: Status $STATUS, retrying in 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 6 attempts (service may still be starting)"
+          exit 1
+
+      - name: Deployment summary
+        if: success()
+        env:
+          FULL_IMAGE: ${{ steps.image.outputs.full_image }}
+          SERVICE_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          echo "## Orchestrator Deployment Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Service:** $SERVICE_NAME" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Region:** $ORCHESTRATOR_REGION" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image:** $FULL_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          echo "**URL:** $SERVICE_URL" >> "$GITHUB_STEP_SUMMARY"
+
+    outputs:
+      service_url: ${{ steps.deploy.outputs.url }}
+      image: ${{ steps.image.outputs.full_image }}

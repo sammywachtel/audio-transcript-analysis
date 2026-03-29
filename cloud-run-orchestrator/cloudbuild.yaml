@@ -6,8 +6,18 @@ steps:
       - '-f'
       - 'cloud-run-orchestrator/Dockerfile'
       - '-t'
-      - 'us-central1-docker.pkg.dev/$PROJECT_ID/orchestrator/orchestrator:latest'
+      - '${_IMAGE_NAME}:${_TAG}'
+      - '-t'
+      - '${_IMAGE_NAME}:latest'
       - '.'
 images:
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/orchestrator/orchestrator:latest'
+  - '${_IMAGE_NAME}:${_TAG}'
+  - '${_IMAGE_NAME}:latest'
 timeout: 600s
+
+# Substitution defaults — workflow overrides these with real values.
+# _IMAGE_NAME: full AR path without tag (region-docker.pkg.dev/PROJECT/REPO/IMAGE)
+# _TAG: immutable build identifier (git SHA from workflow, or 'local' for manual runs)
+substitutions:
+  _IMAGE_NAME: 'us-central1-docker.pkg.dev/${PROJECT_ID}/orchestrator/orchestrator'
+  _TAG: 'latest'
