@@ -14,7 +14,7 @@ Primary collection storing conversation data.
 interface ConversationDoc {
   // Identity
   conversationId: string;
-  userId: string;           // Firebase Auth UID
+  userId: string; // Firebase Auth UID
   title: string;
 
   // Timestamps
@@ -26,23 +26,31 @@ interface ConversationDoc {
   audioStoragePath: string; // Firebase Storage path
 
   // Processing Status
-  status: 'queued' | 'processing' | 'complete' | 'failed' | 'aborted' | 'needs_review';
+  status:
+    | 'queued'
+    | 'processing'
+    | 'complete'
+    | 'failed'
+    | 'aborted'
+    | 'needs_review';
   processingError?: string;
 
   // Processing Timestamps
-  queuedAt?: Timestamp;           // When upload was received
+  queuedAt?: Timestamp; // When upload was received
   processingStartedAt?: Timestamp; // When pipeline processing began
 
-  // Pipeline Provenance (which pipeline produced this data)
-  processingPipeline?: 'gemini_hybrid';              // Always 'gemini_hybrid' (legacy pipeline removed)
-  pipelineVersion?: string;                          // Freeform version marker
+  // Pipeline Provenance
+  // Set by the transcription-orchestrator Cloud Run service at completion.
+  // processingPipeline identifies the algorithm; pipelineVersion tracks iteration.
+  processingPipeline?: 'gemini_hybrid'; // Always 'gemini_hybrid' — the only active pipeline
+  pipelineVersion?: 'gemini_hybrid'; // Matches processingPipeline (no legacy variants remain)
 
   // Alignment Status
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
-  alignmentError?: string;      // Reason for fallback if applicable
+  alignmentError?: string; // Reason for fallback if applicable
 
   // Abort Control
-  abortRequested?: boolean;     // User requested processing stop
+  abortRequested?: boolean; // User requested processing stop
 
   // Analysis Results
   speakers: Record<string, Speaker>;
@@ -55,16 +63,18 @@ interface ConversationDoc {
 ```
 
 **Processing Status Flow:**
-1. `queued` - Audio uploaded, processing queued (set by `transcribeAudio`)
-2. `processing` - Hybrid pipeline running (set by `processWithNewPipeline`)
+
+1. `queued` - Audio uploaded, processing queued (set by `transcribeAudio` dispatcher)
+2. `processing` - Pipeline running on `transcription-orchestrator` Cloud Run service
 3. `complete` - Processing succeeded
 4. `failed` - Processing failed
 5. `aborted` - User cancelled processing
 6. `needs_review` - Processing completed but quality gates flagged issues
 
 **Timestamps:**
-- `queuedAt` - Set when `transcribeAudio` receives the upload
-- `processingStartedAt` - Set when the hybrid pipeline begins processing
+
+- `queuedAt` - Set when `transcribeAudio` dispatcher receives the upload
+- `processingStartedAt` - Set when the dispatcher writes initial state
 
 #### conversations/{conversationId}/chatHistory (subcollection)
 
@@ -76,20 +86,22 @@ Chat message history for conversation chat feature. Provides persistent, synchro
 interface ChatHistoryDoc {
   role: 'user' | 'assistant';
   content: string;
-  sources?: Array<{              // Timestamp citations (assistant messages only)
+  sources?: Array<{
+    // Timestamp citations (assistant messages only)
     segmentId: string;
     startMs: number;
     endMs: number;
     speaker: string;
     text: string;
   }>;
-  costUsd?: number;              // AI processing cost (assistant messages only)
-  isUnanswerable?: boolean;      // True if LLM couldn't answer (assistant messages only)
-  createdAt: Timestamp;          // Server timestamp
+  costUsd?: number; // AI processing cost (assistant messages only)
+  isUnanswerable?: boolean; // True if LLM couldn't answer (assistant messages only)
+  createdAt: Timestamp; // Server timestamp
 }
 ```
 
 **Features**:
+
 - Real-time synchronization across devices
 - Pagination support (load older messages in batches of 10)
 - 50 message limit per conversation (enforced client-side)
@@ -107,31 +119,32 @@ Manual speaker corrections. Users can merge incorrectly diarized speakers, reass
 
 ```typescript
 interface SpeakerCorrectionDoc {
-  type: 'merge' | 'reassign' | 'rename';  // Correction type
+  type: 'merge' | 'reassign' | 'rename'; // Correction type
 
   // For 'merge' corrections
-  sourceSpeakerId?: string;      // Speaker being merged away (removed from speaker list)
-  targetSpeakerId?: string;      // Speaker to merge into (all source segments reassigned)
+  sourceSpeakerId?: string; // Speaker being merged away (removed from speaker list)
+  targetSpeakerId?: string; // Speaker to merge into (all source segments reassigned)
 
   // For 'reassign' corrections
-  segmentIds?: string[];         // Specific segments to reassign
-  fromSpeakerId?: string;        // Speaker segments are being moved from
-  toSpeakerId?: string;          // Speaker segments are being moved to
+  segmentIds?: string[]; // Specific segments to reassign
+  fromSpeakerId?: string; // Speaker segments are being moved from
+  toSpeakerId?: string; // Speaker segments are being moved to
 
   // For 'rename' corrections
-  speakerId?: string;            // Speaker being renamed
-  newDisplayName?: string;       // New display name for the speaker
-  previousDisplayName?: string;  // Previous name (for undo display purposes)
+  speakerId?: string; // Speaker being renamed
+  newDisplayName?: string; // New display name for the speaker
+  previousDisplayName?: string; // Previous name (for undo display purposes)
 
-  userId: string;                // User who created the correction
-  createdAt: Timestamp;          // Server timestamp
+  userId: string; // User who created the correction
+  createdAt: Timestamp; // Server timestamp
 
   // Undo support (audit-preserving)
-  undoneAt?: Timestamp;          // If set, this correction has been undone
+  undoneAt?: Timestamp; // If set, this correction has been undone
 }
 ```
 
 **Apply-on-Read Pattern**:
+
 - Corrections are NOT applied to the stored conversation data
 - Client applies **active** corrections (where `undoneAt` is not set) in chronological order:
   1. Load original speakers and segments from conversation document
@@ -148,6 +161,7 @@ interface SpeakerCorrectionDoc {
   8. Display corrected data to user
 
 **Undo Support (Audit-Preserving)**:
+
 - Undo sets the `undoneAt` timestamp via Cloud Function (does NOT delete the document)
 - This preserves the full audit trail for debugging and compliance
 - Client re-applies active corrections (filtering out undone ones) on next read
@@ -156,6 +170,7 @@ interface SpeakerCorrectionDoc {
 - Maximum ~20 corrections tracked in in-memory undo stack (per session)
 
 **Features**:
+
 - Real-time synchronization (Firestore listener)
 - Persists across reloads and devices
 - **Merge workflow**: Click merge button → Select target speaker → Confirm
@@ -166,11 +181,13 @@ interface SpeakerCorrectionDoc {
 - Audit trail preserved even after undo
 
 **Validation (rename corrections)**:
+
 - Name must be non-empty
 - Name must be less than 50 characters
 - Validated server-side by Cloud Function
 
 **Security**:
+
 - Users can only read corrections for conversations they own
 - Corrections are created/undone via Cloud Functions (not directly by client)
 - Cloud Function validates ownership, speaker existence, and input constraints
@@ -189,7 +206,7 @@ interface UserDoc {
   displayName: string;
   photoURL?: string;
   createdAt: Timestamp;
-  isAdmin?: boolean;      // Grants access to admin dashboard
+  isAdmin?: boolean; // Grants access to admin dashboard
   preferences?: {
     theme?: 'light' | 'dark';
   };
@@ -198,16 +215,17 @@ interface UserDoc {
 
 **Note**: The `isAdmin` field must be manually set in Firestore to grant admin access. There is no self-service admin enrollment.
 
-### _metrics
+### \_metrics
 
 Processing metrics for observability (admin read-only). Tracks detailed processing statistics, LLM usage, and estimated costs. Supports both transcription jobs and chat queries (discriminated by `type` field).
 
 **Path**: `_metrics/{docId}`
 
 **Transcription Metrics**:
+
 ```typescript
 interface TranscriptionMetricsDoc {
-  type?: 'transcription';  // Optional for backward compatibility (absence implies transcription)
+  type?: 'transcription'; // Optional for backward compatibility (absence implies transcription)
   conversationId: string;
   userId: string;
   status: 'success' | 'failed';
@@ -216,12 +234,12 @@ interface TranscriptionMetricsDoc {
 
   // Stage timings (milliseconds)
   timingMs: {
-    download: number;      // Audio download from Storage
-    gemini: number;        // Gemini 3 Flash analysis (diarization + content)
-    whisperx: number;      // WhisperX timestamps + HARDY alignment
-    transform: number;     // Data transformation and assembly
-    firestore: number;     // Firestore write
-    total: number;         // Total processing time
+    download: number; // Audio download from Storage
+    gemini: number; // Gemini 3 Flash analysis (diarization + content)
+    whisperx: number; // WhisperX timestamps + HARDY alignment
+    transform: number; // Data transformation and assembly
+    firestore: number; // Firestore write
+    total: number; // Total processing time
   };
 
   // Result counts
@@ -240,23 +258,23 @@ interface TranscriptionMetricsDoc {
   // Audio/text token separation added in v2.2.0 for accurate cost calculation
   llmUsage?: {
     geminiAnalysis: {
-      inputTokens: number;           // Total input tokens (backward compat)
-      audioInputTokens?: number;     // Tokens from audio input (pre-analysis)
-      textInputTokens?: number;      // Tokens from text input (transcript analysis)
+      inputTokens: number; // Total input tokens (backward compat)
+      audioInputTokens?: number; // Tokens from audio input (pre-analysis)
+      textInputTokens?: number; // Tokens from text input (transcript analysis)
       outputTokens: number;
       model: string;
     };
     geminiSpeakerCorrection: {
-      inputTokens: number;           // Total input tokens (backward compat)
-      audioInputTokens?: number;     // Tokens from audio input (always 0 for corrections)
-      textInputTokens?: number;      // Tokens from text input
+      inputTokens: number; // Total input tokens (backward compat)
+      audioInputTokens?: number; // Tokens from audio input (always 0 for corrections)
+      textInputTokens?: number; // Tokens from text input
       outputTokens: number;
       model: string;
     };
     whisperx: {
-      predictionId?: string;  // Cloud Run request ID for cost traceability
-      computeTimeSeconds: number;  // Actual GPU compute time from X-Predict-Time header (not wall-clock)
-      model: string;  // 'whisperx-diarization' - includes speaker diarization
+      predictionId?: string; // Cloud Run request ID for cost traceability
+      computeTimeSeconds: number; // Actual GPU compute time from X-Predict-Time header (not wall-clock)
+      model: string; // 'whisperx-diarization' - includes speaker diarization
     };
     // Note: diarization field removed in v2.2.0 - now bundled with whisperx
   };
@@ -267,26 +285,31 @@ interface TranscriptionMetricsDoc {
   geminiLabels?: Array<{
     conversation_id: string;
     user_id: string;
-    call_type: 'pre_analysis' | 'fallback_transcription' | 'analysis' | 'speaker_identification' | 'speaker_correction';
-    environment: string;  // 'production' | 'development'
+    call_type:
+      | 'pre_analysis'
+      | 'fallback_transcription'
+      | 'analysis'
+      | 'speaker_identification'
+      | 'speaker_correction';
+    environment: string; // 'production' | 'development'
   }>;
 
   // Estimated costs (calculated from _pricing collection)
   // Schema updated in v2.2.0: removed diarizationUsd (bundled with whisperx), added audio/text breakdown
   estimatedCost?: {
-    geminiUsd: number;              // Combined Gemini costs (backward compat)
-    geminiAudioInputUsd?: number;   // Gemini audio input cost ($1/1M tokens)
-    geminiTextInputUsd?: number;    // Gemini text input cost ($0.30/1M tokens)
-    geminiOutputUsd?: number;       // Gemini output cost
-    whisperxUsd: number;            // WhisperX compute cost (includes diarization)
+    geminiUsd: number; // Combined Gemini costs (backward compat)
+    geminiAudioInputUsd?: number; // Gemini audio input cost ($1/1M tokens)
+    geminiTextInputUsd?: number; // Gemini text input cost ($0.30/1M tokens)
+    geminiOutputUsd?: number; // Gemini output cost
+    whisperxUsd: number; // WhisperX compute cost (includes diarization)
     totalUsd: number;
   };
 
   // Actual cost from BigQuery billing exports (added in v2.2.0)
   // Populated by billingSync Cloud Function running daily at 4 AM UTC
   actualCost?: {
-    geminiUsd: number;          // Actual Gemini/Vertex AI cost from BigQuery
-    fetchedAt: Timestamp;       // When this data was fetched
+    geminiUsd: number; // Actual Gemini/Vertex AI cost from BigQuery
+    fetchedAt: Timestamp; // When this data was fetched
     source: 'bigquery_billing_export';
   };
 
@@ -294,15 +317,15 @@ interface TranscriptionMetricsDoc {
   // Captures the exact rates used so costs can be audited even after price changes
   // Schema updated in v2.2.0: removed diarization fields, added audio/text rates
   pricingSnapshot?: {
-    capturedAt: Timestamp;            // When the pricing was looked up
-    geminiPricingId: string | null;   // _pricing doc ID used, or null if not configured
+    capturedAt: Timestamp; // When the pricing was looked up
+    geminiPricingId: string | null; // _pricing doc ID used, or null if not configured
     whisperxPricingId: string | null;
     rates: {
-      geminiInputPerMillion: number;       // Backward compat (text input rate)
+      geminiInputPerMillion: number; // Backward compat (text input rate)
       geminiAudioInputPerMillion?: number; // Audio input rate ($1/1M)
-      geminiTextInputPerMillion?: number;  // Text input rate ($0.30/1M)
-      geminiOutputPerMillion: number;      // USD per 1M output tokens
-      whisperxPerSecond: number;           // USD per compute second (includes diarization)
+      geminiTextInputPerMillion?: number; // Text input rate ($0.30/1M)
+      geminiOutputPerMillion: number; // USD per 1M output tokens
+      whisperxPerSecond: number; // USD per compute second (includes diarization)
     };
   };
 
@@ -312,27 +335,28 @@ interface TranscriptionMetricsDoc {
 ```
 
 **Chat Metrics**:
+
 ```typescript
 interface ChatMetricsDoc {
-  type: 'chat';  // Required discriminator
+  type: 'chat'; // Required discriminator
   conversationId: string;
   userId: string;
-  queryType: 'question' | 'follow_up';  // Heuristic-based classification
+  queryType: 'question' | 'follow_up'; // Heuristic-based classification
 
   // Token usage
   tokenUsage: {
     inputTokens: number;
     outputTokens: number;
-    model: string;  // e.g., 'gemini-2.5-flash'
+    model: string; // e.g., 'gemini-2.5-flash'
   };
 
   // Cost and performance
-  costUsd: number;              // Estimated cost for this query
-  responseTimeMs: number;       // Total request processing time
+  costUsd: number; // Estimated cost for this query
+  responseTimeMs: number; // Total request processing time
 
   // Response quality
-  sourcesCount: number;         // Number of validated timestamp sources
-  isUnanswerable: boolean;      // Whether LLM indicated question was unanswerable
+  sourcesCount: number; // Number of validated timestamp sources
+  isUnanswerable: boolean; // Whether LLM indicated question was unanswerable
 
   // Gemini billing labels for cost attribution (added with Vertex AI migration)
   // Single label object for this chat query
@@ -341,11 +365,11 @@ interface ChatMetricsDoc {
     conversation_id: string;
     user_id: string;
     call_type: 'chat';
-    environment: string;  // 'production' | 'development'
+    environment: string; // 'production' | 'development'
   };
 
   // Pricing info for billing audit (added for cost visibility)
-  pricingId?: string | null;    // _pricing doc ID used, or null if default
+  pricingId?: string | null; // _pricing doc ID used, or null if default
   pricingSnapshot?: {
     capturedAt: Timestamp;
     inputPricePerMillion: number;
@@ -359,7 +383,7 @@ interface ChatMetricsDoc {
 
 **Security**: Only Cloud Functions can write to `_metrics`. Only admin users can read.
 
-### _user_events
+### \_user_events
 
 User activity events for audit trail and analytics.
 
@@ -367,17 +391,21 @@ User activity events for audit trail and analytics.
 
 ```typescript
 interface UserEventDoc {
-  eventType: 'conversation_created' | 'conversation_deleted' | 'processing_completed' | 'processing_failed';
+  eventType:
+    | 'conversation_created'
+    | 'conversation_deleted'
+    | 'processing_completed'
+    | 'processing_failed';
   userId: string;
   conversationId?: string;
-  metadata?: Record<string, unknown>;  // e.g., { durationMs, estimatedCostUsd }
+  metadata?: Record<string, unknown>; // e.g., { durationMs, estimatedCostUsd }
   timestamp: Timestamp;
 }
 ```
 
 **Security**: Only Cloud Functions can write. Only admin users can read.
 
-### _user_stats
+### \_user_stats
 
 Pre-computed user aggregates with lifetime totals and rolling windows.
 
@@ -390,7 +418,7 @@ interface UserStatsDoc {
   lifetime: {
     conversationsCreated: number;
     conversationsDeleted: number;
-    conversationsExisting: number;  // created - deleted
+    conversationsExisting: number; // created - deleted
     jobsSucceeded: number;
     jobsFailed: number;
     audioHoursProcessed: number;
@@ -424,7 +452,7 @@ interface UserStatsDoc {
 
 **Security**: Users can read their own stats. Admin users can read all. Only Cloud Functions can write.
 
-### _global_stats
+### \_global_stats
 
 System-wide aggregates for admin dashboard.
 
@@ -440,7 +468,7 @@ interface GlobalStatsDoc {
 
   processing: {
     totalJobsAllTime: number;
-    successRate: number;  // 0-100
+    successRate: number; // 0-100
     avgProcessingTimeMs: number;
     totalAudioHoursProcessed: number;
   };
@@ -459,13 +487,13 @@ interface GlobalStatsDoc {
   };
 
   lastUpdatedAt: Timestamp;
-  computedAt: string;  // ISO timestamp
+  computedAt: string; // ISO timestamp
 }
 ```
 
 **Security**: Only admin users can read. Only Cloud Functions can write.
 
-### _daily_stats
+### \_daily_stats
 
 Time-series data for admin charts.
 
@@ -473,7 +501,7 @@ Time-series data for admin charts.
 
 ```typescript
 interface DailyStatsDoc {
-  date: string;  // YYYY-MM-DD
+  date: string; // YYYY-MM-DD
   activeUsers: number;
   newUsers: number;
   conversationsCreated: number;
@@ -491,7 +519,7 @@ interface DailyStatsDoc {
 
 **Security**: Only admin users can read. Only Cloud Functions can write.
 
-### _pricing
+### \_pricing
 
 LLM pricing configuration for cost estimation.
 
@@ -500,25 +528,26 @@ LLM pricing configuration for cost estimation.
 **IMPORTANT (v2.2.0+)**: Pricing configuration is **required**. If pricing records are missing, costs will calculate as $0 with warnings logged. There are no longer default fallback values.
 
 **Required pricing records**:
+
 - `gemini-3-flash` - Audio input pricing (inputPricePerMillion for audio, outputPricePerMillion)
 - `gemini-3-flash-text` - Text input pricing (inputPricePerMillion for text)
 - `whisperx` - Compute time pricing (pricePerSecond) - timestamps only
 
 ```typescript
 interface PricingDoc {
-  model: string;  // 'gemini-3-flash', 'gemini-3-flash-text', 'whisperx'
+  model: string; // 'gemini-3-flash', 'gemini-3-flash-text', 'whisperx'
   service: 'gemini' | 'cloud-run-gpu';
 
   // Token-based pricing (for Gemini)
-  inputPricePerMillion?: number;   // USD per 1M input tokens
-  outputPricePerMillion?: number;  // USD per 1M output tokens
+  inputPricePerMillion?: number; // USD per 1M input tokens
+  outputPricePerMillion?: number; // USD per 1M output tokens
 
   // Time-based pricing (for Cloud Run WhisperX)
-  pricePerSecond?: number;         // USD per compute second
+  pricePerSecond?: number; // USD per compute second
 
   // Validity period
-  effectiveFrom: Timestamp;        // Start date (inclusive)
-  effectiveUntil?: Timestamp;      // End date (exclusive), null = current
+  effectiveFrom: Timestamp; // Start date (inclusive)
+  effectiveUntil?: Timestamp; // End date (exclusive), null = current
 
   // Metadata
   notes?: string;
@@ -528,6 +557,7 @@ interface PricingDoc {
 ```
 
 **Example pricing documents**:
+
 ```json
 // gemini-2.5-flash (audio input)
 {
@@ -557,7 +587,7 @@ interface PricingDoc {
 
 **Security**: All authenticated users can read (for cost display). Only admin users can write.
 
-### _chat_rate_limits
+### \_chat_rate_limits
 
 Rate limiting storage for chat queries to prevent abuse.
 
@@ -567,10 +597,10 @@ Rate limiting storage for chat queries to prevent abuse.
 interface ChatRateLimitDoc {
   conversationId: string;
   userId: string;
-  dateBucket: string;              // YYYY-MM-DD in UTC
-  queryCount: number;              // Number of queries made today
-  firstQueryAt: Timestamp;         // First query of the day
-  lastQueryAt: Timestamp;          // Most recent query
+  dateBucket: string; // YYYY-MM-DD in UTC
+  queryCount: number; // Number of queries made today
+  firstQueryAt: Timestamp; // First query of the day
+  lastQueryAt: Timestamp; // Most recent query
 }
 ```
 
@@ -589,16 +619,16 @@ interface Conversation {
   conversationId: string;
   userId: string;
   title: string;
-  createdAt: string;          // ISO timestamp
-  updatedAt: string;          // ISO timestamp
+  createdAt: string; // ISO timestamp
+  updatedAt: string; // ISO timestamp
   durationMs: number;
-  audioUrl?: string;          // Temporary signed URL
+  audioUrl?: string; // Temporary signed URL
   status: 'queued' | 'processing' | 'complete' | 'failed' | 'aborted';
-  processingPipeline?: 'gemini_hybrid';              // Always 'gemini_hybrid' (legacy pipeline removed)
-  pipelineVersion?: string;       // Freeform version marker
+  processingPipeline?: 'gemini_hybrid'; // Always 'gemini_hybrid' — the only active pipeline
+  pipelineVersion?: 'gemini_hybrid'; // Matches processingPipeline (no legacy variants)
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
-  alignmentError?: string;    // Reason for fallback
-  queuedAt?: string;          // ISO timestamp when upload received
+  alignmentError?: string; // Reason for fallback
+  queuedAt?: string; // ISO timestamp when upload received
   processingStartedAt?: string; // ISO timestamp when processing began
   speakers: Record<string, Speaker>;
   segments: Segment[];
@@ -614,8 +644,8 @@ interface Conversation {
 ```typescript
 interface Speaker {
   speakerId: string;
-  displayName: string;        // User-editable name
-  colorIndex: number;         // Index into color palette
+  displayName: string; // User-editable name
+  colorIndex: number; // Index into color palette
 }
 ```
 
@@ -624,10 +654,10 @@ interface Speaker {
 ```typescript
 interface Segment {
   segmentId: string;
-  index: number;              // Order in transcript
+  index: number; // Order in transcript
   speakerId: string;
-  startMs: number;            // Start time in milliseconds
-  endMs: number;              // End time in milliseconds
+  startMs: number; // Start time in milliseconds
+  endMs: number; // End time in milliseconds
   text: string;
 }
 ```
@@ -637,10 +667,10 @@ interface Segment {
 ```typescript
 interface Term {
   termId: string;
-  key: string;                // Normalized term (lowercase)
-  display: string;            // Display form
-  definition: string;         // AI-generated explanation
-  aliases: string[];          // Alternative forms
+  key: string; // Normalized term (lowercase)
+  display: string; // Display form
+  definition: string; // AI-generated explanation
+  aliases: string[]; // Alternative forms
 }
 ```
 
@@ -650,7 +680,7 @@ interface Term {
 interface TermOccurrence {
   termId: string;
   segmentId: string;
-  startChar: number;          // Character offset in segment
+  startChar: number; // Character offset in segment
   endChar: number;
 }
 ```
@@ -660,9 +690,9 @@ interface TermOccurrence {
 ```typescript
 interface Topic {
   topicId: string;
-  label: string;              // Topic title
+  label: string; // Topic title
   startsAfterSegmentIndex: number;
-  isTangent: boolean;         // Whether this is a digression
+  isTangent: boolean; // Whether this is a digression
 }
 ```
 
@@ -671,9 +701,9 @@ interface Topic {
 ```typescript
 interface Person {
   personId: string;
-  name: string;               // Person's name
-  affiliation?: string;       // Company, role, etc.
-  userNotes?: string;         // User-added notes
+  name: string; // Person's name
+  affiliation?: string; // Company, role, etc.
+  userNotes?: string; // User-added notes
 }
 ```
 
@@ -696,14 +726,14 @@ Enum representing granular processing stages:
 
 ```typescript
 enum ProcessingStep {
-  PENDING = 'pending',         // Waiting to start
-  UPLOADING = 'uploading',     // Audio uploading to Storage
+  PENDING = 'pending', // Waiting to start
+  UPLOADING = 'uploading', // Audio uploading to Storage
   TRANSCRIBING = 'transcribing', // WhisperX transcription
-  ANALYZING = 'analyzing',     // Gemini analysis (terms, topics, people)
-  ALIGNING = 'aligning',       // WhisperX timestamp alignment
-  FINALIZING = 'finalizing',   // Writing results to Firestore
-  COMPLETE = 'complete',       // Processing finished successfully
-  FAILED = 'failed'            // Processing failed with error
+  ANALYZING = 'analyzing', // Gemini analysis (terms, topics, people)
+  ALIGNING = 'aligning', // WhisperX timestamp alignment
+  FINALIZING = 'finalizing', // Writing results to Firestore
+  COMPLETE = 'complete', // Processing finished successfully
+  FAILED = 'failed', // Processing failed with error
 }
 ```
 
@@ -713,13 +743,14 @@ Metadata for enhanced UI display of processing steps:
 
 ```typescript
 interface StepMeta {
-  label: string;              // Human-readable step name (e.g., "Transcribing Audio")
-  description?: string;       // Optional detailed description of current activity
-  category: 'pending' | 'active' | 'success' | 'error';  // Visual state category
+  label: string; // Human-readable step name (e.g., "Transcribing Audio")
+  description?: string; // Optional detailed description of current activity
+  category: 'pending' | 'active' | 'success' | 'error'; // Visual state category
 }
 ```
 
 **Category Values:**
+
 - `'pending'` - Step not yet started (gray/muted styling)
 - `'active'` - Step currently in progress (blue/animated styling)
 - `'success'` - Step completed successfully (green/check styling)
@@ -731,18 +762,19 @@ Real-time processing status for user feedback:
 
 ```typescript
 interface ProcessingProgress {
-  currentStep: ProcessingStep;       // Current processing stage
-  percentComplete: number;           // 0-100 progress percentage
-  stepStartedAt?: string;            // ISO timestamp when current step began
-  estimatedRemainingMs?: number;     // Estimated time to completion
-  errorMessage?: string;             // Error details if failed
-  stepMeta?: StepMeta;               // Optional metadata for enhanced UI feedback
+  currentStep: ProcessingStep; // Current processing stage
+  percentComplete: number; // 0-100 progress percentage
+  stepStartedAt?: string; // ISO timestamp when current step began
+  estimatedRemainingMs?: number; // Estimated time to completion
+  errorMessage?: string; // Error details if failed
+  stepMeta?: StepMeta; // Optional metadata for enhanced UI feedback
 }
 ```
 
 **Backward Compatibility Note:** The `stepMeta` field is optional to maintain compatibility with existing conversations created before this feature was added. Legacy data will have `stepMeta: undefined`, and UI components should gracefully handle this case by falling back to default display behavior based on `currentStep`.
 
 **Example JSON:**
+
 ```json
 {
   "currentStep": "analyzing",
@@ -763,13 +795,12 @@ Timeline tracking for performance analysis and debugging:
 
 ```typescript
 interface ProcessingTimeline {
-  stepName: ProcessingStep;   // Which step this entry represents
-  startedAt: string;          // ISO timestamp when step started
-  completedAt?: string;       // ISO timestamp when step completed (absent if in-progress)
-  durationMs?: number;        // Duration in milliseconds (computed when completedAt is set)
+  stepName: ProcessingStep; // Which step this entry represents
+  startedAt: string; // ISO timestamp when step started
+  completedAt?: string; // ISO timestamp when step completed (absent if in-progress)
+  durationMs?: number; // Duration in milliseconds (computed when completedAt is set)
 }
 ```
-
 
 ## Firebase Storage Structure
 
@@ -922,7 +953,7 @@ interface FirestoreService {
   subscribeToUserConversations(
     userId: string,
     callback: (conversations: Conversation[]) => void
-  ): () => void;  // Returns unsubscribe function
+  ): () => void; // Returns unsubscribe function
 
   // Save conversation
   save(conversation: Conversation): Promise<void>;
@@ -947,7 +978,7 @@ interface StorageService {
     userId: string,
     conversationId: string,
     file: File
-  ): Promise<string>;  // Returns storage path
+  ): Promise<string>; // Returns storage path
 
   // Get signed download URL
   getAudioUrl(storagePath: string): Promise<string>;
@@ -959,15 +990,16 @@ interface StorageService {
 
 ## Cloud Function Schemas
 
-### transcribeAudio (Storage Trigger)
+### transcribeAudio (Storage Trigger — Dispatcher)
 
 **Trigger**: `onObjectFinalized` on `audio/{userId}/{fileName}`
 
 **Process**:
-1. Download audio from Storage
-2. Call Gemini API with audio
-3. Parse structured response
-4. Update Firestore document
+
+1. Validate upload path and dedup via Firestore transaction
+2. Write initial processing state (`status: 'processing'`)
+3. Dispatch IAM-authenticated HTTP POST to `transcription-orchestrator` Cloud Run service
+4. Orchestrator runs Gemini + WhisperX + HARDY pipeline and writes results to Firestore
 
 **Gemini Response Schema**:
 
@@ -1005,39 +1037,44 @@ interface GeminiResponse {
 ### chatWithConversation (HTTPS Callable)
 
 **Request**:
+
 ```typescript
 {
   conversationId: string;
-  message: string;  // Max 1000 characters
+  message: string; // Max 1000 characters
 }
 ```
 
 **Response**:
+
 ```typescript
 {
-  answer: string;                    // LLM-generated answer
-  sources: Array<{                   // Validated timestamp sources
+  answer: string; // LLM-generated answer
+  sources: Array<{
+    // Validated timestamp sources
     segmentId: string;
     startMs: number;
     endMs: number;
     text: string;
     confidence: 'high' | 'medium' | 'low';
   }>;
-  isUnanswerable: boolean;           // True if question not answerable from transcript
-  tokenUsage: {                      // LLM usage for this query
+  isUnanswerable: boolean; // True if question not answerable from transcript
+  tokenUsage: {
+    // LLM usage for this query
     inputTokens: number;
     outputTokens: number;
     model: string;
-  };
-  costUsd: number;                   // Estimated cost for this query
-  responseTimeMs: number;            // Processing time
-  rateLimitRemaining: number;        // Queries remaining today
+  }
+  costUsd: number; // Estimated cost for this query
+  responseTimeMs: number; // Processing time
+  rateLimitRemaining: number; // Queries remaining today
 }
 ```
 
 **Rate Limiting**: 20 queries per conversation per day per user. Resets at midnight UTC.
 
 **Errors**:
+
 - `unauthenticated`: User not signed in
 - `invalid-argument`: Missing/invalid conversationId or message
 - `not-found`: Conversation doesn't exist

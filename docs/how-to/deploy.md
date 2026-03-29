@@ -4,13 +4,15 @@ Deploy the Audio Transcript Analysis App to production.
 
 ## Architecture Overview
 
-| Component | Platform | Trigger |
-|-----------|----------|---------|
-| Frontend | Cloud Run | Push to `main` (parallel) |
-| Cloud Functions | Firebase | Push to `main` (parallel) |
-| Security Rules | Firebase | Manual deployment |
+| Component                  | Platform        | Deploy Trigger | Workflow                                 |
+| -------------------------- | --------------- | -------------- | ---------------------------------------- |
+| Frontend                   | Cloud Run       | Push to `main` | `deploy-frontend.yml`                    |
+| Cloud Functions            | Firebase        | Push to `main` | `deploy-firebase.yml`                    |
+| Transcription Orchestrator | Cloud Run       | Push to `main` | `deploy-orchestrator.yml`                |
+| WhisperX GPU               | Cloud Run (GPU) | Push to `main` | `deploy-whisper.yml`                     |
+| Security Rules             | Firebase        | Manual         | `firebase deploy --only firestore:rules` |
 
-**Note:** Frontend and Firebase Functions deploy in parallel on merge to main (~3-4 min total).
+**Note:** Frontend, Cloud Functions, and orchestrator deploy in parallel on merge to main. GitHub Actions is the primary deploy path for all components; `gcloud run deploy` is available as a manual fallback.
 
 ## Single Project Architecture
 
@@ -51,6 +53,7 @@ Deployments happen automatically when you push to `main`:
 ### Frontend (Cloud Run)
 
 Triggered when any frontend files change:
+
 - React components, pages, hooks
 - TypeScript/CSS files
 - Package.json, Dockerfile
@@ -58,6 +61,7 @@ Triggered when any frontend files change:
 ### Firebase (Functions + Rules)
 
 Triggered when Firebase files change:
+
 - `functions/**`
 - `firestore.rules`, `storage.rules`
 - `firestore.indexes.json`
@@ -71,24 +75,24 @@ Configure in **Settings → Secrets and variables → Actions**:
 
 ### Project Configuration
 
-| Secret | Description |
-|--------|-------------|
-| `GCP_PROJECT_ID` | Your Firebase/GCP project ID (same for frontend and backend) |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity Federation provider (see setup below) |
-| `GCP_SERVICE_ACCOUNT` | Service account email for GitHub Actions |
+| Secret                           | Description                                                  |
+| -------------------------------- | ------------------------------------------------------------ |
+| `GCP_PROJECT_ID`                 | Your Firebase/GCP project ID (same for frontend and backend) |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity Federation provider (see setup below)      |
+| `GCP_SERVICE_ACCOUNT`            | Service account email for GitHub Actions                     |
 
 > **Important**: `GCP_PROJECT_ID` must be the **same project** as your Firebase project. This ensures Cloud Run, Cloud Functions, Firestore, and Storage all share the same billing and IAM configuration.
 
 ### Firebase Config (Frontend Build)
 
-| Secret | Description |
-|--------|-------------|
-| `VITE_FIREBASE_API_KEY` | Firebase API key (from `firebase apps:sdkconfig`) |
-| `VITE_FIREBASE_AUTH_DOMAIN` | Firebase auth domain (e.g., `project-id.firebaseapp.com`) |
-| `VITE_FIREBASE_PROJECT_ID` | Firebase project ID (same as `GCP_PROJECT_ID`) |
-| `VITE_FIREBASE_STORAGE_BUCKET` | Storage bucket (e.g., `project-id.firebasestorage.app`) |
-| `VITE_FIREBASE_MESSAGING_SENDER_ID` | Messaging sender ID (project number) |
-| `VITE_FIREBASE_APP_ID` | Firebase app ID |
+| Secret                              | Description                                               |
+| ----------------------------------- | --------------------------------------------------------- |
+| `VITE_FIREBASE_API_KEY`             | Firebase API key (from `firebase apps:sdkconfig`)         |
+| `VITE_FIREBASE_AUTH_DOMAIN`         | Firebase auth domain (e.g., `project-id.firebaseapp.com`) |
+| `VITE_FIREBASE_PROJECT_ID`          | Firebase project ID (same as `GCP_PROJECT_ID`)            |
+| `VITE_FIREBASE_STORAGE_BUCKET`      | Storage bucket (e.g., `project-id.firebasestorage.app`)   |
+| `VITE_FIREBASE_MESSAGING_SENDER_ID` | Messaging sender ID (project number)                      |
+| `VITE_FIREBASE_APP_ID`              | Firebase app ID                                           |
 
 > **Note**: The `VITE_` prefix is required - Vite only exposes environment variables with this prefix to client-side code.
 
@@ -96,11 +100,11 @@ Configure in **Settings → Secrets and variables → Actions**:
 
 These secrets are stored in GCP Secret Manager and accessed by Cloud Functions and Cloud Build:
 
-| Secret | Description | Setup |
-|--------|-------------|-------|
-| `GEMINI_API_KEY` | Gemini API key for transcription + analysis | `gcp-setup.sh` creates automatically, or `npx firebase functions:secrets:set GEMINI_API_KEY` |
-| `WHISPER_SERVICE_URL` | Cloud Run URL for WhisperX timestamps service | `gcp-setup.sh` auto-detects, or `npx firebase functions:secrets:set WHISPER_SERVICE_URL` |
-| `HF_TOKEN` | HuggingFace token for WhisperX model downloads | `gcp-setup.sh` Step 10e, or set via Secret Manager directly |
+| Secret                | Description                                    | Setup                                                                                        |
+| --------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `GEMINI_API_KEY`      | Gemini API key for transcription + analysis    | `gcp-setup.sh` creates automatically, or `npx firebase functions:secrets:set GEMINI_API_KEY` |
+| `WHISPER_SERVICE_URL` | Cloud Run URL for WhisperX timestamps service  | `gcp-setup.sh` auto-detects, or `npx firebase functions:secrets:set WHISPER_SERVICE_URL`     |
+| `HF_TOKEN`            | HuggingFace token for WhisperX model downloads | `gcp-setup.sh` Step 10e, or set via Secret Manager directly                                  |
 
 **Important:** The setup script (`gcp-setup.sh`) handles all three secrets. If setting manually:
 
@@ -119,14 +123,15 @@ npx firebase functions:secrets:set WHISPER_SERVICE_URL
 ```
 
 To get Firebase config values:
+
 ```bash
 firebase apps:sdkconfig WEB --project=your-project-id
 ```
 
 ### For Firebase Deployment
 
-| Secret | Description |
-|--------|-------------|
+| Secret                     | Description                   |
+| -------------------------- | ----------------------------- |
 | `FIREBASE_SERVICE_ACCOUNT` | Firebase service account JSON |
 
 ## Pricing Configuration (Required)
@@ -138,22 +143,24 @@ As of v2.2.0, pricing configuration in the `_pricing` Firestore collection is **
 Create these documents in the `_pricing` collection:
 
 1. **`gemini-3-flash`** (audio input pricing):
+
    ```json
    {
      "model": "gemini-3-flash",
      "service": "gemini",
-     "inputPricePerMillion": 1.00,
-     "outputPricePerMillion": 2.50,
+     "inputPricePerMillion": 1.0,
+     "outputPricePerMillion": 2.5,
      "effectiveFrom": "2026-01-01T00:00:00Z"
    }
    ```
 
 2. **`gemini-3-flash-text`** (text input pricing):
+
    ```json
    {
      "model": "gemini-3-flash-text",
      "service": "gemini",
-     "inputPricePerMillion": 0.30,
+     "inputPricePerMillion": 0.3,
      "effectiveFrom": "2026-01-01T00:00:00Z"
    }
    ```
@@ -194,6 +201,91 @@ gcloud projects add-iam-policy-binding $BILLING_PROJECT \
 
 The `gcp-setup.sh` script handles this automatically when run with the billing project configured.
 
+## Transcription Orchestrator (Cloud Run)
+
+The `transcription-orchestrator` Cloud Run service runs the Gemini hybrid pipeline. It is the primary compute for transcription — the Cloud Function dispatcher just validates and hands off.
+
+### GitHub Actions Deployment (Primary)
+
+The `deploy-orchestrator.yml` workflow builds and deploys automatically.
+
+**Automatic triggers:**
+
+- Push to `main` when `cloud-run-orchestrator/**` files change
+- Push to `main` when shared function sources change (`functions/src/gemini3Pipeline.ts`, `alignment.ts`, `audioUtils.ts`, etc.)
+- Push to `main` when `.github/workflows/deploy-orchestrator.yml` changes
+
+**Manual trigger:**
+
+1. Go to **Actions** → **Deploy Orchestrator** → **Run workflow**
+2. Options:
+   - `deploy_only`: Skip build, deploy existing image
+   - `image_tag`: Custom tag (default: git SHA)
+
+**Required GitHub Secrets:**
+
+| Secret                           | Description                                                                    |
+| -------------------------------- | ------------------------------------------------------------------------------ |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity Federation provider path                                     |
+| `GCP_SERVICE_ACCOUNT`            | Service account email (e.g., `github-actions@PROJECT.iam.gserviceaccount.com`) |
+| `GCP_PROJECT_ID`                 | Your GCP project ID                                                            |
+| `FIREBASE_STORAGE_BUCKET`        | Storage bucket name (runtime env var)                                          |
+
+**Runtime secrets** (injected from Secret Manager at deploy time):
+
+- `GEMINI_API_KEY` — Gemini API key
+- `WHISPER_SERVICE_URL` — WhisperX Cloud Run service URL
+- `ORCHESTRATOR_URL` — Updated automatically by the workflow after each deploy
+
+### Service Configuration
+
+| Setting       | Value    | Rationale                                   |
+| ------------- | -------- | ------------------------------------------- |
+| CPU           | 2        | Network-bound pipeline with HARDY headroom  |
+| Memory        | 2Gi      | Audio download + ffmpeg chunk splitting     |
+| Timeout       | 900s     | 15-minute pipeline ceiling                  |
+| Concurrency   | 1        | One pipeline per instance                   |
+| Min instances | 0        | Scale to zero when idle                     |
+| Max instances | 3        | Cost safeguard                              |
+| Auth          | IAM only | Dispatcher must present OIDC identity token |
+
+### Manual Deployment (Fallback)
+
+```bash
+PROJECT_ID="your-project-id"
+REGION="us-central1"
+IMAGE="us-central1-docker.pkg.dev/${PROJECT_ID}/orchestrator/orchestrator:latest"
+
+gcloud run deploy transcription-orchestrator \
+  --project=$PROJECT_ID \
+  --region=$REGION \
+  --image=$IMAGE \
+  --cpu=2 \
+  --memory=2Gi \
+  --timeout=900 \
+  --concurrency=1 \
+  --min-instances=0 \
+  --max-instances=3 \
+  --no-allow-unauthenticated \
+  --service-account="orchestrator-runtime@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --set-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest,WHISPER_SERVICE_URL=WHISPER_SERVICE_URL:latest" \  # pragma: allowlist secret
+  --set-env-vars="FIREBASE_STORAGE_BUCKET=your-bucket.appspot.com"
+```
+
+### Verify Deployment
+
+```bash
+# Health check (requires IAM auth)
+TOKEN=$(gcloud auth print-identity-token \
+  --impersonate-service-account="github-actions@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --audiences="$(gcloud run services describe transcription-orchestrator --region=$REGION --format='value(status.url)')")
+
+curl -H "Authorization: Bearer $TOKEN" \
+  "$(gcloud run services describe transcription-orchestrator --region=$REGION --format='value(status.url)')/health"
+```
+
+The health endpoint returns the build version, branch, and uptime — useful for confirming which commit is deployed.
+
 ## Whisper GPU Service (Cloud Run)
 
 The WhisperX service runs on Cloud Run with an NVIDIA L4 GPU. It provides **word-level timestamps only** — speaker diarization is handled by Gemini 3 Flash.
@@ -202,20 +294,22 @@ The WhisperX service runs on Cloud Run with an NVIDIA L4 GPU. It provides **word
 
 There are two ways to deploy WhisperX:
 
-| Method | When to Use | Requirements |
-|--------|-------------|--------------|
-| **GitHub Actions** | Automated CI/CD, no local Docker | Push to `main` or manual workflow dispatch |
-| **Local Script** | Manual deploys, development | Docker installed (or use `--cloud-build` flag) |
+| Method             | When to Use                      | Requirements                                   |
+| ------------------ | -------------------------------- | ---------------------------------------------- |
+| **GitHub Actions** | Automated CI/CD, no local Docker | Push to `main` or manual workflow dispatch     |
+| **Local Script**   | Manual deploys, development      | Docker installed (or use `--cloud-build` flag) |
 
 ### GitHub Actions Deployment (Recommended)
 
 The `deploy-whisper.yml` workflow handles building and deploying without requiring local Docker.
 
 **Automatic triggers:**
+
 - Push to `main` when `cloud-run-whisper/**` files change
 - Push to `main` when `.github/workflows/deploy-whisper.yml` changes
 
 **Manual trigger:**
+
 1. Go to **Actions** → **Deploy WhisperX** → **Run workflow**
 2. Options:
    - `deploy_only`: Skip build, deploy existing image
@@ -223,16 +317,16 @@ The `deploy-whisper.yml` workflow handles building and deploying without requiri
 
 **Required GitHub Secrets:**
 
-| Secret | Description |
-|--------|-------------|
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity Federation provider path |
-| `GCP_SERVICE_ACCOUNT` | Service account email (e.g., `github-actions@PROJECT.iam.gserviceaccount.com`) |
-| `GCP_PROJECT_ID` | Your GCP project ID |
+| Secret                           | Description                                                                    |
+| -------------------------------- | ------------------------------------------------------------------------------ |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity Federation provider path                                     |
+| `GCP_SERVICE_ACCOUNT`            | Service account email (e.g., `github-actions@PROJECT.iam.gserviceaccount.com`) |
+| `GCP_PROJECT_ID`                 | Your GCP project ID                                                            |
 
 **Required GCP Secret Manager Secrets:**
 
-| Secret | Description | Setup |
-|--------|-------------|-------|
+| Secret     | Description                                 | Setup                              |
+| ---------- | ------------------------------------------- | ---------------------------------- |
 | `HF_TOKEN` | HuggingFace token for gated WhisperX models | Created by `gcp-setup.sh` Step 10e |
 
 The HF_TOKEN secret must be accessible to the Cloud Build service account. The `gcp-setup.sh` script grants the necessary `secretAccessor` role.
@@ -276,17 +370,18 @@ The deploy script supports isolated evaluation services for testing alternative 
 
 **Available evaluation knobs:**
 
-| Flag | Default | Effect | Rebuild Required? |
-|------|---------|--------|-------------------|
-| `--gpu-type TYPE` | `nvidia-l4` | Cloud Run GPU type (only `nvidia-l4` and `nvidia-rtx-pro-6000` supported) | No |
-| `--model-size SIZE` | `large-v3-turbo` | Whisper model baked into image | **Yes** |
-| `--hf-repo REPO` | Auto-detected | HuggingFace repo for model download | **Yes** |
-| `--beam-size N` | `5` | Decoding beam width (runtime env var) | No |
-| `--eval TAG` | _(none)_ | Deploy as `whisperx-service-eval-TAG` | No |
+| Flag                | Default          | Effect                                                                    | Rebuild Required? |
+| ------------------- | ---------------- | ------------------------------------------------------------------------- | ----------------- |
+| `--gpu-type TYPE`   | `nvidia-l4`      | Cloud Run GPU type (only `nvidia-l4` and `nvidia-rtx-pro-6000` supported) | No                |
+| `--model-size SIZE` | `large-v3-turbo` | Whisper model baked into image                                            | **Yes**           |
+| `--hf-repo REPO`    | Auto-detected    | HuggingFace repo for model download                                       | **Yes**           |
+| `--beam-size N`     | `5`              | Decoding beam width (runtime env var)                                     | No                |
+| `--eval TAG`        | _(none)_         | Deploy as `whisperx-service-eval-TAG`                                     | No                |
 
 > **Model repos:** The default HF repo pattern (`deepdml/faster-whisper-{SIZE}-ct2`) only works for `large-v3-turbo`. Other sizes use different repos — e.g., `Systran/faster-whisper-medium` for the medium model. Use `--hf-repo` to override when testing non-default models.
 
 > **Important:** `--eval` deploys to a separate service name, so production is never touched. Clean up eval services when done to avoid idle GPU costs:
+>
 > ```bash
 > gcloud run services delete whisperx-service-eval-t4-test --region=us-east4
 > ```
@@ -304,6 +399,7 @@ If Docker is not installed locally, use the `--cloud-build` flag:
 ```
 
 This submits the build to Cloud Build, which:
+
 1. Reads `HF_TOKEN` from GCP Secret Manager
 2. Builds the image using BuildKit secret mounts
 3. Pushes to Artifact Registry
@@ -312,6 +408,7 @@ This submits the build to Cloud Build, which:
 The script uses `--service-account` to run the build as the `github-actions` service account, which has the necessary Secret Manager permissions.
 
 The script reads configuration from `.env` (or environment variables):
+
 - `GCP_PROJECT_ID` (required)
 - `WHISPER_REGION` (default: `us-east4`)
 - `WHISPER_SERVICE_NAME` (default: `whisperx-service`)
@@ -363,17 +460,17 @@ gcloud run deploy whisperx-service \
 
 **Flag Breakdown:**
 
-| Flag | Value | Why |
-|------|-------|-----|
-| `--gpu=1` | 1 GPU | WhisperX needs GPU for inference |
-| `--gpu-type=nvidia-l4` | NVIDIA L4 | Cost-effective inference GPU |
-| `--no-gpu-zonal-redundancy` | Single zone | Lower quota requirement, fine for batch workloads |
-| `--memory=16Gi` | 16 GiB | WhisperX models need headroom |
-| `--timeout=300` | 5 min | Hard limit per request (Cloud Run backstop) |
-| `--concurrency=1` | 1 req/instance | GPU can't safely share across concurrent requests |
-| `--min-instances=0` | Scale to zero | No cost when idle |
-| `--max-instances=3` | Max 3 instances | Cost safeguard — caps GPU spend |
-| `--no-allow-unauthenticated` | IAM auth | Only Cloud Functions runtime SA can invoke |
+| Flag                         | Value           | Why                                               |
+| ---------------------------- | --------------- | ------------------------------------------------- |
+| `--gpu=1`                    | 1 GPU           | WhisperX needs GPU for inference                  |
+| `--gpu-type=nvidia-l4`       | NVIDIA L4       | Cost-effective inference GPU                      |
+| `--no-gpu-zonal-redundancy`  | Single zone     | Lower quota requirement, fine for batch workloads |
+| `--memory=16Gi`              | 16 GiB          | WhisperX models need headroom                     |
+| `--timeout=300`              | 5 min           | Hard limit per request (Cloud Run backstop)       |
+| `--concurrency=1`            | 1 req/instance  | GPU can't safely share across concurrent requests |
+| `--min-instances=0`          | Scale to zero   | No cost when idle                                 |
+| `--max-instances=3`          | Max 3 instances | Cost safeguard — caps GPU spend                   |
+| `--no-allow-unauthenticated` | IAM auth        | Only Cloud Functions runtime SA can invoke        |
 
 ### Verify the Deployment
 
@@ -434,9 +531,11 @@ Alternatively, create the alert via the Cloud Console:
 Cloud Run deployment uses Workload Identity Federation for secure, keyless authentication from GitHub Actions. This must be configured in the **same project** as your Firebase backend.
 
 > **Tip**: The automated setup script handles all of this:
+>
 > ```bash
 > ./scripts/gcp-setup.sh <project-id> <billing-account-id> <github-org/repo>
 > ```
+>
 > Only follow the manual steps below if you need to set up Workload Identity separately.
 
 ### Enable Required APIs
@@ -700,6 +799,7 @@ npx firebase deploy --only functions --project=$PROJECT_ID
 ### Alerts
 
 Set up alerts in Google Cloud Console:
+
 - Function error rate > 5%
 - Storage > 80% of quota
 - Unusual traffic spikes
@@ -717,6 +817,7 @@ Debug logs are always written. To view them:
 3. Set severity to include **Debug**
 
 **Log prefixes to look for:**
+
 - `[Transcribe]` - File processing, timing, status updates
 - `[Gemini]` - API calls, response parsing
 - `[Transform]` - Data model transformation
@@ -728,6 +829,7 @@ Debug logs are always written. To view them:
 ### Frontend (Browser Console)
 
 The `useAudioPlayer` hook logs drift correction details to the browser console:
+
 - `[Drift Analysis]` - Audio vs transcript duration comparison
 - `[Auto-Sync]` - Timestamp scaling when drift correction is applied
 
@@ -762,6 +864,7 @@ Firebase Auth only allows sign-in from pre-approved domains. After deploying to 
 5. Add any custom domains (e.g., `ata.wachtel.us`) once the Cloud Run mapping is complete
 
 > **Tip**: Get your Cloud Run URL with:
+>
 > ```bash
 > PROJECT_ID="your-project-id"
 > REGION="us-west1"

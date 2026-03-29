@@ -1,214 +1,209 @@
-# Timestamp Alignment Architecture Decision
+# HARDY Alignment — Technical Reference
 
-## Problem Statement
+**Hierarchical Anchored Resilient Dynamic Alignment**
 
-Gemini 3 Flash produces excellent transcription content (text, speakers, terms, topics) but unreliable timestamps:
-- **Observed drift**: Timestamps drift ~1.6x relative to actual audio time
-- **Pattern**: Linear drift that worsens over time (systematic, not random)
-- **Root cause**: Gemini likely estimates timestamps from text features rather than actual audio analysis
+HARDY bridges Gemini 3 Flash's content (text, speakers, topics) with WhisperX's precise word-level timestamps. Gemini produces excellent transcription but its timestamps drift ~1.6x relative to actual audio time. WhisperX provides ~50ms timestamp accuracy but no speaker diarization. HARDY aligns the two, giving you Gemini's text with WhisperX's timing.
 
-This problem existed with Gemini 2.5 Flash and persists with Gemini 3 Flash. The solution is the same: use WhisperX for precise timestamps and HARDY alignment to bridge the two.
+## Algorithm Overview
 
-## Expert Analysis Summary
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        HARDY PIPELINE                           │
+│    Hierarchical Anchored Resilient Dynamic Alignment            │
+│                                                                 │
+│  INPUT: Gemini segments (text + drifted timestamps)             │
+│         WhisperX words (precise timestamps, no speakers)        │
+│                                                                 │
+│  OUTPUT: Aligned segments (Gemini text + WhisperX timestamps)   │
+└─────────────────────────────────────────────────────────────────┘
 
-A multi-expert analysis was conducted with perspectives from:
-- Speech Recognition Researchers
-- Audio Signal Processing Engineers
-- Python Backend Architects
-- ML Engineers
-- Cost Optimization Specialists
-
-### Key Insights
-
-1. **Linear drift pattern** indicates simple ratio scaling could provide immediate improvement
-2. **Forced alignment** is the proper solution (matching text to audio waveform)
-3. **Hybrid approach** recommended: Keep Gemini for content, add timing from WhisperX or similar
-4. **Don't sync in real-time** - process once, store accurate timestamps
-
-## Phased Implementation Plan
-
-### Phase 1: Client-Side Drift Compensation (Immediate)
-**Status**: Complete
-**Effort**: 1-2 hours
-**Accuracy Target**: <2 seconds (down from 8-10)
-
-Simple ratio-based scaling using actual audio duration vs. transcript duration:
-```javascript
-function compensateDrift(segments, audioDuration) {
-  const transcriptDuration = segments[segments.length-1].endMs;
-  const ratio = audioDuration / transcriptDuration;
-  return segments.map(s => ({
-    ...s,
-    startMs: Math.round(s.startMs * ratio),
-    endMs: Math.round(s.endMs * ratio)
-  }));
-}
+          │
+          ▼
+┌─────────────────────────────────────────────┐
+│  LEVEL 1: ANCHOR POINT IDENTIFICATION       │
+│  findAnchors()                              │
+│                                             │
+│  For each Gemini segment:                   │
+│    ├─ < 2 words? → skip (too short)         │
+│    ├─ > 20 words? → extract 15-word window  │
+│    │   from middle (sub-segment anchoring)  │
+│    ├─ First 5 segments → global search      │
+│    │   (search ALL WhisperX words)           │
+│    └─ Later segments → anchor-based search  │
+│        (search ±30s around nearest anchor)  │
+│                                             │
+│  For each candidate:                        │
+│    findBestMatch() → sliding window         │
+│      ├─ Try 4 window sizes (exact, ±1, -2) │
+│      ├─ fuzz.partial_ratio() pre-filter     │
+│      ├─ computeSimilarity() full scoring    │
+│      │   ├─ token_set_ratio   (30%)         │
+│      │   ├─ token_sort_ratio  (25%)         │
+│      │   ├─ partial_ratio     (20%)         │
+│      │   ├─ sequenceMatcherRatio (15%)      │
+│      │   └─ ngramSimilarity   (10%)         │
+│      ├─ Early exit at ≥ 0.95 confidence     │
+│      └─ MAX_MATCH_ITERATIONS safety cap     │
+│                                             │
+│  Accept anchor if confidence ≥ 0.75         │
+│                                             │
+│  Output: List of anchors                    │
+│    { segmentIdx, wordStartIdx, wordEndIdx,  │
+│      startMs, endMs, confidence }           │
+└─────────────────┬───────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────┐
+│  LEVEL 2: REGION SEGMENTATION               │
+│  buildRegions()                             │
+│                                             │
+│  Divide transcript at anchor points:        │
+│                                             │
+│  Anchor 0 ──── Anchor 1 ──── Anchor 2      │
+│     │              │              │         │
+│     ▼              ▼              ▼         │
+│  [Region 0]    [Region 1]    [Region 2]     │
+│  segs 0-3      segs 5-8      segs 10-14    │
+│  words 0-200   words 300-500  words 600-900 │
+│                                             │
+│  Good anchors → many small regions (fast)   │
+│  Bad anchors → few huge regions (slow!)     │
+│                                             │
+│  This is WHERE the PoC vs production        │
+│  divergence manifests:                      │
+│    PoC: many anchors → small regions → fast │
+│    Prod: few anchors → 1000-word regions →  │
+│          timeout                            │
+└─────────────────┬───────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────┐
+│  LEVEL 3: REGIONAL ALIGNMENT                │
+│  alignRegion()                              │
+│                                             │
+│  For each region, independently:            │
+│    For each segment in region:              │
+│      ├─ Define search window within region  │
+│      │   searchStart = currentWordIdx - 5   │
+│      │   searchEnd = currentWordIdx +       │
+│      │     expectedWords * 3 + 50           │
+│      │                                      │
+│      ├─ findBestMatch() (same as Level 1)   │
+│      │                                      │
+│      ├─ If match ≥ 0.40 confidence:         │
+│      │   → Use WhisperX timestamps          │
+│      │   → method: 'aligned'                │
+│      │                                      │
+│      └─ Else FALLBACK: interpolate          │
+│          → Distribute evenly by word count  │
+│          → Within region time bounds        │
+│          → method: 'interpolated'           │
+│          → confidence: 0.0                  │
+│                                             │
+│  Output per segment:                        │
+│    { speakerId, text, startMs, endMs,       │
+│      confidence, method }                   │
+└─────────────────┬───────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────┐
+│  LEVEL 4: VALIDATION & FALLBACK             │
+│  (in alignTimestamps / pipeline.ts)         │
+│                                             │
+│  Post-processing checks:                    │
+│    ├─ Fix overlapping segments              │
+│    │   (MAX_OVERLAP_MS = 2000)              │
+│    ├─ Fix duration outliers                 │
+│    │   (MIN_MS_PER_WORD=20, MAX=800)        │
+│    ├─ Compute overall confidence stats      │
+│    │   avg, min, max, distribution          │
+│    └─ Log alignment quality metrics         │
+│                                             │
+│  Quality gate (in pipeline.ts):             │
+│    ├─ 0 segments aligned → FATAL error      │
+│    ├─ avg confidence < threshold → warning  │
+│    └─ chunk failure → fall back to scaled   │
+│        Gemini timestamps for that chunk     │
+└─────────────────────────────────────────────┘
 ```
 
-This leverages the existing drift detection code but applies it more aggressively.
+## Implementation Call Graph
 
-### Phase 2: WhisperX via Cloud Run GPU (Current Architecture)
-**Status**: Complete
-**Effort**: 14-21 hours initial, then consolidated into Functions
-**Accuracy Target**: <1 second (~50ms with forced alignment)
+All functions below live in `functions/src/alignment.ts` unless noted.
 
-Architecture (Current - Direct Pipeline):
-```
-┌─────────────────┐     ┌──────────────────────────────────────────────────┐
-│  React Client   │────▶│            Firebase Cloud Functions              │
-│                 │     │                                                  │
-│                 │     │  ┌────────────────┐                              │
-│                 │     │  │ transcribeAudio│                              │
-│                 │     │  │ (Storage Trig) │                              │
-│                 │     │  │  - 540s max    │                              │
-│                 │◀────│  └───────┬────────┘                              │
-│                 │     │          │                                       │
-│                 │     │          ▼                                       │
-│                 │     │  ┌──────────────────────┐                        │
-│                 │     │  │processWithNewPipeline │                       │
-│                 │     │  │  - Gemini 3 Flash    │                        │
-│                 │     │  │  - Split MP3 chunks  │                        │
-│                 │     │  │  - Per-chunk HARDY   │                        │
-│                 │     │  │  - Assemble + save   │                        │
-│                 │     │  └───────┬──────────────┘                        │
-│                 │     └──────────┼────────────────────────────────────────┘
-│                 │                │
-└─────────────────┘                ▼
-                           ┌──────────────────┐
-                           │  Cloud Run GPU   │
-                           │  (WhisperX)      │
-                           │  IAM-auth HTTP   │
-                           └──────────────────┘
+| Function                 | Role                                                | Called By                                                  |
+| ------------------------ | --------------------------------------------------- | ---------------------------------------------------------- |
+| `alignTimestamps()`      | Entry point — calls WhisperX, then runs HARDY       | `pipeline.ts` (orchestrator) / `newPipeline.ts` (emulator) |
+| `findAnchors()`          | Level 1 — identifies high-confidence match points   | `alignTimestamps`                                          |
+| `findBestMatch()`        | Sliding window search — tries multiple window sizes | `findAnchors`, `alignRegion`                               |
+| `computeSimilarity()`    | 5-metric weighted fuzzy scoring                     | `findBestMatch`                                            |
+| `normalizeText()`        | Lowercase, strip punctuation, collapse whitespace   | `computeSimilarity`, `findBestMatch`                       |
+| `sequenceMatcherRatio()` | Gestalt pattern matching (Python difflib port)      | `computeSimilarity`                                        |
+| `findMatchingBlocks()`   | Recursive longest common subsequence                | `sequenceMatcherRatio`                                     |
+| `findLongestMatch()`     | Hash-based longest match in substring range         | `findMatchingBlocks`                                       |
+| `ngramSimilarity()`      | Character n-gram Jaccard similarity                 | `computeSimilarity`                                        |
+| `findNearestAnchor()`    | Find closest anchor to a segment index              | `findAnchors`                                              |
+| `findWordAtTime()`       | Binary search for word index at a given time        | `findAnchors`                                              |
+| `buildRegions()`         | Level 2 — partition transcript at anchor points     | `alignTimestamps`                                          |
+| `alignRegion()`          | Level 3 — align all segments within one region      | `alignTimestamps`                                          |
+
+## Critical Constants
+
+```typescript
+const MAX_MATCH_ITERATIONS = 50000; // Safety cap per findBestMatch() call
+const GOOD_ENOUGH_THRESHOLD = 0.8; // Early exit — stop searching once we hit this score
 ```
 
-**Why Cloud Run GPU instead of a third-party API?**
-- IAM-authenticated HTTP (no API keys to manage)
-- NVIDIA L4 GPU for fast inference
-- Scale-to-zero when idle (no cost when not processing)
-- Full control over model version and configuration
-- Max 3 instances as cost safeguard
+**`MAX_MATCH_ITERATIONS`** prevents runaway searches. Each `findBestMatch()` call tries sliding windows across a word range. Without this cap, a single segment in a 1000-word region could spin for minutes. With it, the worst case is bounded to a few seconds. The trade-off is that some segments in very large regions may not find their optimal match — but an okay match beats a timeout.
 
-**Why WhisperX over OpenAI Whisper API?**
-- OpenAI's API has word-level timestamps but they can still drift on long-form audio
-- WhisperX adds **forced alignment** with wav2vec2 phoneme model
-- Forced alignment matches audio waveforms to phonemes = ~50ms accuracy
+**`GOOD_ENOUGH_THRESHOLD`** is the confidence score at which `findBestMatch()` stops searching additional window sizes. A score of 0.80 means the fuzzy match is strong enough that trying more window sizes won't meaningfully improve it. This dramatically speeds up alignment when the text is a clean match (which it usually is — Gemini and WhisperX are transcribing the same audio).
 
-**Implementation:**
-1. **functions/src/alignment.ts** - HARDY algorithm in TypeScript
-   - Complete port from Python `aligner.py`
-   - Uses `fuzzball` npm package for fuzzy matching
-   - Calls Cloud Run WhisperX service via IAM-authenticated HTTP
-   - Called by `newPipeline.ts` for each 10-minute audio chunk
+## The Bottleneck, Visualized
 
-2. **Server-side processing:**
-   - Alignment runs automatically during transcription
-   - No client-side "Improve Timestamps" button needed
-   - Status stored in Firestore: `alignmentStatus: 'aligned'` or `'fallback'`
+```
+                GOOD ANCHORS (PoC)           BAD ANCHORS (production)
 
-3. **HARDY Alignment Algorithm (4 levels):**
-   - **Level 1**: Anchor Point Identification (high-confidence matches)
-   - **Level 2**: Region Segmentation (divide transcript at anchors)
-   - **Level 3**: Regional Alignment (DTW-style matching per region)
-   - **Level 4**: Validation & Fallback (quality gates, graceful degradation)
+Anchors:   A──A──A──A──A──A──A──A     A─────────────────────────A
+           │  │  │  │  │  │  │  │     │                         │
+Regions:   R0 R1 R2 R3 R4 R5 R6 R7    R0 (1000+ words, 375s)   R1
+           ~50 words each              ONE GIANT REGION
 
-**Cost:** ~$0.02 per 10-minute audio file (Cloud Run GPU compute)
-**Accuracy:** Median 1.1s error vs ground truth (down from ~1.6x drift)
-
-### Phase 3: Manual Offset Control (Optional)
-**Status**: Complete
-**Effort**: 4-8 hours
-
-Add UI slider for users to manually fine-tune sync if automated alignment isn't perfect.
-
-**Implementation:**
-- "Sync" button in AudioPlayer footer (desktop only)
-- Click to reveal offset controls popup
-- Quick buttons: -1s, -0.5s, +0.5s, +1s
-- Full slider: -30s to +30s range
-- Reset button to return to 0
-- Visual indicator when offset is applied (amber color)
-
-## Cost Analysis
-
-| Solution | Cost per Audio Hour | Dev Time | Accuracy |
-|----------|---------------------|----------|----------|
-| Phase 1 (ratio scaling) | $0 | 2 hours | ~2 seconds |
-| AssemblyAI API | $0.65 | 8 hours | <0.5 seconds |
-| Cloud Run WhisperX | ~$0.12 | 14 hours | <0.5 seconds |
-
-## Implementation Notes
-
-### Phase 1 Changes Completed
-
-1. **Enhanced drift correction** in `useAudioPlayer.ts`:
-   - Lowered threshold from >5% AND >2s to just >1s difference
-   - Added drift metrics tracking: `driftRatio`, `driftCorrectionApplied`, `driftMs`
-   - Improved rounding with `Math.round()` instead of `Math.floor()`
-   - Added detailed console logging for debugging
-
-2. **Added sync indicator** in UI (`ViewerHeader.tsx`):
-   - "Sync Adjusted" badge appears when drift correction was applied
-   - Tooltip shows percentage adjustment and milliseconds of drift detected
-   - "Auto-Syncing" spinner shows during correction
-
-### Success Metrics
-
-- Timestamp accuracy within 2 seconds (Phase 1)
-- Timestamp accuracy within 1 second (Phase 2)
-- No user-reported sync issues
-
-## Deployment Instructions (Current Architecture)
-
-### Prerequisites
-1. Firebase project with Cloud Functions enabled
-2. WhisperX Cloud Run GPU service deployed (see [Deployment Guide](../how-to/deploy.md#whisper-gpu-service-cloud-run))
-3. `WHISPER_SERVICE_URL` secret set in Firebase
-
-### Deployment (Automated via CI/CD)
-
-Alignment is part of Firebase Functions and deploys automatically:
-
-1. **On merge to main**: GitHub Actions runs `deploy-firebase-functions` job
-2. **Job steps**:
-   - `npm ci` - Install dependencies (including `fuzzball`)
-   - `npm run build` - Compile TypeScript
-   - `firebase deploy --only functions` - Deploy to Firebase
-
-No separate alignment service deployment needed (WhisperX runs on Cloud Run independently).
-
-### Manual Deployment
-
-```bash
-# Build and deploy functions
-cd functions && npm install && npm run build && cd ..
-npx firebase deploy --only functions
+Time:      ~2s each = 16s total       ~300s+ = TIMEOUT
 ```
 
-### Local Development
+The algorithm's performance is entirely determined by anchor quality. Good anchors produce many small regions, each of which aligns in seconds. Poor anchors (which happen when Gemini's text diverges significantly from WhisperX's transcription) produce huge regions where `findBestMatch()` has to search through thousands of candidate positions per segment.
 
-```bash
-# Start frontend dev server
-npm run dev
+## Similarity Scoring
 
-# Functions run in Firebase emulator (optional)
-npx firebase emulators:start --only functions
-```
+The `computeSimilarity()` function uses a weighted ensemble of five fuzzy matching algorithms. The weights were tuned empirically against production transcripts:
 
-### Verify Deployment
+| Algorithm              | Weight | Strength                                                         |
+| ---------------------- | ------ | ---------------------------------------------------------------- |
+| `token_set_ratio`      | 30%    | Handles word reordering and extra/missing words                  |
+| `token_sort_ratio`     | 25%    | Handles word reordering (order-independent)                      |
+| `partial_ratio`        | 20%    | Handles substring matches (one text is subset of other)          |
+| `sequenceMatcherRatio` | 15%    | Gestalt pattern matching (longest common subsequence)            |
+| `ngramSimilarity`      | 10%    | Character-level similarity (catches typos and minor differences) |
 
-```bash
-# Check function logs after uploading an audio file
-npx firebase functions:log --only transcribeAudio
+All five use normalized text (lowercase, no punctuation, collapsed whitespace) to ensure fair comparison between Gemini's cleaned-up output and WhisperX's raw transcription.
 
-# Look for:
-# [Alignment] Preparing request...
-# [WhisperX] Transcription complete
-# [HARDY] Alignment complete, avg_confidence=X.XXX
-```
+## Fallback Behavior
 
-## References
+HARDY degrades gracefully at every level:
 
-- [WhisperX GitHub](https://github.com/m-bain/whisperX)
-- [Montreal Forced Aligner](https://montreal-forced-aligner.readthedocs.io/)
-- [Gentle Forced Aligner](https://github.com/lowerquality/gentle)
-- [stable-ts (Stable Whisper)](https://github.com/jianfch/stable-ts)
+1. **Anchor failure**: If no anchors are found, the entire transcript becomes one region. Alignment still works but is slow and less accurate.
+2. **Region alignment failure**: If `findBestMatch()` can't find a match above 0.40 confidence for a segment, timestamps are interpolated from the region bounds based on word count ratio.
+3. **Chunk failure**: If HARDY throws or times out for a chunk, the pipeline falls back to scaled Gemini timestamps for that chunk. The `alignmentStatus` field records `'fallback'` so the UI can inform the user.
+4. **Quality gate**: If aligned segments drop below 50% of Gemini segments, the pipeline raises a `QUALITY_GATE_FAILED` error rather than silently producing garbage.
+
+## Deployment
+
+HARDY runs as part of the transcription pipeline. In production, it executes inside the `transcription-orchestrator` Cloud Run service (`cloud-run-orchestrator/src/pipeline.ts`). In the emulator, it runs inline via `functions/src/newPipeline.ts`.
+
+The alignment code itself (`functions/src/alignment.ts`) is shared between both paths via tsconfig path mapping (`@functions/*`). No separate deployment is needed for the alignment module — it deploys with the orchestrator.
+
+## Related Documentation
+
+- [Pipeline Flow](pipeline-flow.md) — Full pipeline reference including HARDY's role in the orchestrator
+- [Architecture](architecture.md) — System architecture overview
+- [Data Model](data-model.md) — Firestore schema including `alignmentStatus`
