@@ -60,12 +60,14 @@ npm run dev:full
 ```
 
 This starts:
+
 - **Alignment Service** (Docker): http://localhost:8080
 - **Firebase Emulators**: Auth (9099), Firestore (8081), Storage (9199), Functions (5001)
 - **Frontend** (Vite): http://localhost:5173
 - **Emulator UI**: http://localhost:4000
 
 **Prerequisites:**
+
 1. Set `GEMINI_API_KEY` in your environment (for Cloud Functions):
    ```bash
    export GEMINI_API_KEY=your-api-key
@@ -73,10 +75,33 @@ This starts:
 2. Docker running (for alignment service)
 
 **What this enables:**
+
 - Cloud Functions run locally and call local alignment service
 - Debug logs visible in terminal
 - Fast iteration on function code
 - No cloud costs for development
+
+**Emulator pipeline path**: When `FUNCTIONS_EMULATOR=true` (set automatically by the Firebase emulator), the `transcribeAudio` dispatcher skips the Cloud Run orchestrator and runs `processWithNewPipeline()` inline. This is the same Gemini + WhisperX + HARDY pipeline that runs in production, just executed inside the Cloud Function process. No Cloud Run hop is needed — or possible — locally.
+
+### Option E: Standalone Orchestrator Development
+
+For iterating on the `transcription-orchestrator` itself (pipeline logic, server endpoints, Firestore warm-up):
+
+```bash
+cd cloud-run-orchestrator
+npm install
+npm run dev
+```
+
+This starts the orchestrator Express server locally on port 8080. You can send test requests directly:
+
+```bash
+curl -X POST http://localhost:8080/transcribe \
+  -H "Content-Type: application/json" \
+  -d '{"conversationId":"test","audioStoragePath":"audio/uid/test.mp3","userId":"uid"}'
+```
+
+**Note**: This path requires real GCP credentials and secrets (`GEMINI_API_KEY`, `WHISPER_SERVICE_URL`, `FIREBASE_STORAGE_BUCKET`) set as environment variables. It talks to live Firestore and Storage — use a dev project, not production.
 
 ## Environment Variables
 
@@ -88,14 +113,14 @@ cp .env.example .env
 
 Required variables:
 
-| Variable | Description |
-|----------|-------------|
-| `VITE_FIREBASE_API_KEY` | Firebase API key |
-| `VITE_FIREBASE_AUTH_DOMAIN` | Firebase auth domain |
-| `VITE_FIREBASE_PROJECT_ID` | Firebase project ID |
-| `VITE_FIREBASE_STORAGE_BUCKET` | Firebase storage bucket |
-| `VITE_FIREBASE_MESSAGING_SENDER_ID` | Firebase sender ID |
-| `VITE_FIREBASE_APP_ID` | Firebase app ID |
+| Variable                            | Description             |
+| ----------------------------------- | ----------------------- |
+| `VITE_FIREBASE_API_KEY`             | Firebase API key        |
+| `VITE_FIREBASE_AUTH_DOMAIN`         | Firebase auth domain    |
+| `VITE_FIREBASE_PROJECT_ID`          | Firebase project ID     |
+| `VITE_FIREBASE_STORAGE_BUCKET`      | Firebase storage bucket |
+| `VITE_FIREBASE_MESSAGING_SENDER_ID` | Firebase sender ID      |
+| `VITE_FIREBASE_APP_ID`              | Firebase app ID         |
 
 ## Project Structure
 
@@ -126,6 +151,7 @@ audio-transcript-analysis-app/
 ### Adding a New Component
 
 1. Create component in `components/`:
+
    ```typescript
    // components/MyComponent.tsx
    export const MyComponent: React.FC<Props> = ({ ... }) => {
@@ -141,6 +167,7 @@ audio-transcript-analysis-app/
 ### Adding a New Hook
 
 1. Create hook in `hooks/`:
+
    ```typescript
    // hooks/useMyHook.ts
    export const useMyHook = () => {
@@ -199,16 +226,16 @@ npm run preview
 
 ## Useful Commands
 
-| Command | Description |
-|---------|-------------|
-| `npm run dev` | Start development server |
-| `npm run build` | Build for production |
-| `npm run preview` | Preview production build |
-| `npm test` | Run tests in watch mode |
-| `npm run test:run` | Run tests once |
-| `npm run lint` | Run ESLint |
-| `npm run db:debug` | Query Firestore emulator (see [guide](./query-firestore-emulator.md)) |
-| `npx firebase deploy` | Deploy to Firebase |
+| Command               | Description                                                           |
+| --------------------- | --------------------------------------------------------------------- |
+| `npm run dev`         | Start development server                                              |
+| `npm run build`       | Build for production                                                  |
+| `npm run preview`     | Preview production build                                              |
+| `npm test`            | Run tests in watch mode                                               |
+| `npm run test:run`    | Run tests once                                                        |
+| `npm run lint`        | Run ESLint                                                            |
+| `npm run db:debug`    | Query Firestore emulator (see [guide](./query-firestore-emulator.md)) |
+| `npx firebase deploy` | Deploy to Firebase                                                    |
 
 ## Debugging
 
@@ -219,6 +246,7 @@ npm run preview
 - **Application → IndexedDB**: View local cache (Firebase offline persistence)
 
 **Drift correction logs** (in browser console):
+
 - `[Drift Analysis]` - Audio vs transcript duration comparison
 - `[Auto-Sync]` - Timestamp scaling when drift correction is applied
 
@@ -235,6 +263,7 @@ docker compose logs -f alignment-service
 ```
 
 **Log prefixes to look for:**
+
 - `[Align]` - Request handling, timing, confidence
 - `[WhisperX]` - Cloud Run GPU service calls, word timestamps
 - `[HARDY]` - Alignment algorithm details
@@ -244,6 +273,7 @@ docker compose logs -f alignment-service
 ### Firebase Emulator UI
 
 When running emulators, open http://localhost:4000 for:
+
 - Firestore data viewer
 - Storage browser
 - Function logs

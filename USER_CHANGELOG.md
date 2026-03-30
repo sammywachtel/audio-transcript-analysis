@@ -1,5 +1,30 @@
 # What's New
 
+## Version 2.14.1-beta.1 - March 30, 2026
+
+### 🚀 New Transcription Engine (Beta)
+
+**Complete Pipeline Overhaul — Gemini 3 Flash + WhisperX**
+- Transcription now uses a single-pass Gemini 3 Flash analysis for speaker identification, topics, terms, and content — no more chunking artifacts or ghost speakers from chunk boundaries
+- WhisperX provides precise word-level timestamps, bridged to Gemini's output via the HARDY alignment algorithm
+- Quality gates automatically catch and handle edge cases; chunk-level failures fall back gracefully
+
+### ⚡ Cloud Run Orchestrator
+
+**Better Performance and Reliability**
+- The transcription pipeline now runs on a dedicated Cloud Run service with more resources and longer timeouts
+- Automated CI/CD deployment — changes ship automatically on push to main
+- Infrastructure provisioned with scoped IAM bindings and immutable image tagging
+
+### 🗑️ Cleaned House
+
+**Removed Legacy Systems**
+- Legacy chunked pipeline, speaker reconciliation, and feature flag systems have been removed entirely
+- Obsolete documentation and tests cleaned up
+- Stale Cloud Tasks references removed from infrastructure scripts
+
+---
+
 ## Version 2.14.0 - March 6, 2026
 
 ### 🎯 Smarter Speaker Name Matching

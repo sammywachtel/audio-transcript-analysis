@@ -7,11 +7,13 @@ Documentation for the Audio Transcript Analysis App - a React application that t
 This documentation follows the [Diátaxis framework](https://diataxis.fr/), organizing content by purpose:
 
 ### [Tutorials](tutorials/) - Learning-oriented
+
 Step-by-step lessons for new users and developers.
 
 - **[Getting Started](tutorials/getting-started.md)** - Complete setup from scratch
 
 ### [How-to Guides](how-to/) - Task-oriented
+
 Practical guides for solving specific problems.
 
 - **[Firebase Setup](how-to/firebase-setup.md)** - Configure Firebase project, enable APIs, set secrets
@@ -21,31 +23,35 @@ Practical guides for solving specific problems.
 - **[Testing](how-to/testing.md)** - Run and write tests
 
 ### [Reference](reference/) - Information-oriented
+
 Technical descriptions and specifications.
 
 - **[Architecture](reference/architecture.md)** - System architecture and data flow
-- **[Cloud Functions Flow](reference/cloud-functions-flow.md)** - Complete flow diagram of all Cloud Functions
+- **[Pipeline Flow](reference/pipeline-flow.md)** - Transcription pipeline reference (dispatcher + orchestrator)
+- **[Cloud Functions Flow](reference/cloud-functions-flow.md)** - Non-pipeline Cloud Functions (callables, stats, billing)
 - **[Data Model](reference/data-model.md)** - Firestore schema and TypeScript types
 - **[Alignment Algorithm](reference/alignment-algorithm.md)** - HARDY timestamp alignment algorithm
-- **[Alignment Architecture](reference/alignment-architecture.md)** - Timestamp alignment design decisions
+- **[HARDY Alignment](reference/alignment-architecture.md)** - HARDY technical reference with call graph and constants
 - **[CI/CD Pipeline](reference/alignment-cicd.md)** - Deployment pipeline for Functions
 
 ### [Explanation](explanation/) - Understanding-oriented
+
 Background and context for design decisions.
 
 - **[Design Decisions](explanation/design-decisions.md)** - Why we built it this way
+- **[Orchestrator Architecture](explanation/orchestrator-architecture.md)** - Why the pipeline runs on Cloud Run instead of Cloud Functions
 - **[Gemini 3 Migration](explanation/gemini3-migration.md)** - Why and how we migrated to the Gemini 3 Flash hybrid pipeline
 
 ## Quick Links
 
-| Task | Document |
-|------|----------|
-| Set up development environment | [Getting Started](tutorials/getting-started.md) |
-| Configure Firebase from scratch | [Firebase Setup](how-to/firebase-setup.md) |
-| Deploy to production | [Deployment](how-to/deploy.md) |
-| Run locally | [Local Development](how-to/local-development.md) |
-| Debug Firestore emulator data | [Query Firestore Emulator](how-to/query-firestore-emulator.md) |
-| Understand the architecture | [Architecture](reference/architecture.md) |
+| Task                            | Document                                                       |
+| ------------------------------- | -------------------------------------------------------------- |
+| Set up development environment  | [Getting Started](tutorials/getting-started.md)                |
+| Configure Firebase from scratch | [Firebase Setup](how-to/firebase-setup.md)                     |
+| Deploy to production            | [Deployment](how-to/deploy.md)                                 |
+| Run locally                     | [Local Development](how-to/local-development.md)               |
+| Debug Firestore emulator data   | [Query Firestore Emulator](how-to/query-firestore-emulator.md) |
+| Understand the architecture     | [Architecture](reference/architecture.md)                      |
 
 ## Product Requirements
 

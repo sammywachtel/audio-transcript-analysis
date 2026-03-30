@@ -43,33 +43,49 @@ Technical architecture of the Audio Transcript Analysis App.
 │  │  │  transcribeAudio     │  │  Callables (HTTPS)           │  │ │
 │  │  │  (Storage trigger)   │  │  ┌────────────────────────┐  │  │ │
 │  │  │  - validates file    │  │  │ chatWithConversation   │  │  │ │
-│  │  │  - runs pipeline     │  │  │ mergeSpeakers          │  │  │ │
-│  │  │  - 540s timeout      │  │  │ reassignSegments       │  │  │ │
-│  │  └──────────┬───────────┘  │  │ renameSpeaker          │  │  │ │
-│  │             │              │  │ undoCorrection         │  │  │ │
-│  │             ▼              │  └────────────────────────┘  │  │ │
-│  │  ┌──────────────────────┐  └──────────────────────────────┘  │ │
-│  │  │  newPipeline.ts      │                                    │ │
-│  │  │  (Gemini 3 Flash +   │  ┌──────────────────────────────┐  │ │
-│  │  │   WhisperX + HARDY)  │  │  Background                  │  │ │
-│  │  └──────────────────────┘  │  ┌────────────────────────┐  │  │ │
-│  │                            │  │ onConversation*        │  │  │ │
-│  │  See cloud-functions-      │  │ computeDailyStats      │  │  │ │
-│  │  flow.md for detailed      │  │ syncBillingCosts       │  │  │ │
-│  │  flow diagrams.            │  └────────────────────────┘  │  │ │
+│  │  │  - dispatches to     │  │  │ mergeSpeakers          │  │  │ │
+│  │  │    orchestrator      │  │  │ reassignSegments       │  │  │ │
+│  │  │  - 60s timeout       │  │  │ renameSpeaker          │  │  │ │
+│  │  └──────────┬───────────┘  │  │ undoCorrection         │  │  │ │
+│  │             │              │  └────────────────────────┘  │  │ │
+│  │             │ IAM-auth     └──────────────────────────────┘  │ │
+│  │             │ HTTP POST                                      │ │
+│  │             │              ┌──────────────────────────────┐  │ │
+│  │             │              │  Background                  │  │ │
+│  │  See pipeline-flow.md     │  ┌────────────────────────┐  │  │ │
+│  │  for detailed pipeline    │  │ onConversation*        │  │  │ │
+│  │  flow diagrams.           │  │ computeDailyStats      │  │  │ │
+│  │                            │  │ syncBillingCosts       │  │  │ │
+│  │                            │  └────────────────────────┘  │  │ │
 │  │                            └──────────────────────────────┘  │ │
 │  │                                                              │ │
 │  └──────────────────────────────────────────────────────────────┘ │
 │                                                                   │
 └───────────────────────────────────────────────────────────────────┘
-                                 │
-                         ┌───────┴───────┐
-                         ▼               ▼
-                  ┌────────────────┐  ┌────────────────┐
-                  │  Gemini API    │  │  Cloud Run GPU │
-                  │  (Gemini 3)    │  │  (WhisperX)    │
-                  └────────────────┘  └────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────┐
+│  transcription-orchestrator         │
+│  (Cloud Run — 2 CPU / 2Gi / 900s)  │
+│                                     │
+│  Gemini hybrid pipeline:            │
+│  ├── Gemini 3 Flash (diarization)   │
+│  ├── WhisperX (timestamps)          │
+│  ├── HARDY (alignment)              │
+│  └── Writes results to Firestore    │
+└──────────────┬──────────────────────┘
+               │
+       ┌───────┴───────┐
+       ▼               ▼
+┌────────────────┐  ┌────────────────┐
+│  Gemini API    │  │  Cloud Run GPU │
+│  (Gemini 3)    │  │  (WhisperX)    │
+└────────────────┘  └────────────────┘
 ```
+
+**Production flow**: Upload triggers `transcribeAudio` (Cloud Function) which acts as a thin dispatcher — it validates the upload, writes initial processing state, and fires an IAM-authenticated HTTP POST to the `transcription-orchestrator` Cloud Run service. The orchestrator runs the full Gemini hybrid pipeline (15-minute budget) and writes results directly to Firestore.
+
+**Emulator exception**: Under `FUNCTIONS_EMULATOR=true`, the dispatcher runs the pipeline inline via `processWithNewPipeline()` because Cloud Run is not available locally.
 
 ## Component Architecture
 
@@ -173,8 +189,8 @@ audio-transcript-analysis-app/
 ├── functions/              # Cloud Functions (Node.js)
 │   └── src/
 │       ├── index.ts                    # Function exports + Firebase Admin init
-│       ├── transcribe.ts               # transcribeAudio (Storage trigger) — entry point
-│       ├── newPipeline.ts              # processWithNewPipeline — hybrid pipeline orchestrator
+│       ├── transcribe.ts               # transcribeAudio (Storage trigger) — thin dispatcher
+│       ├── newPipeline.ts              # processWithNewPipeline — emulator-only inline pipeline
 │       ├── gemini3Pipeline.ts          # Gemini 3 Flash API client + Firestore data assembly
 │       ├── alignment.ts                # HARDY alignment + WhisperX Cloud Run GPU calls
 │       ├── audioUtils.ts               # Audio duration detection + shared helpers
@@ -206,12 +222,15 @@ audio-transcript-analysis-app/
 3. Frontend creates Firestore doc (status: 'processing', alignmentStatus: 'pending')
    firestoreService.save(conversation)
         ↓
-4. Storage trigger fires transcribeAudio
+4. Storage trigger fires transcribeAudio (thin dispatcher)
    onObjectFinalized → transcribeAudio()
-        ↓
-5. transcribeAudio routes to processWithNewPipeline()
+   ├── Firestore transaction deduplicates (Cloud Storage fires 3+ triggers per upload)
    ├── Updates Firestore: status='processing'
-   └── All processing runs in-process (no external queue)
+   └── Dispatches IAM-auth HTTP POST to transcription-orchestrator
+        ↓
+5. transcription-orchestrator (Cloud Run) accepts and returns 202
+   ├── Firestore transaction deduplication (orchestratorClaimed)
+   └── Runs pipeline asynchronously — dispatcher is already done
         ↓
 6. Gemini 3 Flash (WAV) — single-pass analysis
    ├── Full-audio diarization (speakers by name)
@@ -234,15 +253,18 @@ audio-transcript-analysis-app/
    ├── Quality gates check segment coverage + speaker counts
    └── alignmentStatus: 'aligned' or 'fallback'
         ↓
-9. Write to Firestore (status: 'complete')
+9. Write to Firestore (status: 'complete',
+   processingPipeline: 'gemini_hybrid', pipelineVersion: 'gemini_hybrid')
         ↓
 10. Real-time listener updates UI
     onSnapshot → setConversations()
 ```
 
-**Why Direct Pipeline (No Queue)?**
+**Why Cloud Run Orchestrator?**
 
-The hybrid pipeline processes audio fast enough to run within the 9-minute Storage trigger timeout for most files. Gemini 3 Flash handles the full audio in a single call (~15-100s depending on length), and WhisperX timestamps process in parallel chunks. This eliminates the complexity of Cloud Tasks while keeping the architecture simple.
+The old architecture ran the entire pipeline inside a Cloud Function with a 9-minute Storage trigger timeout. This worked for most files but left no headroom for long audio or transient slowdowns. The `transcription-orchestrator` Cloud Run service gets a 15-minute budget (900s Cloud Run timeout), and the dispatcher Cloud Function finishes in under 60 seconds. The dispatcher is purely a validation + dispatch layer — all heavy lifting happens in Cloud Run, which writes results directly to Firestore.
+
+**Emulator path**: When `FUNCTIONS_EMULATOR=true`, the dispatcher runs `processWithNewPipeline()` inline because Cloud Run is not available locally. This is the only code path that still runs the pipeline inside a Cloud Function.
 
 ### Job Control (Cancel)
 
@@ -267,6 +289,7 @@ The system allows users to cancel active processing jobs.
 ```
 
 **Implementation Files:**
+
 - `src/services/firestoreService.ts` - `abortProcessing()` client-side abort request
 - `functions/src/transcribe.ts` - `checkAbort()` function and abort checkpoints
 - `src/pages/Library.tsx` - Cancel UI controls
@@ -276,6 +299,7 @@ The system allows users to cancel active processing jobs.
 For the HARDY alignment step, audio is split into 10-minute MP3 chunks. This is purely for WhisperX request sizing, not for the transcription pipeline (Gemini processes the full audio in one call).
 
 **Key Points:**
+
 - Audio shorter than 10 minutes is sent to WhisperX as a single chunk (no splitting)
 - Splitting uses ffmpeg to create non-overlapping chunks
 - Each chunk gets independent WhisperX timestamps, then HARDY alignment maps Gemini's text onto those timestamps
@@ -286,7 +310,7 @@ For the HARDY alignment step, audio is split into 10-minute MP3 chunks. This is 
 The pipeline includes an integrated alignment module that provides precise timestamps using WhisperX via Cloud Run GPU:
 
 ```
-newPipeline.ts (processWithNewPipeline)
+cloud-run-orchestrator/src/pipeline.ts (runPipeline)
         │
         │ 1. Gemini 3 Flash (diarization + content analysis)
         ▼
@@ -1098,22 +1122,22 @@ The application uses the `@google-cloud/vertexai` SDK for Gemini API calls (migr
 
 The application requires the following Google Cloud APIs:
 
-| API                                 | Service             | Purpose                                                             |
-| ----------------------------------- | ------------------- | ------------------------------------------------------------------- |
-| `aiplatform.googleapis.com`         | Vertex AI           | Gemini API calls with billing labels                                |
-| `cloudfunctions.googleapis.com`     | Cloud Functions     | Serverless function execution                                       |
-| `cloudscheduler.googleapis.com`     | Cloud Scheduler     | Scheduled functions (daily stats aggregation)                       |
-| `cloudbuild.googleapis.com`         | Cloud Build         | Build container images for functions                                |
-| `artifactregistry.googleapis.com`   | Artifact Registry   | Store container images                                              |
-| `run.googleapis.com`                | Cloud Run           | Functions v2 runtime (functions run as containers)                  |
-| `eventarc.googleapis.com`           | Eventarc            | Route Storage events to Cloud Functions                             |
-| `pubsub.googleapis.com`             | Pub/Sub             | Event message delivery (used by Eventarc)                           |
+| API                                 | Service             | Purpose                                                          |
+| ----------------------------------- | ------------------- | ---------------------------------------------------------------- |
+| `aiplatform.googleapis.com`         | Vertex AI           | Gemini API calls with billing labels                             |
+| `cloudfunctions.googleapis.com`     | Cloud Functions     | Serverless function execution                                    |
+| `cloudscheduler.googleapis.com`     | Cloud Scheduler     | Scheduled functions (daily stats aggregation)                    |
+| `cloudbuild.googleapis.com`         | Cloud Build         | Build container images for functions                             |
+| `artifactregistry.googleapis.com`   | Artifact Registry   | Store container images                                           |
+| `run.googleapis.com`                | Cloud Run           | Functions v2 runtime (functions run as containers)               |
+| `eventarc.googleapis.com`           | Eventarc            | Route Storage events to Cloud Functions                          |
+| `pubsub.googleapis.com`             | Pub/Sub             | Event message delivery (used by Eventarc)                        |
 | `secretmanager.googleapis.com`      | Secret Manager      | Secure storage for GEMINI_API_KEY, WHISPER_SERVICE_URL, HF_TOKEN |
-| `firestore.googleapis.com`          | Firestore           | NoSQL database                                                      |
-| `storage.googleapis.com`            | Cloud Storage       | Audio file storage                                                  |
-| `iamcredentials.googleapis.com`     | IAM Credentials     | Workload Identity for CI/CD                                         |
-| `cloudbilling.googleapis.com`       | Cloud Billing       | Project billing verification                                        |
-| `firebaseextensions.googleapis.com` | Firebase Extensions | Firebase deployment features                                        |
+| `firestore.googleapis.com`          | Firestore           | NoSQL database                                                   |
+| `storage.googleapis.com`            | Cloud Storage       | Audio file storage                                               |
+| `iamcredentials.googleapis.com`     | IAM Credentials     | Workload Identity for CI/CD                                      |
+| `cloudbilling.googleapis.com`       | Cloud Billing       | Project billing verification                                     |
+| `firebaseextensions.googleapis.com` | Firebase Extensions | Firebase deployment features                                     |
 
 ### Cloud Functions v2 Event Pipeline
 

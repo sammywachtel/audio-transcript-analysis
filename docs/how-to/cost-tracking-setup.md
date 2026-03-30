@@ -12,6 +12,7 @@ Before starting, ensure you have:
    - Run `gcloud billing accounts list` to verify access
 
 2. **gcloud CLI Installed and Authenticated**
+
    ```bash
    gcloud auth login
    gcloud config set project audio-transcript-analyzer-01  # Your app project
@@ -22,6 +23,7 @@ Before starting, ensure you have:
    - Or manually: `gcloud services enable bigquery.googleapis.com`
 
 4. **Your Actual Billing Account ID**
+
    ```bash
    # Find your billing account ID (format: XXXXXX-XXXXXX-XXXXXX)
    gcloud billing accounts list
@@ -48,6 +50,7 @@ Billing Account: 012345-6789AB-CDEFGH
 ```
 
 **Why Centralized?**
+
 - Billing exports are configured at the billing account level (GCP's design)
 - Single source of truth for all costs
 - Enables cross-project cost analysis
@@ -72,6 +75,7 @@ gcloud billing projects link $OPS_PROJECT_ID \
 ```
 
 **Troubleshooting**:
+
 - If project ID is taken, add a suffix: `my-org-ops-billing`
 - If you get `INVALID_ARGUMENT`, verify `$BILLING_ACCOUNT_ID` is correct
 - Check permissions: You need billing admin or project manager role
@@ -227,25 +231,31 @@ console.log('BigQuery actual:', actualFromQuery);
 console.log('Difference:', Math.abs(estimate - actualFromQuery));
 ```
 
-## Verify WhisperX (Cloud Run GPU) Costs
+## Verify Cloud Run Costs
 
-WhisperX runs on Cloud Run with an NVIDIA L4 GPU. Costs are included in your GCP billing export alongside other Cloud Run charges.
+Two Cloud Run services contribute to costs:
 
-1. Query Cloud Run costs in BigQuery:
-   ```sql
-   SELECT
-     SUM(cost) AS whisperx_cost_usd,
-     DATE(usage_start_time) AS date
-   FROM `my-org-ops.billing_export.gcp_billing_export_v1_*`
-   WHERE
-     project.id = 'audio-transcript-analyzer-01'
-     AND service.description = 'Cloud Run'
-     AND resource.name LIKE '%whisperx%'
-     AND _TABLE_SUFFIX >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY))
-   GROUP BY date
-   ORDER BY date DESC;
-   ```
-2. Compare `computeTimeSeconds × $0.0023/sec` from your `_metrics` document to the actual Cloud Run charge
+1. **`transcription-orchestrator`** (2 CPU / 2Gi, no GPU) — runs the Gemini hybrid pipeline. Cost is dominated by CPU time during pipeline execution. Scale-to-zero when idle.
+2. **`whisperx-service`** (NVIDIA L4 GPU) — provides word-level timestamps. Cost is dominated by GPU compute time. Scale-to-zero when idle.
+
+### Query Cloud Run Costs in BigQuery
+
+```sql
+SELECT
+  resource.name AS service_name,
+  SUM(cost) AS cost_usd,
+  DATE(usage_start_time) AS date
+FROM `my-org-ops.billing_export.gcp_billing_export_v1_*`
+WHERE
+  project.id = 'audio-transcript-analyzer-01'
+  AND service.description = 'Cloud Run'
+  AND (resource.name LIKE '%whisperx%' OR resource.name LIKE '%transcription-orchestrator%')
+  AND _TABLE_SUFFIX >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY))
+GROUP BY service_name, date
+ORDER BY date DESC, cost_usd DESC;
+```
+
+Compare `computeTimeSeconds x $0.0023/sec` from your `_metrics` document to the actual WhisperX Cloud Run charge. The orchestrator cost is typically negligible compared to GPU time.
 
 ## Create Project-Specific Views (Optional)
 
@@ -289,6 +299,7 @@ Our application uses these rates (from [Vertex AI Pricing](https://cloud.google.
 ### Manual Verification Example
 
 From a `_metrics` document:
+
 ```json
 {
   "llmUsage": {
@@ -302,6 +313,7 @@ From a `_metrics` document:
 ```
 
 **Calculate manually**:
+
 ```
 Total input:  16657 + 4749 = 21,406 tokens
 Total output: 1296 + 881 = 2,177 tokens
@@ -326,16 +338,18 @@ await db.collection('_pricing').add({
   model: 'gemini-2.5-flash',
   service: 'gemini',
   inputPricePerMillion: 0.15,
-  outputPricePerMillion: 0.60,
+  outputPricePerMillion: 0.6,
   effectiveFrom: admin.firestore.Timestamp.now(),
-  effectiveUntil: null,  // null = current pricing
-  notes: 'January 2026 pricing - https://cloud.google.com/vertex-ai/generative-ai/pricing',
+  effectiveUntil: null, // null = current pricing
+  notes:
+    'January 2026 pricing - https://cloud.google.com/vertex-ai/generative-ai/pricing',
   createdAt: admin.firestore.Timestamp.now(),
-  updatedAt: admin.firestore.Timestamp.now()
+  updatedAt: admin.firestore.Timestamp.now(),
 });
 ```
 
 This allows:
+
 - Tracking price changes over time
 - Recalculating historical costs with correct rates
 - Easy pricing updates without code deployment
