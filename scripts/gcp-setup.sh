@@ -809,7 +809,17 @@ if gcloud iam service-accounts describe "$GH_SA_ORCHESTRATOR" --project="$PROJEC
     add_iam_binding "serviceAccount:$GH_SA_ORCHESTRATOR" "roles/run.admin" \
         "GitHub Actions SA → Cloud Run Admin (orchestrator deploy)"
     add_iam_binding "serviceAccount:$GH_SA_ORCHESTRATOR" "roles/iam.serviceAccountUser" \
-        "GitHub Actions SA → Service Account User (orchestrator runtime SA)"
+        "GitHub Actions SA → Service Account User (project-level)"
+
+    # Cloud Run's actAs check needs a resource-level binding on the target SA,
+    # not just a project-level serviceAccountUser grant. Without this the deploy
+    # step fails with PERMISSION_DENIED on iam.serviceAccounts.actAs.
+    gcloud iam service-accounts add-iam-policy-binding "$ORCHESTRATOR_RUNTIME_SA" \
+        --project="$PROJECT_ID" \
+        --member="serviceAccount:$GH_SA_ORCHESTRATOR" \
+        --role="roles/iam.serviceAccountUser" \
+        --quiet > /dev/null 2>&1 || true
+    log_success "GitHub Actions SA → actAs orchestrator-runtime SA (resource-level)"
 
     # Allow the deploy workflow to update ORCHESTRATOR_URL secret version.
     # secretVersionManager covers both add and destroy; secretVersionAdder is read-only add.
