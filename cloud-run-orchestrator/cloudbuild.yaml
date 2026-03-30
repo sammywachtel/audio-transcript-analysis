@@ -14,6 +14,8 @@ images:
   - '${_IMAGE_NAME}:${_TAG}'
   - '${_IMAGE_NAME}:latest'
 timeout: 600s
+options:
+  logging: CLOUD_LOGGING_ONLY
 
 # Substitution defaults — workflow overrides these with real values.
 # _IMAGE_NAME: full AR path without tag (region-docker.pkg.dev/PROJECT/REPO/IMAGE)
