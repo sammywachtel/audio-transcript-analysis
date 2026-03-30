@@ -28,6 +28,7 @@ Google's latest STT service (Chirp-3) was tested as a potential replacement for 
 Gemini 3 Flash was tested with the full 45-minute audio file in WAV format, asking it to perform diarization + content analysis in a single pass.
 
 **Results**: Exceeded expectations.
+
 - **6 of 6 speakers identified correctly**, most by real name
 - Full-audio analysis with no truncation
 - 9-31% of output token budget used (well under limits)
@@ -55,22 +56,22 @@ Upload → Convert to WAV (for Gemini)
 
 ### What Was Eliminated
 
-| Component | Why It Existed | Why It's Gone |
-|-----------|---------------|---------------|
-| Per-chunk Gemini analysis | Each chunk needed its own content analysis | Gemini 3 Flash handles full audio in one call |
-| Cross-chunk speaker matching | Speaker IDs diverged across chunks | Single Gemini call = consistent speakers |
-| Speaker quality scoring | Detected when matching went wrong | No matching to go wrong |
-| Speaker name resolution | Tried to infer names from introductions | Gemini identifies speakers by name directly |
-| Embedding-based similarity | Matched speakers by voice characteristics | Not needed with single-pass diarization |
-| Complex merge logic | Stitched chunks back together | Nothing to stitch — one Gemini result |
-| Cloud Tasks queue | Processing exceeded 9-min timeout | Hybrid pipeline runs within timeout |
-| Fallback reprocessing | Sequential mode backup when parallel failed | No parallel/sequential modes needed |
+| Component                    | Why It Existed                              | Why It's Gone                                            |
+| ---------------------------- | ------------------------------------------- | -------------------------------------------------------- |
+| Per-chunk Gemini analysis    | Each chunk needed its own content analysis  | Gemini 3 Flash handles full audio in one call            |
+| Cross-chunk speaker matching | Speaker IDs diverged across chunks          | Single Gemini call = consistent speakers                 |
+| Speaker quality scoring      | Detected when matching went wrong           | No matching to go wrong                                  |
+| Speaker name resolution      | Tried to infer names from introductions     | Gemini identifies speakers by name directly              |
+| Embedding-based similarity   | Matched speakers by voice characteristics   | Not needed with single-pass diarization                  |
+| Complex merge logic          | Stitched chunks back together               | Nothing to stitch — one Gemini result                    |
+| Cloud Tasks queue            | Processing exceeded 9-min timeout           | Cloud Run orchestrator has 900s timeout; no queue needed |
+| Fallback reprocessing        | Sequential mode backup when parallel failed | No parallel/sequential modes needed                      |
 
 ### What Was Kept
 
 - **WhisperX on Cloud Run GPU** — still needed for precise word-level timestamps (Gemini's timestamps drift)
 - **HARDY alignment algorithm** — bridges Gemini text with WhisperX timing
-- **Cloud Functions** — orchestration simplified but still runs on Functions
+- **Cloud Function as thin dispatcher** — `transcribeAudio` validates the upload and fires an HTTP POST to the Cloud Run orchestrator (`transcription-orchestrator`), which runs the full pipeline
 - **All frontend code** — the data model is unchanged from the frontend's perspective
 - **Speaker corrections** — users can still merge/rename/reassign speakers (fewer corrections needed now)
 - **Stats, billing, chat** — all auxiliary functions unchanged
@@ -85,7 +86,7 @@ Upload → Convert to WAV (for Gemini)
 
 4. **Simpler infrastructure is more reliable.** Eliminating Cloud Tasks, cross-chunk matching, and the merge step removed several categories of failure modes. The new pipeline either succeeds or fails — there's no partially-merged, low-confidence, needs-reprocessing limbo.
 
-5. **The 9-minute timeout works.** Gemini 3 Flash processes a 45-minute file in under 2 minutes. WhisperX chunks process quickly on GPU. The total pipeline time is well within the Storage trigger timeout for most real-world audio files.
+5. **The Cloud Functions timeout did not work.** The PoC pipeline takes ~643s for a 45-minute recording, exceeding Cloud Functions' 540s hard limit. This drove the migration to a Cloud Run orchestrator (`transcription-orchestrator`) with a 900s timeout, where the full pipeline runs without algorithmic compromises. The Cloud Function (`transcribeAudio`) now acts as a thin dispatcher. See [Orchestrator Architecture](orchestrator-architecture.md) for the full rationale.
 
 ## Lessons Learned
 

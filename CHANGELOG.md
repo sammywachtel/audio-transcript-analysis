@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.1-beta.1] - 2026-03-30
+
 ### Added
 - **Gemini 3 Flash + WhisperX Hybrid Pipeline** — Production implementation of the new transcription architecture that replaces the legacy chunked pipeline
   - `newPipeline.ts`: Orchestrates Gemini 3 Flash (diarization + content) → WhisperX (timestamps) → HARDY alignment, with 10-minute chunked alignment and quality gates
@@ -31,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Documentation overhaul** — Architecture, data model, design decisions, deployment, cost tracking, Firebase setup, and local development docs all updated for the hybrid pipeline
 - **GCP setup** — `gcp-setup.sh` updated with new API enablement, IAM bindings, and Cloud Run orchestrator requirements
 - **Migration explanation** — New `docs/explanation/gemini3-migration.md` documents why and how the pipeline was redesigned
+- **Cloud Run orchestrator explanation docs** — New `orchestrator-architecture.md` with platform comparison, cost framing, and PoC-fidelity principle; corrected `gemini3-migration.md` to reflect thin-dispatcher + Cloud Run architecture; updated `design-decisions.md` with orchestrator topology rationale
 
 ### Fixed
 - **HARDY alignment timeout** — Processing failures on long conversations caused by alignment exhausting iteration budget mid-pipeline
