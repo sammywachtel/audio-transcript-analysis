@@ -34,7 +34,8 @@ import {
   GeminiPipelineResult,
   AlignedSegment,
 } from '@functions/gemini3Pipeline';
-import { alignTimestamps } from '@functions/alignment';
+import { getWhisperXWords } from '@functions/alignment';
+import { assignSpeakersToWords } from '@functions/speakerAssignment';
 import { getAudioDuration } from '@functions/audioUtils';
 
 // =============================================================================
@@ -48,7 +49,7 @@ const CHUNK_SEC = 600;
 // headroom for cleanup and Firestore writes before the platform kills us.
 const PIPELINE_TIMEOUT_MS = 15 * 60 * 1000;
 
-// 2-minute ceiling per HARDY alignment chunk
+// 2-minute ceiling per WhisperX chunk
 const CHUNK_ALIGNMENT_TIMEOUT_MS = 2 * 60 * 1000;
 
 const execFileAsync = promisify(execFile);
@@ -418,14 +419,12 @@ export async function runPipeline(
       }
     }
 
-    // Scale Gemini timestamps to real audio time
-    const geminiLastMs = geminiResult.segments[geminiResult.segments.length - 1].endMs;
+    // Scale Gemini timestamps to real audio time.
+    // Use Math.max across all endMs — last segment isn't always the longest.
+    const geminiLastMs = Math.max(...geminiResult.segments.map(s => s.endMs));
     const scale = audioDurationMs / geminiLastMs;
 
     const allAlignedSegments: AlignedSegment[] = [];
-    let fallbackChunkCount = 0;
-    let lowConfidenceChunkCount = 0;
-    let totalChunksProcessed = 0;
 
     for (const { chunkPath, chunkStartMs, chunkEndMs } of chunks) {
       const chunkLabel = `chunk ${chunkStartMs / 1000}s–${chunkEndMs / 1000}s`;
@@ -433,9 +432,12 @@ export async function runPipeline(
       checkTimeout(`before ${chunkLabel}`);
       await checkAbort(conversationId);
 
+      // Any-overlap assignment: include Gemini segments that overlap this chunk at all
+      // (not just midpoint-in-chunk). Avoids dropping cross-boundary segments.
       const chunkGeminiSegs = geminiResult.segments.filter(s => {
-        const scaledMid = ((s.startMs + s.endMs) / 2) * scale;
-        return scaledMid >= chunkStartMs && scaledMid < chunkEndMs;
+        const scaledStart = s.startMs * scale;
+        const scaledEnd = s.endMs * scale;
+        return scaledStart < chunkEndMs && scaledEnd > chunkStartMs;
       });
 
       if (chunkGeminiSegs.length === 0) {
@@ -443,64 +445,53 @@ export async function runPipeline(
         continue;
       }
 
-      const localSegs = chunkGeminiSegs.map(s => ({
-        speakerId: s.speaker,
-        text: s.text,
+      // Scale Gemini segments to chunk-local time for speaker assignment
+      const localGeminiSegs = chunkGeminiSegs.map(s => ({
+        speaker: s.speaker,
         startMs: Math.max(0, Math.round(s.startMs * scale - chunkStartMs)),
         endMs: Math.round(s.endMs * scale - chunkStartMs),
       }));
 
       const chunkBuffer = fs.readFileSync(chunkPath);
+      const chunkBase64 = chunkBuffer.toString('base64');
 
-      try {
-        // Pass abort checker so HARDY can bail out mid-alignment if the user cancels.
-        // The checker polls Firestore on a throttled cadence inside both region and
-        // segment boundaries — no wasted reads, but responsive enough to stop work.
-        const abortChecker = () => checkAbort(conversationId);
-        const result = await withTimeout(
-          alignTimestamps(chunkBuffer, localSegs, whisperServiceUrl, abortChecker),
-          CHUNK_ALIGNMENT_TIMEOUT_MS,
-          `alignment ${chunkLabel}`,
+      // Hard fail if WhisperX is unreachable or returns nothing — no fallback.
+      // Drifted Gemini timestamps in the output would silently corrupt sync.
+      const rawWords = await withTimeout(
+        getWhisperXWords(chunkBase64, whisperServiceUrl),
+        CHUNK_ALIGNMENT_TIMEOUT_MS,
+        `whisperx ${chunkLabel}`,
+      );
+
+      if (!rawWords || rawWords.length === 0) {
+        throw new PipelineFatalError(
+          `WhisperX returned no words for ${chunkLabel} — cannot assign speakers`,
+          'WHISPERX_UNAVAILABLE',
+          'whisperx_timestamps',
+          false,
         );
-
-        if (result.alignmentStatus === 'aligned') {
-          for (const seg of result.segments) {
-            allAlignedSegments.push({
-              speakerId: seg.speakerId,
-              text: seg.text,
-              startMs: seg.startMs + chunkStartMs,
-              endMs: seg.endMs + chunkStartMs,
-            });
-          }
-          if (result.avgConfidence !== undefined && result.avgConfidence < 0.5) {
-            lowConfidenceChunkCount++;
-          }
-        } else {
-          fallbackChunkCount++;
-          for (const seg of chunkGeminiSegs) {
-            allAlignedSegments.push({
-              speakerId: seg.speaker,
-              text: seg.text,
-              startMs: Math.round(seg.startMs * scale),
-              endMs: Math.round(seg.endMs * scale),
-            });
-          }
-        }
-      } catch (alignErr) {
-        fallbackChunkCount++;
-        const errMsg = alignErr instanceof Error ? alignErr.message : String(alignErr);
-        console.warn(`[Pipeline] ${chunkLabel}: alignment threw, using fallback — ${errMsg}`);
-        for (const seg of chunkGeminiSegs) {
-          allAlignedSegments.push({
-            speakerId: seg.speaker,
-            text: seg.text,
-            startMs: Math.round(seg.startMs * scale),
-            endMs: Math.round(seg.endMs * scale),
-          });
-        }
       }
 
-      totalChunksProcessed++;
+      // Offset words to chunk-local time (Word.start/end are in seconds)
+      const localWords = rawWords.map(w => ({
+        ...w,
+        start: w.start - chunkStartMs / 1000,
+        end: w.end - chunkStartMs / 1000,
+      }));
+
+      const chunkSegments = assignSpeakersToWords(localWords, localGeminiSegs);
+
+      console.log(`[Pipeline] ${chunkLabel}: ${chunkSegments.length} segments from ${rawWords.length} words`);
+
+      // Offset chunk-local timestamps back to global audio time
+      for (const seg of chunkSegments) {
+        allAlignedSegments.push({
+          speakerId: seg.speakerId,
+          text: seg.text,
+          startMs: seg.startMs + chunkStartMs,
+          endMs: seg.endMs + chunkStartMs,
+        });
+      }
     }
 
     // =======================================================================
@@ -517,9 +508,6 @@ export async function runPipeline(
       );
     }
 
-    const needsReview = totalChunksProcessed > 0 &&
-      lowConfidenceChunkCount > totalChunksProcessed * 0.5;
-
     // =======================================================================
     // Step 4: Assembly
     // =======================================================================
@@ -532,10 +520,8 @@ export async function runPipeline(
     // =======================================================================
     await progress.setStep(ProcessingStep.SAVING);
 
-    const status = needsReview ? 'needs_review' : 'complete';
-
     await db.collection('conversations').doc(conversationId).update({
-      status,
+      status: 'complete',
       segments: assembled.segments,
       speakers: assembled.speakers,
       terms: assembled.terms,
@@ -545,12 +531,6 @@ export async function runPipeline(
       durationMs: assembled.durationMs,
       processingPipeline: 'gemini_hybrid',
       pipelineVersion: 'gemini_hybrid',
-      ...(needsReview && {
-        processingError: `Low HARDY confidence on ${lowConfidenceChunkCount}/${totalChunksProcessed} chunks`,
-      }),
-      ...(fallbackChunkCount > 0 && {
-        alignmentStatus: 'fallback',
-      }),
       updatedAt: FieldValue.serverTimestamp(),
     });
 

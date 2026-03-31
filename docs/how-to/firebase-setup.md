@@ -321,7 +321,7 @@ npx firebase functions:secrets:set WHISPER_SERVICE_URL
 
 ### Speaker Diarization and Timestamps
 
-Speaker diarization (detecting who spoke when) is handled by **Gemini 3 Flash** as part of its single-pass analysis of the full audio. WhisperX running on Cloud Run GPU provides precise word-level timestamps only — it does not perform diarization.
+Speaker diarization (detecting who spoke when) is handled by **Gemini 3 Flash** using a no-text prompt that returns diarization windows (speaker names + time ranges) without transcript text. WhisperX running on Cloud Run GPU provides word-level timestamps and transcript text, which are then combined with Gemini's speaker diarization via timestamp-overlap assignment (`speakerAssignment.ts`).
 
 The Cloud Run service URL is configured via the `WHISPER_SERVICE_URL` secret (see table above).
 

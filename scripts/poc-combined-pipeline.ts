@@ -86,7 +86,60 @@ function splitAudioChunks(inputPath: string, durationSec: number, chunkSec = 600
 // Step 1: Gemini 3 Flash — diarization + content analysis
 // ============================================================================
 
-const GEMINI_PROMPT = `You are an expert audio transcription analyst. Listen to this entire recording carefully.
+// The no-text prompt matches poc-gemini3-fullpass.ts — the version that found 6/6 speakers.
+// Gemini does diarization only (speaker + timestamps), WhisperX provides the actual text.
+const NOTEXT_PROMPT = `You are an expert audio transcription analyst. Listen to this entire recording carefully.
+
+## Your Tasks
+
+### 1. Speaker Identification
+Identify every distinct speaker in this recording. For each speaker:
+- Assign a label ("Speaker 1", "Speaker 2", etc.)
+- Identify their actual name if mentioned in conversation
+- Note their role (e.g., "presenter", "client lead", "questioner")
+- Describe how you identified them
+
+Be conservative — do NOT create separate speakers for the same person.
+
+Also provide "speakerCount" — the total number of distinct speakers you identified.
+
+### 2. Speaker Timeline (Diarization)
+Produce a COARSE timeline of speaker turns covering the ENTIRE recording.
+
+CRITICAL RULES:
+- Each entry = one speaker's CONTINUOUS turn (from when they start until someone else speaks)
+- Do NOT include any transcript text — ONLY speaker label, startMs, endMs
+- Merge consecutive speech by the same speaker into one entry
+- The "speaker" field MUST exactly match a label from the speakers list (e.g., "Speaker 1")
+- For a 45-minute conversation, expect 100-400 entries
+- Cover the FULL recording from start to finish — do not stop early
+- Timestamps are in milliseconds from the start of the audio
+
+### 3. Terms
+Extract domain-specific or noteworthy terms/concepts discussed. For each:
+- "key": lowercase identifier
+- "display": display version (capitalization preserved)
+- "definition": brief definition in context
+- "aliases": alternative names/abbreviations
+
+### 4. Topics
+Identify major topics/segments. For each:
+- "title": descriptive title
+- "startApproxMs": approximate start time in milliseconds
+- "endApproxMs": approximate end time in milliseconds
+- "type": "main" for primary topics, "tangent" for digressions
+
+### 5. Persons
+People mentioned who are NOT speakers. For each:
+- "name": full name as mentioned
+- "affiliation": organization/role if mentioned
+
+## Important
+- Cover the ENTIRE recording — do not stop early
+- The segments array is the most important output — ensure complete coverage
+- NO transcript text in segments — only speaker, startMs, endMs`;
+
+const TEXT_PROMPT = `You are an expert audio transcription analyst. Listen to this entire recording carefully.
 
 ## Tasks
 
@@ -129,6 +182,9 @@ People mentioned who are NOT speakers. For each:
 - "name": full name as mentioned
 - "affiliation": organization/role if mentioned`;
 
+const USE_NOTEXT = process.env.NOTEXT === '1';
+const GEMINI_PROMPT = USE_NOTEXT ? NOTEXT_PROMPT : TEXT_PROMPT;
+
 async function runGemini(audioPath: string, conversationId: string) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not found');
@@ -150,7 +206,7 @@ async function runGemini(audioPath: string, conversationId: string) {
     fileState = (await ai.files.get({ name: uploadedFile.name! })).state;
   }
 
-  console.log(`[Gemini] Calling ${model}...`);
+  console.log(`[Gemini] Calling ${model}... (mode: ${USE_NOTEXT ? 'NO-TEXT diarization only' : 'with transcript text'})`);
   const apiStart = Date.now();
 
   const response = await ai.models.generateContent({
@@ -163,11 +219,75 @@ async function runGemini(audioPath: string, conversationId: string) {
       ],
     }],
     config: {
-      temperature: 0.1,
+      temperature: parseFloat(process.env.GEMINI_TEMPERATURE || '0.1'),
       maxOutputTokens: 65536,
       thinkingConfig: { thinkingBudget: 0 },
       responseMimeType: 'application/json',
-      responseSchema: {
+      responseSchema: USE_NOTEXT ? {
+        type: 'object',
+        properties: {
+          speakers: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                label: { type: 'string' }, name: { type: 'string' },
+                role: { type: 'string' }, description: { type: 'string' },
+              },
+              required: ['label', 'name'], propertyOrdering: ['label', 'name', 'role', 'description'],
+            },
+          },
+          speakerCount: { type: 'number' },
+          segments: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                speaker: { type: 'string' }, startMs: { type: 'number' },
+                endMs: { type: 'number' },
+              },
+              required: ['speaker', 'startMs', 'endMs'],
+              propertyOrdering: ['speaker', 'startMs', 'endMs'],
+            },
+          },
+          terms: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                key: { type: 'string' }, display: { type: 'string' },
+                definition: { type: 'string' },
+                aliases: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['key', 'display', 'definition'],
+              propertyOrdering: ['key', 'display', 'definition', 'aliases'],
+            },
+          },
+          topics: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' }, startApproxMs: { type: 'number' },
+                endApproxMs: { type: 'number' },
+                type: { type: 'string', enum: ['main', 'tangent'] },
+              },
+              required: ['title', 'startApproxMs', 'endApproxMs', 'type'],
+              propertyOrdering: ['title', 'startApproxMs', 'endApproxMs', 'type'],
+            },
+          },
+          persons: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { name: { type: 'string' }, affiliation: { type: 'string' } },
+              required: ['name'], propertyOrdering: ['name', 'affiliation'],
+            },
+          },
+        },
+        required: ['speakers', 'speakerCount', 'segments', 'terms', 'topics', 'persons'],
+        propertyOrdering: ['speakers', 'speakerCount', 'segments', 'terms', 'topics', 'persons'],
+      } : {
         type: 'object',
         properties: {
           speakers: {

@@ -1566,6 +1566,24 @@ async function getWhisperxTimestamps(
 // =============================================================================
 
 /**
+ * Fetch raw word-level timestamps from the WhisperX Cloud Run service.
+ *
+ * Thin public wrapper around the internal getWhisperxTimestamps — no HARDY
+ * matching, no alignment, just the raw Word[] off the wire. The new no-text
+ * Gemini pipeline calls this directly and does its own timestamp application.
+ *
+ * @param audioBase64 - Base64-encoded audio (WAV recommended; MP3 loses quiet speakers)
+ * @param serviceUrl  - Cloud Run WhisperX service URL (IAM-authenticated)
+ * @returns Raw word-level timestamps in seconds
+ */
+export async function getWhisperXWords(
+  audioBase64: string,
+  serviceUrl: string
+): Promise<Word[]> {
+  return getWhisperxTimestamps(audioBase64, serviceUrl);
+}
+
+/**
  * WhisperX segment from the raw API output
  */
 export interface WhisperXSegment {

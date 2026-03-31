@@ -113,14 +113,15 @@ import {
 // =============================================================================
 
 const VALID_GEMINI_RESPONSE = {
+  speakerCount: 2,
   speakers: [
-    { label: 'Speaker 1', name: 'Alice', role: 'presenter' },
+    { label: 'Speaker 1', name: 'Alice', role: 'presenter', description: 'Confident presenter, drives the agenda' },
     { label: 'Speaker 2', name: 'Bob', role: 'questioner' },
   ],
   segments: [
-    { speaker: 'Speaker 1', text: 'Hello everyone', startMs: 0, endMs: 5000 },
-    { speaker: 'Speaker 2', text: 'Hi Alice', startMs: 5000, endMs: 7000 },
-    { speaker: 'Speaker 1', text: 'Let me explain', startMs: 7000, endMs: 15000 },
+    { speaker: 'Speaker 1', startMs: 0, endMs: 5000 },
+    { speaker: 'Speaker 2', startMs: 5000, endMs: 7000 },
+    { speaker: 'Speaker 1', startMs: 7000, endMs: 15000 },
   ],
   terms: [
     { key: 'ai', display: 'AI', definition: 'Artificial Intelligence', aliases: ['artificial intelligence'] },
@@ -203,7 +204,9 @@ describe('gemini3Pipeline', () => {
 
       // Verify content
       expect(result.speakers[0].name).toBe('Alice');
-      expect(result.segments[0].text).toBe('Hello everyone');
+      expect(result.segments[0].startMs).toBe(0);
+      expect(result.segments[0].endMs).toBe(5000);
+      expect(result.speakerCount).toBe(2);
 
       // Verify metadata
       expect(result.tokenUsage).toEqual({
@@ -579,16 +582,17 @@ describe('gemini3Pipeline', () => {
   // ===========================================================================
 
   describe('assembleFirestoreData', () => {
-    // Shared fixture: a small but realistic Gemini result
+    // Shared fixture: a small but realistic Gemini result — segments are timestamps only
     const GEMINI: GeminiPipelineResult = {
+      speakerCount: 2,
       speakers: [
-        { label: 'Speaker 1', name: 'Alice', role: 'presenter' },
+        { label: 'Speaker 1', name: 'Alice', role: 'presenter', description: 'Leads the workshop with authority' },
         { label: 'Speaker 2', name: 'Bob' },
       ],
       segments: [
-        { speaker: 'Speaker 1', text: 'Welcome to the AI workshop', startMs: 0, endMs: 8000 },
-        { speaker: 'Speaker 2', text: 'Thanks Alice', startMs: 8000, endMs: 11000 },
-        { speaker: 'Speaker 1', text: 'Let me explain the ROI of machine learning', startMs: 11000, endMs: 24000 },
+        { speaker: 'Speaker 1', startMs: 0, endMs: 8000 },
+        { speaker: 'Speaker 2', startMs: 8000, endMs: 11000 },
+        { speaker: 'Speaker 1', startMs: 11000, endMs: 24000 },
       ],
       terms: [
         { key: 'ai', display: 'AI', definition: 'Artificial Intelligence', aliases: ['artificial intelligence'] },
@@ -780,8 +784,9 @@ describe('gemini3Pipeline', () => {
       it('respects word boundaries — no substring matches', () => {
         // "AI" should NOT match inside "RAIN"
         const gemini: GeminiPipelineResult = {
+          speakerCount: 1,
           speakers: [{ label: 'Speaker 1', name: 'Test' }],
-          segments: [{ speaker: 'Speaker 1', text: 'test', startMs: 0, endMs: 1000 }],
+          segments: [{ speaker: 'Speaker 1', startMs: 0, endMs: 1000 }],
           terms: [{ key: 'ai', display: 'AI', definition: 'Artificial Intelligence', aliases: [] }],
           topics: [],
           persons: [],
@@ -937,8 +942,9 @@ describe('gemini3Pipeline', () => {
       it('strips undefined values from output', () => {
         // Persons with no affiliation would have undefined if naively assigned
         const gemini: GeminiPipelineResult = {
+          speakerCount: 1,
           speakers: [{ label: 'Speaker 1', name: 'Solo' }],
-          segments: [{ speaker: 'Speaker 1', text: 'test', startMs: 0, endMs: 1000 }],
+          segments: [{ speaker: 'Speaker 1', startMs: 0, endMs: 1000 }],
           terms: [],
           topics: [],
           persons: [{ name: 'NoOrg' }],
@@ -970,18 +976,19 @@ describe('gemini3Pipeline', () => {
       it('handles multi-speaker conversation with all data families', () => {
         // Simulates a realistic 6-speaker meeting (like the PoC test conversations)
         const gemini: GeminiPipelineResult = {
+          speakerCount: 4,
           speakers: [
-            { label: 'Speaker 1', name: 'JJ', role: 'presenter' },
+            { label: 'Speaker 1', name: 'JJ', role: 'presenter', description: 'Sets the agenda, calls on others' },
             { label: 'Speaker 2', name: 'Michael', role: 'analyst' },
             { label: 'Speaker 3', name: 'Sarah' },
             { label: 'Speaker 4', name: 'David', role: 'consultant' },
           ],
           segments: [
-            { speaker: 'Speaker 1', text: 'Let us review the KPI dashboard for Q4', startMs: 0, endMs: 10000 },
-            { speaker: 'Speaker 2', text: 'The ROI looks strong for the SaaS vertical', startMs: 10000, endMs: 20000 },
-            { speaker: 'Speaker 3', text: 'I agree with Michael on the SaaS numbers', startMs: 20000, endMs: 30000 },
-            { speaker: 'Speaker 4', text: 'We should revisit the KPI targets next quarter', startMs: 30000, endMs: 45000 },
-            { speaker: 'Speaker 1', text: 'Good point David, let us schedule a follow-up', startMs: 45000, endMs: 55000 },
+            { speaker: 'Speaker 1', startMs: 0, endMs: 10000 },
+            { speaker: 'Speaker 2', startMs: 10000, endMs: 20000 },
+            { speaker: 'Speaker 3', startMs: 20000, endMs: 30000 },
+            { speaker: 'Speaker 4', startMs: 30000, endMs: 45000 },
+            { speaker: 'Speaker 1', startMs: 45000, endMs: 55000 },
           ],
           terms: [
             { key: 'kpi', display: 'KPI', definition: 'Key Performance Indicator', aliases: ['key performance indicator'] },
@@ -1091,8 +1098,9 @@ describe('gemini3Pipeline', () => {
 
       it('handles terms with special regex characters', () => {
         const gemini: GeminiPipelineResult = {
+          speakerCount: 1,
           speakers: [{ label: 'Speaker 1', name: 'Test' }],
-          segments: [{ speaker: 'Speaker 1', text: 'test', startMs: 0, endMs: 1000 }],
+          segments: [{ speaker: 'Speaker 1', startMs: 0, endMs: 1000 }],
           terms: [
             { key: 'cpp', display: 'C++', definition: 'Programming language', aliases: [] },
             { key: 'dotnet', display: '.NET', definition: 'Microsoft framework', aliases: [] },
@@ -1112,8 +1120,9 @@ describe('gemini3Pipeline', () => {
       it('handles single segment with all data', () => {
         const result = assembleFirestoreData(
           {
+            speakerCount: 1,
             speakers: [{ label: 'Speaker 1', name: 'Solo' }],
-            segments: [{ speaker: 'Speaker 1', text: 'hello', startMs: 0, endMs: 1000 }],
+            segments: [{ speaker: 'Speaker 1', startMs: 0, endMs: 1000 }],
             terms: [{ key: 'hello', display: 'hello', definition: 'Greeting', aliases: [] }],
             topics: [{ title: 'Greeting', startApproxMs: 0, endApproxMs: 1000, type: 'main' }],
             persons: [],

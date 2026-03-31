@@ -186,11 +186,11 @@ manage_secret() {
 
     # Check if secret exists
     if ! gcloud secrets describe "$secret_name" --project="$PROJECT_ID" &>/dev/null; then
-        # Create new secret
+        # Create new secret — let stderr through so failures are diagnosable
         echo -n "$secret_value" | gcloud secrets create "$secret_name" \
             --data-file=- \
             --project="$PROJECT_ID" \
-            --replication-policy="automatic" 2>/dev/null
+            --replication-policy="automatic"
         log_success "Created secret: $secret_name"
         return 0
     fi
@@ -209,7 +209,7 @@ manage_secret() {
     # Value changed - add new version
     echo -n "$secret_value" | gcloud secrets versions add "$secret_name" \
         --data-file=- \
-        --project="$PROJECT_ID" 2>/dev/null
+        --project="$PROJECT_ID"
     log_success "Updated secret: $secret_name (new version)"
 
     # Delete old versions (keep latest + previous)
@@ -767,6 +767,14 @@ else
         --project="$PROJECT_ID" \
         --display-name="Transcription Orchestrator Runtime"
     log_success "Created orchestrator runtime service account: $ORCHESTRATOR_RUNTIME_SA"
+
+    # IAM needs a moment to know the SA exists before we can bind roles to it.
+    # Without this, the sa_exists check below races against propagation.
+    for i in 1 2 3 4 5; do
+        if sa_exists "$ORCHESTRATOR_RUNTIME_SA"; then break; fi
+        log_info "Waiting for SA propagation... (attempt $i/5)"
+        sleep 2
+    done
 fi
 
 # Runtime permissions: Firestore, Storage, WhisperX invocation, Gemini secret access
@@ -794,9 +802,9 @@ fi
 log_step "ORCHESTRATOR_URL secret and GitHub Actions deploy permissions..."
 
 # Placeholder URL — the deploy workflow overwrites this on first successful deploy.
-# An empty string would cause gcloud secrets create to fail, so we seed it with
-# a recognizable placeholder that makes broken state obvious in logs.
-manage_secret "ORCHESTRATOR_URL" ""
+# gcloud secrets create rejects zero-byte payloads, so we seed with a placeholder
+# that makes broken state obvious in logs if someone tries to use it before deploying.
+manage_secret "ORCHESTRATOR_URL" "PLACEHOLDER_NOT_YET_DEPLOYED"
 
 # GitHub Actions SA deploy permissions for the orchestrator.
 # roles/run.admin + roles/iam.serviceAccountUser are the minimum to deploy a
@@ -814,12 +822,16 @@ if gcloud iam service-accounts describe "$GH_SA_ORCHESTRATOR" --project="$PROJEC
     # Cloud Run's actAs check needs a resource-level binding on the target SA,
     # not just a project-level serviceAccountUser grant. Without this the deploy
     # step fails with PERMISSION_DENIED on iam.serviceAccounts.actAs.
-    gcloud iam service-accounts add-iam-policy-binding "$ORCHESTRATOR_RUNTIME_SA" \
-        --project="$PROJECT_ID" \
-        --member="serviceAccount:$GH_SA_ORCHESTRATOR" \
-        --role="roles/iam.serviceAccountUser" \
-        --quiet > /dev/null 2>&1 || true
-    log_success "GitHub Actions SA → actAs orchestrator-runtime SA (resource-level)"
+    if sa_exists "$ORCHESTRATOR_RUNTIME_SA"; then
+        gcloud iam service-accounts add-iam-policy-binding "$ORCHESTRATOR_RUNTIME_SA" \
+            --project="$PROJECT_ID" \
+            --member="serviceAccount:$GH_SA_ORCHESTRATOR" \
+            --role="roles/iam.serviceAccountUser" \
+            --quiet > /dev/null 2>&1 || true
+        log_success "GitHub Actions SA → actAs orchestrator-runtime SA (resource-level)"
+    else
+        log_info "Orchestrator runtime SA actAs binding - skipped (SA not yet propagated, re-run script)"
+    fi
 
     # Allow the deploy workflow to update ORCHESTRATOR_URL secret version.
     # secretVersionManager covers both add and destroy; secretVersionAdder is read-only add.

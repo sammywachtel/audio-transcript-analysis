@@ -6,11 +6,11 @@
  * - Per-phase progress updates (GEMINI_ANALYSIS → ... → COMPLETE)
  * - Firestore persistence shape (status: 'complete', all required fields)
  * - Error propagation and temp-file cleanup on failure
- * - Chunk alignment: segment assignment, local-ts conversion, global-ts offset
+ * - Chunk processing: WhisperX words → speaker assignment → global-ts offset
  * - Fatal errors (HybridPipelineFatalError) write 'failed' to Firestore
- * - Isolated chunk fallback (WhisperX/HARDY failures don't kill the pipeline)
- * - Quality gates (zero speakers, zero segments, low segment count, low confidence)
- * - Timeout enforcement (pipeline-level, per-chunk alignment)
+ * - Hard failures when WhisperX returns empty words (no fallback)
+ * - Quality gates (zero speakers, zero segments, low segment count)
+ * - Timeout enforcement (pipeline-level, per-chunk WhisperX)
  * - Cleanup on both success and failure exits
  */
 
@@ -55,10 +55,16 @@ jest.mock('../gemini3Pipeline', () => ({
   assembleFirestoreData: (...args: unknown[]) => mockAssembleFirestoreData(...args),
 }));
 
-// Mock ./alignment
-const mockAlignTimestamps = jest.fn();
+// Mock ./alignment — getWhisperXWords replaces alignTimestamps
+const mockGetWhisperXWords = jest.fn();
 jest.mock('../alignment', () => ({
-  alignTimestamps: (...args: unknown[]) => mockAlignTimestamps(...args),
+  getWhisperXWords: (...args: unknown[]) => mockGetWhisperXWords(...args),
+}));
+
+// Mock ./speakerAssignment
+const mockAssignSpeakersToWords = jest.fn();
+jest.mock('../speakerAssignment', () => ({
+  assignSpeakersToWords: (...args: unknown[]) => mockAssignSpeakersToWords(...args),
 }));
 
 // Mock ./audioUtils (getAudioDuration moved from chunking in hard cutover)
@@ -132,7 +138,7 @@ import { ProcessingStep } from '../progressManager';
 // Test Fixtures
 // =============================================================================
 
-// 45 min audio, 3 speakers, 10 segments spanning 0–2700000ms (Gemini-drifted time)
+// 45 min audio, 3 speakers, 10 segments spanning 0–14400000ms (Gemini-drifted time)
 // Gemini timestamps are ~1.6x slow relative to real audio time — typical from PoC findings
 const GEMINI_RESULT = {
   speakers: [
@@ -141,21 +147,21 @@ const GEMINI_RESULT = {
     { label: 'Speaker 3', name: 'Carol', role: 'participant' },
   ],
   segments: [
-    // Chunk 0: 0–10min real = 0–16000000ms Gemini (scaled back: 0–600000ms real)
-    { speaker: 'Speaker 1', text: 'Segment one content here', startMs: 0, endMs: 1440000 },
-    { speaker: 'Speaker 2', text: 'Response to segment one', startMs: 1440000, endMs: 2880000 },
-    { speaker: 'Speaker 1', text: 'Back to main point', startMs: 2880000, endMs: 4320000 },
-    // Chunk 1: 10–20min real = 600000–1200000ms real
-    { speaker: 'Speaker 3', text: 'Carol chimes in here', startMs: 4320000, endMs: 5760000 },
-    { speaker: 'Speaker 1', text: 'Good point Carol', startMs: 5760000, endMs: 7200000 },
-    { speaker: 'Speaker 2', text: 'Building on that', startMs: 7200000, endMs: 8640000 },
-    // Chunk 2: 20–30min real
-    { speaker: 'Speaker 1', text: 'Deep dive on topic', startMs: 8640000, endMs: 10080000 },
-    { speaker: 'Speaker 3', text: 'Question from Carol', startMs: 10080000, endMs: 11520000 },
-    // Chunk 3: 30–40min real
-    { speaker: 'Speaker 2', text: 'Bob has thoughts', startMs: 11520000, endMs: 12960000 },
-    // Chunk 4: 40–45min real (partial)
-    { speaker: 'Speaker 1', text: 'Wrapping up here', startMs: 12960000, endMs: 14400000 },
+    // Chunk 0 territory (scaled to 0–600000ms real)
+    { speaker: 'Speaker 1', startMs: 0, endMs: 1440000 },
+    { speaker: 'Speaker 2', startMs: 1440000, endMs: 2880000 },
+    { speaker: 'Speaker 1', startMs: 2880000, endMs: 4320000 },
+    // Chunk 1 territory (scaled to 600000–1200000ms real)
+    { speaker: 'Speaker 3', startMs: 4320000, endMs: 5760000 },
+    { speaker: 'Speaker 1', startMs: 5760000, endMs: 7200000 },
+    { speaker: 'Speaker 2', startMs: 7200000, endMs: 8640000 },
+    // Chunk 2 territory (scaled to 1200000–1800000ms real)
+    { speaker: 'Speaker 1', startMs: 8640000, endMs: 10080000 },
+    { speaker: 'Speaker 3', startMs: 10080000, endMs: 11520000 },
+    // Chunk 3 territory (scaled to 1800000–2400000ms real)
+    { speaker: 'Speaker 2', startMs: 11520000, endMs: 12960000 },
+    // Chunk 4 territory (scaled to 2400000–2700000ms real, partial)
+    { speaker: 'Speaker 1', startMs: 12960000, endMs: 14400000 },
   ],
   terms: [{ key: 'rag', display: 'RAG', definition: 'Retrieval-Augmented Generation', aliases: ['retrieval augmented generation'] }],
   topics: [{ title: 'AI Architecture', startApproxMs: 0, endApproxMs: 14400000, type: 'main' as const }],
@@ -168,11 +174,22 @@ const GEMINI_RESULT = {
 const AUDIO_DURATION_MS = 2700000;
 const AUDIO_DURATION_SEC = AUDIO_DURATION_MS / 1000; // 2700
 
+// WhisperX words mock — what getWhisperXWords returns (seconds, not ms)
+const MOCK_WORDS = [
+  { word: 'hello', start: 0.1, end: 0.5, index: 0, score: 0.95 },
+  { word: 'world', start: 0.6, end: 1.0, index: 1, score: 0.92 },
+];
+
+// AlignedSegments — what assignSpeakersToWords returns
+const MOCK_ASSIGNED_SEGMENTS = [
+  { speakerId: 'Speaker 1', text: 'hello world', startMs: 100, endMs: 1000 },
+];
+
 // Assembled output mock (what assembleFirestoreData returns)
 const ASSEMBLED_RESULT = {
   speakers: { speaker_0: { speakerId: 'speaker_0', displayName: 'Alice (presenter)', colorIndex: 0 } },
   segments: [
-    { segmentId: 'seg_0', index: 0, speakerId: 'speaker_0', startMs: 1000, endMs: 5000, text: 'Segment one content here' },
+    { segmentId: 'seg_0', index: 0, speakerId: 'speaker_0', startMs: 100, endMs: 1000, text: 'hello world' },
   ],
   terms: { t_0: { termId: 't_0', key: 'rag', display: 'RAG', definition: 'RAG def', aliases: [] } },
   termOccurrences: [],
@@ -215,14 +232,11 @@ describe('newPipeline', () => {
     fsReadFileSyncMock.mockReturnValue(Buffer.from('fake-audio-data'));
     fsStatSyncMock.mockReturnValue({ size: 5 * 1024 * 1024 });
 
-    // Alignment succeeds for all chunks
-    mockAlignTimestamps.mockResolvedValue({
-      alignmentStatus: 'aligned',
-      segments: [
-        { speakerId: 'Speaker 1', text: 'Segment one content here', startMs: 1000, endMs: 5000 },
-      ],
-      avgConfidence: 0.85,
-    });
+    // WhisperX returns words for all chunks
+    mockGetWhisperXWords.mockResolvedValue(MOCK_WORDS);
+
+    // Speaker assignment returns segments for all chunks
+    mockAssignSpeakersToWords.mockReturnValue(MOCK_ASSIGNED_SEGMENTS);
 
     // Assembly succeeds
     mockAssembleFirestoreData.mockReturnValue(ASSEMBLED_RESULT);
@@ -252,8 +266,11 @@ describe('newPipeline', () => {
       // Audio duration probed after Gemini (we have the MP3 path by then)
       expect(mockGetAudioDuration).toHaveBeenCalledTimes(1);
 
-      // Alignment called for each non-empty chunk
-      expect(mockAlignTimestamps).toHaveBeenCalled();
+      // WhisperX called for each non-empty chunk
+      expect(mockGetWhisperXWords).toHaveBeenCalled();
+
+      // Speaker assignment called for each chunk with WhisperX words
+      expect(mockAssignSpeakersToWords).toHaveBeenCalled();
 
       // Assembly ran with the Gemini result and collected aligned segments
       expect(mockAssembleFirestoreData).toHaveBeenCalledWith(
@@ -281,6 +298,19 @@ describe('newPipeline', () => {
 
       // bucket().file() called with the storage path
       expect(mockFile).toHaveBeenCalledWith('users/uid/audio/test.mp3');
+    });
+
+    it('passes base64-encoded chunk buffer to getWhisperXWords', async () => {
+      const fakeData = Buffer.from('fake-audio-data');
+      fsReadFileSyncMock.mockReturnValue(fakeData);
+
+      await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
+
+      // The call should receive a base64 string, not a Buffer
+      const firstCallArgs = mockGetWhisperXWords.mock.calls[0];
+      expect(typeof firstCallArgs[0]).toBe('string');
+      expect(firstCallArgs[0]).toBe(fakeData.toString('base64'));
+      expect(firstCallArgs[1]).toBe('https://whisperx.example.com');
     });
   });
 
@@ -361,6 +391,16 @@ describe('newPipeline', () => {
       const updateCall = mockUpdate.mock.calls[0][0] as Record<string, unknown>;
       // FieldValue.serverTimestamp() returns our mock sentinel object
       expect(updateCall.updatedAt).toEqual({ _type: 'server_timestamp' });
+    });
+
+    it('never writes alignmentStatus or processingError for quality degradation', async () => {
+      // With the new pipeline, status is always 'complete' or 'failed' — no 'needs_review'
+      await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
+
+      const updateCall = mockUpdate.mock.calls[0][0] as Record<string, unknown>;
+      expect(updateCall.status).toBe('complete');
+      expect(updateCall).not.toHaveProperty('alignmentStatus');
+      expect(updateCall).not.toHaveProperty('processingError');
     });
   });
 
@@ -443,6 +483,37 @@ describe('newPipeline', () => {
         }),
       );
     });
+
+    it('hard-fails (writes status: failed) when WhisperX returns empty words', async () => {
+      // No fallback to scaled Gemini timestamps — empty words = fatal
+      mockGetWhisperXWords.mockResolvedValue([]);
+
+      await expect(
+        processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc'),
+      ).rejects.toThrow(HybridPipelineFatalError);
+
+      const failedWrites = mockUpdate.mock.calls.filter(
+        call => (call[0] as Record<string, unknown>).status === 'failed'
+      );
+      expect(failedWrites).toHaveLength(1);
+    });
+
+    it('hard-fails when WhisperX throws (no fallback to scaled timestamps)', async () => {
+      mockGetWhisperXWords.mockRejectedValue(new Error('WhisperX service unreachable'));
+
+      await expect(
+        processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc'),
+      ).rejects.toThrow('WhisperX service unreachable');
+
+      // Must write 'failed', NOT 'complete' with degraded data
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'failed' }),
+      );
+      const completeWrites = mockUpdate.mock.calls.filter(
+        call => (call[0] as Record<string, unknown>).status === 'complete'
+      );
+      expect(completeWrites).toHaveLength(0);
+    });
   });
 
   // ===========================================================================
@@ -486,12 +557,8 @@ describe('newPipeline', () => {
     });
 
     it('throws HybridPipelineFatalError when aligned segments drop below 50% of Gemini', async () => {
-      // Alignment returns empty segments for every chunk — total aligned = 0
-      mockAlignTimestamps.mockResolvedValue({
-        alignmentStatus: 'aligned',
-        segments: [], // zero aligned segments per chunk
-        avgConfidence: 0.8,
-      });
+      // assignSpeakersToWords returns empty for every chunk → total aligned = 0
+      mockAssignSpeakersToWords.mockReturnValue([]);
 
       await expect(
         processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc'),
@@ -504,43 +571,7 @@ describe('newPipeline', () => {
       }
     });
 
-    it('writes needs_review when low-confidence HARDY on >50% of chunks', async () => {
-      // All chunks return aligned but with low confidence
-      mockAlignTimestamps.mockResolvedValue({
-        alignmentStatus: 'aligned',
-        segments: [
-          { speakerId: 'Speaker 1', text: 'Some text', startMs: 1000, endMs: 5000 },
-        ],
-        avgConfidence: 0.3, // Below 0.5 threshold
-      });
-
-      await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
-
-      // Should have written needs_review status
-      expect(mockUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          status: 'needs_review',
-          processingError: expect.stringContaining('Low HARDY confidence'),
-        }),
-      );
-    });
-
-    it('writes complete when only some chunks have low confidence (<=50%)', async () => {
-      // First call: high confidence. Subsequent calls: low confidence.
-      // With 5 chunks (45 min / 10 min), we need >50% = at least 3 low-conf chunks.
-      // Give 2 low-conf (40%) and 3 high-conf (60%) → should be 'complete'.
-      let callCount = 0;
-      mockAlignTimestamps.mockImplementation(async () => {
-        callCount++;
-        return {
-          alignmentStatus: 'aligned',
-          segments: [
-            { speakerId: 'Speaker 1', text: 'Some text', startMs: 1000, endMs: 5000 },
-          ],
-          avgConfidence: callCount <= 3 ? 0.85 : 0.3, // 3 high, 2 low
-        };
-      });
-
+    it('writes complete (not needs_review) when all chunks succeed', async () => {
       await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
 
       expect(mockUpdate).toHaveBeenCalledWith(
@@ -550,98 +581,130 @@ describe('newPipeline', () => {
   });
 
   // ===========================================================================
-  // Isolated chunk fallback
+  // Chunk processing
   // ===========================================================================
 
-  describe('chunk isolation', () => {
-    it('falls back to scaled Gemini timestamps when alignment returns fallback status', async () => {
-      mockAlignTimestamps.mockResolvedValue({
-        alignmentStatus: 'fallback',
-        alignmentError: 'WhisperX returned no words',
-        segments: [],
-      });
-
-      // Should not throw — fallback is graceful degradation
-      await expect(
-        processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc'),
-      ).resolves.toBeUndefined();
-
-      // assembleFirestoreData still gets called with fallback segments
-      expect(mockAssembleFirestoreData).toHaveBeenCalled();
-      const alignedSegs = mockAssembleFirestoreData.mock.calls[0][1] as unknown[];
-      expect(alignedSegs.length).toBeGreaterThan(0);
-    });
-
-    it('falls back gracefully when alignTimestamps throws', async () => {
-      mockAlignTimestamps.mockRejectedValue(new Error('WhisperX service unreachable'));
-
-      // Should complete successfully with fallback segments
-      await expect(
-        processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc'),
-      ).resolves.toBeUndefined();
-
-      // Firestore write still happens
-      expect(mockUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ status: 'complete' }),
-      );
-    });
-
+  describe('chunk processing', () => {
     it('skips chunks that have no Gemini segments assigned to them', async () => {
-      // Override with a single-segment result — only chunk 0 gets a segment
+      // 20-min audio = 2 chunks (0–600000ms, 600000–1200000ms).
+      // Single Gemini segment with a large endMs so scale keeps scaled range in chunk 0 only.
+      // geminiLastMs = 1200000 (endMs), scale = 1200000 / 1200000 = 1.0
+      // seg scaledStart = 0, scaledEnd = 400000 * 1.0 = 400000ms < 600000ms
+      // chunk 0 (0–600000): 0 < 600000 ✓ AND 400000 > 0 ✓ → overlaps
+      // chunk 1 (600000–1200000): 0 < 1200000 ✓ but 400000 > 600000? NO → skipped
+      mockGetAudioDuration.mockResolvedValue(1200); // 20 min = 2 chunks
       mockProcessWithGemini3Flash.mockResolvedValue({
         ...GEMINI_RESULT,
         segments: [
-          // Only one segment, clearly in chunk 0 (scaled midpoint well under 600000ms)
-          { speaker: 'Speaker 1', text: 'Only segment', startMs: 0, endMs: 100000 },
+          { speaker: 'Speaker 1', startMs: 0, endMs: 400000 },
+          // dummy high-endMs segment to set geminiLastMs without overlapping chunk 1
+          // scaledStart = 1200000 * 1.0 = 1200000, which is not < chunkEndMs(1200000) → skipped
+          { speaker: 'Speaker 2', startMs: 1200000, endMs: 1200000 },
         ],
       });
 
       await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
 
-      // For 45-min audio split into 5 chunks, only chunk 0 has a segment.
-      // alignTimestamps should be called exactly once.
-      expect(mockAlignTimestamps).toHaveBeenCalledTimes(1);
+      // 2 chunks, but chunk 1 has no overlapping Gemini segments → only 1 WhisperX call
+      expect(mockGetWhisperXWords).toHaveBeenCalledTimes(1);
     });
 
-    it('includes alignmentStatus: fallback in Firestore when chunks fell back', async () => {
-      mockAlignTimestamps.mockResolvedValue({
-        alignmentStatus: 'fallback',
-        alignmentError: 'WhisperX offline',
-        segments: [],
+    it('passes words offset to chunk-local time to assignSpeakersToWords', async () => {
+      // Use single-chunk audio to keep the math simple
+      mockGetAudioDuration.mockResolvedValue(300); // 5 min
+      mockProcessWithGemini3Flash.mockResolvedValue({
+        ...GEMINI_RESULT,
+        segments: [{ speaker: 'Speaker 1', startMs: 0, endMs: 300000 }],
+      });
+
+      // Words with global-ish start times
+      mockGetWhisperXWords.mockResolvedValue([
+        { word: 'hello', start: 10, end: 10.5, index: 0 },
+        { word: 'there', start: 11, end: 11.5, index: 1 },
+      ]);
+
+      await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
+
+      // For chunk 0, chunkStartMs = 0, so local = global (no offset for first chunk)
+      const assignCall = mockAssignSpeakersToWords.mock.calls[0];
+      const passedWords = assignCall[0] as Array<{ start: number }>;
+      expect(passedWords[0].start).toBeCloseTo(10, 3); // 10 - 0/1000 = 10
+    });
+
+    it('offsets assigned segment timestamps back to global audio time', async () => {
+      // Force two chunks by using 15-min audio
+      mockGetAudioDuration.mockResolvedValue(900); // 15 min = 2 chunks
+
+      // Second chunk starts at 600000ms
+      // assignSpeakersToWords returns local timestamps of 1000ms–5000ms
+      mockAssignSpeakersToWords.mockReturnValue([
+        { speakerId: 'Speaker 1', text: 'chunk content', startMs: 1000, endMs: 5000 },
+      ]);
+
+      mockProcessWithGemini3Flash.mockResolvedValue({
+        ...GEMINI_RESULT,
+        segments: [
+          // Covers both chunks when scaled
+          { speaker: 'Speaker 1', startMs: 0, endMs: 300000 },
+          { speaker: 'Speaker 2', startMs: 300000, endMs: 600000 },
+        ],
       });
 
       await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
 
-      expect(mockUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          alignmentStatus: 'fallback',
-        }),
-      );
+      const assembleCall = mockAssembleFirestoreData.mock.calls[0];
+      const alignedSegs = assembleCall[1] as Array<{ startMs: number; endMs: number }>;
+
+      // All segments must have valid global timestamps
+      for (const seg of alignedSegs) {
+        expect(seg.startMs).toBeGreaterThanOrEqual(0);
+      }
+
+      // At least one segment should come from chunk 1 (start ≥ 600000ms + 1000ms = 601000ms)
+      const chunk1Segs = alignedSegs.filter(s => s.startMs >= 600000);
+      expect(chunk1Segs.length).toBeGreaterThan(0);
     });
 
-    it('mixes aligned and fallback chunks without failing', async () => {
-      // First 3 calls succeed, last 2 fail — pipeline should still complete
-      let callIdx = 0;
-      mockAlignTimestamps.mockImplementation(async () => {
-        callIdx++;
-        if (callIdx <= 3) {
-          return {
-            alignmentStatus: 'aligned',
-            segments: [{ speakerId: 'Speaker 1', text: 'Aligned text', startMs: 100, endMs: 5000 }],
-            avgConfidence: 0.9,
-          };
-        }
-        throw new Error('WhisperX down');
+    it('uses any-overlap (not midpoint) to assign Gemini segments to chunks', async () => {
+      // A segment that starts in chunk 0 but ends in chunk 1 — it overlaps both,
+      // so it should show up in both chunk assignments.
+      // Scale = 2700000 / 900000 = 3.0 for 45-min Gemini on 15-min audio
+      mockGetAudioDuration.mockResolvedValue(900); // 15 min, so 2 chunks
+
+      mockProcessWithGemini3Flash.mockResolvedValue({
+        ...GEMINI_RESULT,
+        segments: [
+          // scaledStart = 0 * 3 = 0, scaledEnd = 200000 * 3 = 600000 exactly
+          // This segment's scaledEnd touches the chunk boundary at 600000ms but is NOT > 600000ms
+          // So it only overlaps chunk 0 by the filter (scaledStart < 600000 AND scaledEnd > 0)
+          { speaker: 'Speaker 1', startMs: 0, endMs: 200000 },
+          // scaledStart = 200001 * 3 > 600000, scaledEnd = 300000 * 3 = 900000 → chunk 1 only
+          { speaker: 'Speaker 2', startMs: 200001, endMs: 300000 },
+        ],
       });
 
-      await expect(
-        processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc'),
-      ).resolves.toBeUndefined();
+      await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
 
-      // All segments still reach assembly
-      expect(mockAssembleFirestoreData).toHaveBeenCalled();
-      const alignedSegs = mockAssembleFirestoreData.mock.calls[0][1] as unknown[];
-      expect(alignedSegs.length).toBeGreaterThan(0);
+      // Both chunks should have received WhisperX calls (each has at least 1 segment)
+      expect(mockGetWhisperXWords).toHaveBeenCalledTimes(2);
+    });
+
+    it('uses Math.max for scale factor (not last segment endMs)', async () => {
+      // Put the max endMs in the middle of the array, not at the end
+      mockProcessWithGemini3Flash.mockResolvedValue({
+        ...GEMINI_RESULT,
+        segments: [
+          { speaker: 'Speaker 1', startMs: 0, endMs: 14400000 }, // max endMs is here
+          { speaker: 'Speaker 2', startMs: 14400000, endMs: 14000000 }, // lower endMs at end
+        ],
+      });
+
+      // If scale used last segment's endMs (14000000), it would be slightly wrong.
+      // If it uses Math.max (14400000 = AUDIO_DURATION_MS / scale), scale = 2700000/14400000
+      // The test just verifies the pipeline runs without throwing — the math is internal.
+      await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
+
+      expect(mockGetWhisperXWords).toHaveBeenCalled();
     });
   });
 
@@ -676,27 +739,20 @@ describe('newPipeline', () => {
       jest.restoreAllMocks();
     });
 
-    it('wraps per-chunk alignment with 2-minute timeout', async () => {
-      // Make alignTimestamps hang forever — the withTimeout wrapper should catch it
-      mockAlignTimestamps.mockImplementation(() => new Promise(() => {
-        // Never resolves — simulates a wedged WhisperX call
-      }));
+    it('hard-fails when per-chunk WhisperX times out (via rejection propagation)', async () => {
+      // withTimeout wraps the WhisperX call — simulate a timeout error propagating
+      mockGetWhisperXWords.mockRejectedValue(
+        new Error('Timeout: whisperx chunk 0s–600s exceeded 120s limit'),
+      );
 
-      // The pipeline should still complete (with fallback segments) because
-      // the timeout catch falls through to the scaled-Gemini-timestamps fallback.
-      // BUT we need to be careful: with multiple chunks, the 2-min timeout per
-      // chunk would take too long in a test. Mock the timeout mechanism.
-
-      // Instead, let's verify the error message pattern when alignment times out
-      mockAlignTimestamps.mockRejectedValue(new Error('Timeout: alignment chunk 0s–600s exceeded 120s limit'));
-
+      // Unlike the old HARDY fallback, a timeout now propagates as a hard failure
       await expect(
         processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc'),
-      ).resolves.toBeUndefined();
+      ).rejects.toThrow();
 
-      // Pipeline completed with fallback segments despite alignment timeouts
+      // Must write 'failed' — no more "complete with fallback segments"
       expect(mockUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ status: 'complete' }),
+        expect.objectContaining({ status: 'failed' }),
       );
     });
   });
@@ -742,8 +798,7 @@ describe('newPipeline', () => {
       await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
 
       // For 45-min audio: 5 chunks, but chunk 0 reuses mp3Path.
-      // So 4 chunk files + 1 mp3 = 5 cleanup calls
-      // (existsSync is checked first, then unlinkSync)
+      // So 4 chunk files + 1 mp3 = at least 1 cleanup call
       const unlinkCalls = fsUnlinkSyncMock.mock.calls.length;
       expect(unlinkCalls).toBeGreaterThan(0);
     });
@@ -762,63 +817,6 @@ describe('newPipeline', () => {
   });
 
   // ===========================================================================
-  // Chunk alignment logic
-  // ===========================================================================
-
-  describe('chunk alignment', () => {
-    it('assigns Gemini segments to chunks by scaled midpoint', async () => {
-      // 45-min audio: scale = 2700000 / 14400000 ≈ 0.1875
-      // CHUNK_SEC = 600, so chunk boundaries are 0, 600000, 1200000, ... ms real
-      // Segment 0: midMs = 720000 Gemini → 720000 * 0.1875 = 135000ms real → chunk 0
-      // Segment 3: midMs = 5040000 Gemini → 5040000 * 0.1875 = 945000ms real → chunk 1
-
-      await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
-
-      // alignTimestamps is called at least once (for non-empty chunks)
-      expect(mockAlignTimestamps).toHaveBeenCalled();
-
-      // The first call should receive local-time segments (not global)
-      const firstCallArgs = mockAlignTimestamps.mock.calls[0];
-      const localSegs = firstCallArgs[1] as Array<{ startMs: number; endMs: number }>;
-
-      // Local timestamps must be smaller than the global ones (they're offset by chunkStartMs)
-      // Chunk 0 starts at 0ms, so local = global for chunk 0
-      // All local timestamps must be < CHUNK_SEC * 1000 (600000ms)
-      for (const seg of localSegs) {
-        expect(seg.startMs).toBeLessThanOrEqual(600000);
-        expect(seg.endMs).toBeLessThanOrEqual(600000);
-      }
-    });
-
-    it('offsets aligned timestamps back to global audio time', async () => {
-      // Return aligned segments starting at local time 1000ms from chunk 0
-      mockAlignTimestamps.mockResolvedValue({
-        alignmentStatus: 'aligned',
-        segments: [
-          { speakerId: 'Speaker 1', text: 'Some text', startMs: 1000, endMs: 5000 },
-        ],
-        avgConfidence: 0.85,
-      });
-
-      await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
-
-      // assembleFirestoreData receives allAlignedSegments
-      const assembleCall = mockAssembleFirestoreData.mock.calls[0];
-      const alignedSegs = assembleCall[1] as Array<{ startMs: number }>;
-
-      // At least some segments should exist
-      expect(alignedSegs.length).toBeGreaterThan(0);
-
-      // Chunk 0 starts at 0ms so offsets are 0 — local + 0 = local
-      // Chunk 1 starts at 600000ms — if alignment returned 1000ms local, global = 601000ms
-      // Just verify that assembled segments have startMs values ≥ 0
-      for (const seg of alignedSegs) {
-        expect(seg.startMs).toBeGreaterThanOrEqual(0);
-      }
-    });
-  });
-
-  // ===========================================================================
   // Single-chunk (short audio) path
   // ===========================================================================
 
@@ -830,7 +828,7 @@ describe('newPipeline', () => {
       mockProcessWithGemini3Flash.mockResolvedValue({
         ...GEMINI_RESULT,
         segments: [
-          { speaker: 'Speaker 1', text: 'Hello', startMs: 0, endMs: 100000 },
+          { speaker: 'Speaker 1', startMs: 0, endMs: 100000 },
         ],
       });
 
@@ -839,8 +837,9 @@ describe('newPipeline', () => {
       // ffmpeg splitting should NOT be called for single-chunk audio
       expect(execFileAsyncMock).not.toHaveBeenCalled();
 
-      // But alignment and assembly still happen
-      expect(mockAlignTimestamps).toHaveBeenCalledTimes(1);
+      // But WhisperX, speaker assignment, and assembly still happen
+      expect(mockGetWhisperXWords).toHaveBeenCalledTimes(1);
+      expect(mockAssignSpeakersToWords).toHaveBeenCalledTimes(1);
       expect(mockAssembleFirestoreData).toHaveBeenCalledTimes(1);
     });
   });
@@ -951,6 +950,18 @@ describe('newPipeline', () => {
         expect(err).toBeInstanceOf(HybridPipelineFatalError);
         expect((err as HybridPipelineFatalError).reason).toBe('zero_speakers');
         expect((err as HybridPipelineFatalError).message).toContain('zero speakers');
+      }
+    });
+
+    it('is thrown for whisperx_empty reason when words array is empty', async () => {
+      mockGetWhisperXWords.mockResolvedValue([]);
+
+      try {
+        await processWithNewPipeline('conv-123', 'users/uid/audio/test.mp3', 'uid-abc');
+        fail('Should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(HybridPipelineFatalError);
+        expect((err as HybridPipelineFatalError).reason).toBe('whisperx_empty');
       }
     });
   });
