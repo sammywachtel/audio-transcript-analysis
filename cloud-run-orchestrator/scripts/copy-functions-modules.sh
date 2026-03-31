@@ -15,19 +15,22 @@ TARGET="$ORCH_DIR/src/_functions"
 rm -rf "$TARGET"
 mkdir -p "$TARGET"
 
-# The three modules pipeline.ts directly imports:
+# The four modules pipeline.ts directly imports:
 #   @functions/gemini3Pipeline
 #   @functions/alignment
 #   @functions/audioUtils
+#   @functions/speakerAssignment
 #
 # Plus their transitive dependencies:
-#   gemini3Pipeline → ./logger, ./types, ./firestoreUtils
-#   alignment       → (npm only: google-auth-library, fuzzball)
-#   audioUtils      → (stdlib only)
+#   gemini3Pipeline   → ./logger, ./types, ./firestoreUtils
+#   alignment         → (npm only: google-auth-library, fuzzball)
+#   audioUtils        → (stdlib only)
+#   speakerAssignment → (npm only: TBD)
 MODULES=(
   gemini3Pipeline.ts
   alignment.ts
   audioUtils.ts
+  speakerAssignment.ts
   logger.ts
   types.ts
   firestoreUtils.ts

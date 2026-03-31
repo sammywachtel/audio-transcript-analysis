@@ -37,20 +37,28 @@ Gemini 3 Flash was tested with the full 45-minute audio file in WAV format, aski
 
 **Critical finding**: WAV format matters. When the same audio was sent as MP3, Gemini found only 5 speakers. The lossy compression hid the quietest speaker. WAV preserves the full audio fidelity that Gemini needs for accurate diarization.
 
-### Approach 3: Gemini 3 Flash + WhisperX Hybrid
+### Approach 3: Gemini 3 Flash (No-Text) + WhisperX Timestamp-Overlap
 
 Gemini's timestamps drift approximately 1.6x relative to actual audio time — the same problem that existed with Gemini 2.5 Flash. So WhisperX is still needed for precise timestamps.
 
-The winning architecture: Gemini handles diarization and content, WhisperX handles timestamps, HARDY alignment bridges them. Testing showed the HARDY algorithm achieved a median 1.1-second error vs ground truth, correcting Gemini's systematic drift.
+The initial hybrid architecture used HARDY text-matching alignment to bridge Gemini's text with WhisperX's timestamps. However, further testing revealed that a **no-text Gemini prompt** (diarization windows only, no transcript text) produces significantly better results:
+
+- **Better speaker detection**: 6/6 speakers vs 5/6 with the text-returning prompt
+- **Lower token usage**: ~9-15% of output budget vs ~31% with text
+- **Simpler pipeline**: No need for HARDY text matching — speaker assignment uses direct timestamp overlap
+
+The trade-off: transcript text now comes from WhisperX (raw ASR output), which is slightly less polished than Gemini's cleaned-up version. In practice, WhisperX transcription quality is good enough that this is an acceptable trade for the dramatically better diarization.
+
+The winning architecture: Gemini handles diarization (time windows + speaker names) and content analysis, WhisperX provides word-level timestamps and transcript text, and `speakerAssignment.ts` overlays Gemini's diarization windows onto WhisperX words by timestamp overlap.
 
 ## The Architecture Decision
 
 ```
 Upload → Convert to WAV (for Gemini)
-       → Gemini 3 Flash: diarization + speakers + terms + topics + persons
+       → Gemini 3 Flash (no-text prompt): diarization windows + speakers + terms + topics + persons
        → Download MP3 (for WhisperX)
        → Split into 10-min chunks (for WhisperX request sizing only)
-       → Per-chunk: WhisperX timestamps → HARDY alignment
+       → Per-chunk: WhisperX timestamps + text → speaker assignment by timestamp overlap
        → Assemble Firestore data → Save
 ```
 
@@ -69,8 +77,8 @@ Upload → Convert to WAV (for Gemini)
 
 ### What Was Kept
 
-- **WhisperX on Cloud Run GPU** — still needed for precise word-level timestamps (Gemini's timestamps drift)
-- **HARDY alignment algorithm** — bridges Gemini text with WhisperX timing
+- **WhisperX on Cloud Run GPU** — still needed for precise word-level timestamps and transcript text (Gemini's no-text prompt returns diarization windows only)
+- **Speaker assignment by timestamp overlap** — `speakerAssignment.ts` overlays Gemini diarization windows onto WhisperX words (replaced HARDY text-matching alignment)
 - **Cloud Function as thin dispatcher** — `transcribeAudio` validates the upload and fires an HTTP POST to the Cloud Run orchestrator (`transcription-orchestrator`), which runs the full pipeline
 - **All frontend code** — the data model is unchanged from the frontend's perspective
 - **Speaker corrections** — users can still merge/rename/reassign speakers (fewer corrections needed now)
@@ -80,7 +88,7 @@ Upload → Convert to WAV (for Gemini)
 
 1. **WAV format is critical for diarization.** MP3 compression hides quiet speakers. Always send WAV to Gemini for diarization tasks.
 
-2. **Gemini timestamps still drift.** This is true for both 2.5 Flash and 3 Flash. The drift is approximately 1.6x and is systematic (linear, not random). HARDY alignment corrects this to a median 1.1-second error.
+2. **Gemini timestamps still drift.** This is true for both 2.5 Flash and 3 Flash. The drift is approximately 1.6x and is systematic (linear, not random). The timestamp-overlap speaker assignment approach sidesteps this by using WhisperX's precise timestamps directly rather than trying to correct Gemini's.
 
 3. **Single-pass beats multi-step.** The fundamental insight is that diarization must see the full conversation to assign consistent speaker identities. Chunking the audio and trying to reconcile afterward is fighting against the nature of the problem.
 
@@ -92,4 +100,4 @@ Upload → Convert to WAV (for Gemini)
 
 The migration validated the "Enable-Before-Remove" strategy: the hybrid pipeline was built and tested as an opt-in path (activated via Storage metadata) before the legacy pipeline was removed. This allowed side-by-side comparison on the same audio files before committing to the switch.
 
-Ground truth comparison showed the hybrid pipeline producing dramatically better results: 6 correct speakers vs. 15 fragmented ones, with HARDY-corrected timestamps that tracked the audio within 1-2 seconds.
+Ground truth comparison showed the hybrid pipeline producing dramatically better results: 6 correct speakers vs. 15 fragmented ones, with WhisperX-sourced timestamps and speaker assignment by timestamp overlap.

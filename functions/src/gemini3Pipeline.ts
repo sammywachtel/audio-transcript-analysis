@@ -38,16 +38,18 @@ export interface GeminiSpeaker {
   name: string;
   /** Role if apparent (e.g., "presenter", "client lead") */
   role?: string;
+  /** Brief characterization of this speaker's voice/style/contribution */
+  description?: string;
 }
 
 /**
- * A single speaker turn with transcript
+ * A single speaker turn — timestamps only, no text.
+ * WhisperX + HARDY provide the verbatim transcript; Gemini provides diarization windows.
+ * No-text prompt yields better speaker detection (6/6 vs 5/6 speakers in PoC).
  */
 export interface GeminiSegment {
   /** Speaker label matching speakers array */
   speaker: string;
-  /** Transcript text for this turn */
-  text: string;
   /** Start timestamp in milliseconds */
   startMs: number;
   /** End timestamp in milliseconds */
@@ -97,6 +99,8 @@ export interface GeminiPerson {
  */
 export interface GeminiPipelineResult {
   speakers: GeminiSpeaker[];
+  /** Total number of distinct speakers Gemini detected */
+  speakerCount?: number;
   segments: GeminiSegment[];
   terms: GeminiTerm[];
   topics: GeminiTopic[];
@@ -337,7 +341,12 @@ export function parseGeminiJson(text: string): GeminiPipelineResult {
 // The Prompt (proven in PoC)
 // =============================================================================
 
-const GEMINI_PROMPT = `You are an expert audio transcription analyst. Listen to this entire recording carefully.
+// No-text prompt is the key finding from the PoC: asking Gemini for verbatim
+// transcript text in segments drops speaker detection from 6/6 to 5/6. The theory
+// is that generating token-heavy transcript text crowds out speaker-discriminative
+// audio features in the model's attention budget. WhisperX handles the transcript;
+// Gemini handles who-spoke-when. Separation of concerns, separation of concerns.
+const GEMINI_PROMPT = `You are an expert audio analyst. Listen to this entire recording carefully.
 
 ## Tasks
 
@@ -346,20 +355,22 @@ Identify every distinct speaker. For each:
 - Assign a label ("Speaker 1", "Speaker 2", etc.)
 - Identify their actual name if mentioned in conversation
 - Note their role (e.g., "presenter", "client lead", "questioner")
+- Write a brief description characterizing this speaker (voice, speaking style, or role in the conversation)
 
 Be conservative — do NOT create separate speakers for the same person.
+Also output "speakerCount": the total number of distinct speakers you identified.
 
-### 2. Speaker Timeline with Transcript
-Produce a timeline of speaker turns covering the ENTIRE recording.
+### 2. Speaker Diarization Timeline
+Produce a timeline of speaker turns covering the ENTIRE recording — timestamps only, NO transcript text.
 
 RULES:
 - Each entry = one speaker's CONTINUOUS turn (until someone else speaks)
-- Include the transcript TEXT for each turn — what they actually said, verbatim
 - The "speaker" field MUST match a label from the speakers list
 - Timestamps in milliseconds from start of audio
 - Cover the FULL recording from start to finish — do not stop early
 - Merge consecutive speech by the same speaker into one entry
 - For a 45-minute conversation, expect 100-400 entries
+- Do NOT include verbatim transcript text — timestamps and speaker labels only
 
 ### 3. Terms
 Extract domain-specific or noteworthy terms/concepts. For each:
@@ -387,6 +398,7 @@ People mentioned who are NOT speakers. For each:
 const RESPONSE_SCHEMA = {
   type: 'object' as const,
   properties: {
+    speakerCount: { type: 'integer' as const },
     speakers: {
       type: 'array' as const,
       items: {
@@ -395,9 +407,10 @@ const RESPONSE_SCHEMA = {
           label: { type: 'string' as const },
           name: { type: 'string' as const },
           role: { type: 'string' as const },
+          description: { type: 'string' as const },
         },
         required: ['label', 'name'],
-        propertyOrdering: ['label', 'name', 'role'],
+        propertyOrdering: ['label', 'name', 'role', 'description'],
       },
     },
     segments: {
@@ -408,10 +421,9 @@ const RESPONSE_SCHEMA = {
           speaker: { type: 'string' as const },
           startMs: { type: 'number' as const },
           endMs: { type: 'number' as const },
-          text: { type: 'string' as const },
         },
-        required: ['speaker', 'startMs', 'endMs', 'text'],
-        propertyOrdering: ['speaker', 'startMs', 'endMs', 'text'],
+        required: ['speaker', 'startMs', 'endMs'],
+        propertyOrdering: ['speaker', 'startMs', 'endMs'],
       },
     },
     terms: {
@@ -455,8 +467,8 @@ const RESPONSE_SCHEMA = {
       },
     },
   },
-  required: ['speakers', 'segments', 'terms', 'topics', 'persons'],
-  propertyOrdering: ['speakers', 'segments', 'terms', 'topics', 'persons'],
+  required: ['speakerCount', 'speakers', 'segments', 'terms', 'topics', 'persons'],
+  propertyOrdering: ['speakerCount', 'speakers', 'segments', 'terms', 'topics', 'persons'],
 };
 
 // =============================================================================
@@ -601,7 +613,8 @@ export function assembleFirestoreData(
     // No segments → topics can't reference valid indices
     topics = [];
   } else {
-    const geminiLastMs = geminiResult.segments[geminiResult.segments.length - 1]?.endMs || 1;
+    // Math.max handles unsorted segments — Gemini doesn't guarantee chronological order
+    const geminiLastMs = Math.max(...geminiResult.segments.map(s => s.endMs), 1);
     const topicScale = durationMs / geminiLastMs;
 
     topics = geminiResult.topics.map((t, i) => {

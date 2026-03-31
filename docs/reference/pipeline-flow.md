@@ -39,28 +39,29 @@ The pipeline has two layers: a thin **dispatcher** (Cloud Function) and a heavy 
 │  4. Run pipeline asynchronously:                                        │
 │                                                                         │
 │  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │ Step 1: Gemini 3 Flash (WAV) — single-pass analysis              │  │
+│  │ Step 1: Gemini 3 Flash (WAV, no-text prompt) — diarization only  │  │
 │  │ ├── Full-audio diarization (speakers by name)                    │  │
-│  │ ├── Transcription with speaker attribution                       │  │
+│  │ ├── No transcript text returned (lower tokens, better speakers)  │  │
 │  │ └── Content analysis (terms, topics, persons)                    │  │
 │  │                                                                   │  │
 │  │ Step 2: Download MP3 + detect audio duration                     │  │
 │  │                                                                   │  │
-│  │ Step 3: Per-chunk HARDY alignment                                │  │
+│  │ Step 3: WhisperX timestamps + speaker assignment                 │  │
 │  │ ├── Split into 10-min chunks if needed                           │  │
-│  │ ├── Scale Gemini timestamps to chunk-local time                  │  │
 │  │ ├── Call Cloud Run GPU WhisperX (IAM-auth HTTP)                  │  │
-│  │ ├── HARDY anchor + region alignment                              │  │
-│  │ └── Offset aligned timestamps back to global time                │  │
+│  │ ├── WhisperX provides word-level timestamps + transcript text    │  │
+│  │ ├── speakerAssignment.ts overlays Gemini diarization windows     │  │
+│  │ │   onto WhisperX words by timestamp overlap (any-overlap)       │  │
+│  │ └── Offset assigned timestamps back to global time               │  │
 │  │                                                                   │  │
 │  │ Step 4: Quality gates                                            │  │
 │  │ ├── Segment coverage ≥ 50% of Gemini segments                   │  │
-│  │ └── Low-confidence chunk tracking for needs_review               │  │
+│  │ └── WhisperX word count sanity check                             │  │
 │  │                                                                   │  │
 │  │ Step 5: assembleFirestoreData() + persist to Firestore           │  │
 │  │ ├── processingPipeline: 'gemini_hybrid'                          │  │
 │  │ ├── pipelineVersion: 'gemini_hybrid'                             │  │
-│  │ └── status: 'complete' (or 'needs_review')                       │  │
+│  │ └── status: 'complete' (or 'failed')                             │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
 │                                                                         │
 │  5. Clear orchestratorClaimed flag on completion/failure                 │
@@ -93,7 +94,7 @@ The pipeline reports progress through `ProgressManager`, writing to the conversa
 | Step | Enum Value           | Percentage | Description                     |
 | ---- | -------------------- | ---------- | ------------------------------- |
 | 1    | `GEMINI_ANALYSIS`    | 20%        | Running Gemini 3 Flash analysis |
-| 2    | `WHISPERX_ALIGNMENT` | 60%        | Per-chunk HARDY alignment       |
+| 2    | `WHISPERX_ALIGNMENT` | 60%        | WhisperX timestamps + speaker assignment |
 | 3    | `ASSEMBLY`           | 85%        | Building Firestore payload      |
 | 4    | `SAVING`             | 95%        | Writing to Firestore            |
 | 5    | `COMPLETE`           | 100%       | Done                            |
@@ -104,15 +105,9 @@ The pipeline reports progress through `ProgressManager`, writing to the conversa
 
 The dispatcher (`transcribeAudio`) has its own deduplication layer using a Firestore transaction that checks `queuedAt`. This prevents all 3 Cloud Storage triggers from even reaching the orchestrator. The orchestrator's `orchestratorClaimed` guard is a defense-in-depth measure for the (rare) case where two dispatchers both win the race.
 
-## Alignment Fallback
+## WhisperX Failure Behavior
 
-If HARDY alignment fails for a chunk, the pipeline degrades gracefully to scaled Gemini timestamps rather than failing the entire run. When this happens:
-
-- The chunk's segments use linearly scaled Gemini timestamps
-- `alignmentStatus` is set to `'fallback'` on the conversation document
-- The UI shows a "Fallback Sync" indicator
-
-Partial alignment beats missing segments — a transcript with some imprecise timestamps is better than no transcript.
+WhisperX is mandatory for the no-text pipeline — there is no fallback to scaled Gemini timestamps. If WhisperX is unavailable or fails, the entire pipeline fails with a `WHISPERX_UNAVAILABLE` error. This is a deliberate design choice: without WhisperX, there is no transcript text (Gemini's no-text prompt does not return it), so a fallback would produce segments with no content.
 
 ## Error Handling
 
@@ -144,7 +139,7 @@ Manual fallback: `gcloud run deploy transcription-orchestrator ...` (see deploy 
 
 | Setting       | Value    | Rationale                                                                 |
 | ------------- | -------- | ------------------------------------------------------------------------- |
-| CPU           | 2        | Pipeline is network-bound (Gemini, WhisperX) but needs headroom for HARDY |
+| CPU           | 2        | Pipeline is network-bound (Gemini, WhisperX) but needs headroom for speaker assignment |
 | Memory        | 2Gi      | Audio file download + ffmpeg chunk splitting                              |
 | Timeout       | 900s     | 15-minute pipeline ceiling with cleanup headroom                          |
 | Concurrency   | 1        | One pipeline per instance (no shared state)                               |
@@ -155,6 +150,6 @@ Manual fallback: `gcloud run deploy transcription-orchestrator ...` (see deploy 
 ## Related Documentation
 
 - [Architecture](architecture.md) — System architecture overview
-- [HARDY Alignment](alignment-architecture.md) — Detailed alignment algorithm reference
+- [Speaker Assignment](alignment-architecture.md) — Timestamp-overlap speaker assignment reference
 - [Data Model](data-model.md) — Firestore schema for pipeline output fields
 - [Deployment](../how-to/deploy.md) — How to deploy the orchestrator

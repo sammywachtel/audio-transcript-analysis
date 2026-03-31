@@ -6,8 +6,8 @@ Transform audio recordings into interactive, navigable transcripts with AI-power
 
 ## Features
 
-- **AI Transcription** - Powered by Google Gemini 2.5 Flash
-- **Speaker Diarization** - WhisperX + pyannote for speaker identification
+- **AI Transcription** - Powered by Google Gemini 3 Flash (no-text diarization prompt)
+- **Speaker Diarization** - Gemini 3 Flash full-audio analysis (6/6 speakers by name)
 - **Gemini Speaker Corrections** - AI-detected mid-segment speaker changes
 - **Manual Speaker Reassignment** - Click any segment to change speaker attribution
 - **Precision Timestamps** - WhisperX forced alignment (~50ms accuracy)
@@ -198,17 +198,18 @@ audio-transcript-analysis-app/
 └── ...config files
 ```
 
-## Timestamp Alignment
+## Pipeline Architecture
 
-The app uses a "WhisperX-first" architecture for precise timestamps:
+The app uses a no-text Gemini + WhisperX timestamp-overlap pipeline:
 
-1. **WhisperX Transcription** - Word-level forced alignment via Cloud Run GPU + pyannote speaker diarization
-2. **Gemini Analysis** - Analyzes WhisperX transcript for topics, terms, people, and speaker corrections
-3. **Client Drift Correction** - For legacy data without server alignment, applies linear timestamp scaling
+1. **Gemini 3 Flash (WAV, no-text prompt)** - Full-audio diarization with speaker names, plus content analysis (terms, topics, persons). The no-text prompt yields better speaker detection (6/6 vs 5/6) and lower token usage (~9-15% vs ~31%).
+2. **WhisperX Timestamps** - Word-level timestamps via Cloud Run GPU. Speaker assignment overlays Gemini's diarization windows onto WhisperX words by timestamp overlap.
+3. **Text Quality Trade-off** - Transcript text comes from WhisperX (raw ASR) rather than Gemini's cleaned-up version, since Gemini no longer returns transcript text in the no-text prompt mode.
+4. **Client Drift Correction** - For legacy data without server alignment, applies linear timestamp scaling.
 
 WhisperX is mandatory - if it fails, the entire job fails (no fallback to less precise timestamps).
 
-See [docs/reference/alignment-architecture.md](docs/reference/alignment-architecture.md) for details.
+See [docs/reference/pipeline-flow.md](docs/reference/pipeline-flow.md) for details.
 
 ## Deployment
 
@@ -228,8 +229,8 @@ See [docs/how-to/deploy.md](docs/how-to/deploy.md) for full deployment guide.
 
 - **Frontend**: React 18, TypeScript, Vite, Tailwind CSS
 - **Backend**: Firebase (Firestore, Storage, Cloud Functions, Auth)
-- **AI**: Google Gemini 2.5 Flash
-- **Alignment**: WhisperX via Cloud Run GPU with NVIDIA L4, pyannote diarization built-in
+- **AI**: Google Gemini 3 Flash (no-text diarization + content analysis)
+- **Timestamps**: WhisperX via Cloud Run GPU with NVIDIA L4 (word-level timestamps, speaker assignment by timestamp overlap)
 - **Deployment**: Cloud Run (frontend + WhisperX), Firebase Functions (backend)
 - **CI/CD**: GitHub Actions
 

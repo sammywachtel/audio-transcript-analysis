@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Speaker diarization now uses a no-text analysis mode with Gemini, improving speaker detection reliability (5 speakers consistently identified vs. 3 previously)
+- Transcript text and timestamps are now sourced exclusively from WhisperX, replacing the HARDY text-alignment step for more accurate word-level timing
+
+### Fixed
+- Significantly reduced Gemini API token consumption (down to ~10% of budget), lowering analysis costs
+
+### Removed
+- WhisperX fallback behavior removed; pipeline now fails with a clear error if WhisperX is unavailable rather than silently producing a degraded transcript
+
 ## [2.14.1-beta.1] - 2026-03-30
 
 ### Added

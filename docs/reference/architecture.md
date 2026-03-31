@@ -68,10 +68,10 @@ Technical architecture of the Audio Transcript Analysis App.
 │  transcription-orchestrator         │
 │  (Cloud Run — 2 CPU / 2Gi / 900s)  │
 │                                     │
-│  Gemini hybrid pipeline:            │
+│  No-text pipeline:                  │
 │  ├── Gemini 3 Flash (diarization)   │
-│  ├── WhisperX (timestamps)          │
-│  ├── HARDY (alignment)              │
+│  ├── WhisperX (timestamps + text)   │
+│  ├── speakerAssignment (overlap)    │
 │  └── Writes results to Firestore    │
 └──────────────┬──────────────────────┘
                │
@@ -192,7 +192,7 @@ audio-transcript-analysis-app/
 │       ├── transcribe.ts               # transcribeAudio (Storage trigger) — thin dispatcher
 │       ├── newPipeline.ts              # processWithNewPipeline — emulator-only inline pipeline
 │       ├── gemini3Pipeline.ts          # Gemini 3 Flash API client + Firestore data assembly
-│       ├── alignment.ts                # HARDY alignment + WhisperX Cloud Run GPU calls
+│       ├── alignment.ts                # WhisperX Cloud Run GPU calls + timestamp-overlap speaker assignment
 │       ├── audioUtils.ts               # Audio duration detection + shared helpers
 │       ├── firestoreUtils.ts           # Firestore write utilities
 │       ├── chat.ts                     # chatWithConversation (HTTPS callable)
@@ -232,26 +232,27 @@ audio-transcript-analysis-app/
    ├── Firestore transaction deduplication (orchestratorClaimed)
    └── Runs pipeline asynchronously — dispatcher is already done
         ↓
-6. Gemini 3 Flash (WAV) — single-pass analysis
-   ├── Full-audio diarization (speakers by name)
-   ├── Transcription with speaker attribution
+6. Gemini 3 Flash (WAV, no-text prompt) — diarization + content analysis
+   ├── Full-audio diarization (speakers by name, with time windows)
+   ├── No transcript text returned (better speaker detection, lower tokens)
    ├── Content analysis (terms, topics, persons)
-   └── Returns segments with approximate timestamps
+   └── Returns speaker diarization windows with approximate timestamps
         ↓
-7. WhisperX timestamp alignment (per 10-min chunk)
+7. WhisperX timestamps + speaker assignment (per 10-min chunk)
    ├── Download MP3 from Storage
    ├── Split into 10-minute chunks if needed
    ├── For each chunk:
    │   ├── Call Cloud Run GPU WhisperX service (IAM-auth HTTP)
-   │   ├── Scale Gemini timestamps to chunk-local time
-   │   ├── HARDY alignment (anchor + region matching)
-   │   └── Offset aligned timestamps back to global time
-   └── Merge aligned results across chunks
+   │   ├── WhisperX returns word-level timestamps + transcript text
+   │   ├── speakerAssignment.ts overlays Gemini diarization windows
+   │   │   onto WhisperX words by any-overlap matching
+   │   └── Offset assigned timestamps back to global time
+   └── Merge assigned results across chunks
         ↓
 8. Assembly + quality gates
    ├── assembleFirestoreData() converts to Firestore schema
    ├── Quality gates check segment coverage + speaker counts
-   └── alignmentStatus: 'aligned' or 'fallback'
+   └── alignmentStatus: 'aligned' (no fallback — WhisperX failure = hard failure)
         ↓
 9. Write to Firestore (status: 'complete',
    processingPipeline: 'gemini_hybrid', pipelineVersion: 'gemini_hybrid')
@@ -296,70 +297,68 @@ The system allows users to cancel active processing jobs.
 
 ### WhisperX Timestamp Chunking
 
-For the HARDY alignment step, audio is split into 10-minute MP3 chunks. This is purely for WhisperX request sizing, not for the transcription pipeline (Gemini processes the full audio in one call).
+For the WhisperX timestamp step, audio is split into 10-minute MP3 chunks. This is purely for WhisperX request sizing, not for the transcription pipeline (Gemini processes the full audio in one call).
 
 **Key Points:**
 
 - Audio shorter than 10 minutes is sent to WhisperX as a single chunk (no splitting)
 - Splitting uses ffmpeg to create non-overlapping chunks
-- Each chunk gets independent WhisperX timestamps, then HARDY alignment maps Gemini's text onto those timestamps
-- Aligned timestamps are offset back to global time coordinates
+- Each chunk gets independent WhisperX timestamps and transcript text, then `speakerAssignment.ts` overlays Gemini's diarization windows onto WhisperX words by timestamp overlap
+- Assigned timestamps are offset back to global time coordinates
 
-### Alignment Module (HARDY Algorithm)
+### Speaker Assignment Module (Timestamp Overlap)
 
-The pipeline includes an integrated alignment module that provides precise timestamps using WhisperX via Cloud Run GPU:
+The pipeline includes a speaker assignment module that combines Gemini's diarization with WhisperX's precise timestamps:
 
 ```
 cloud-run-orchestrator/src/pipeline.ts (runPipeline)
         │
-        │ 1. Gemini 3 Flash (diarization + content analysis)
+        │ 1. Gemini 3 Flash (no-text prompt: diarization + content)
         ▼
 ┌──────────────────────────────┐
-│  Segments with approximate   │
-│  timestamps from Gemini      │
+│  Speaker diarization windows │
+│  with approximate timestamps │
+│  (no transcript text)        │
 └──────────────┬───────────────┘
                │
-               │ 2. alignment.ts (HARDY algorithm)
+               │ 2. alignment.ts → WhisperX
                ▼
 ┌──────────────────────────────┐
 │  Cloud Run GPU WhisperX      │
-│  (word-level timestamps)     │
+│  (word-level timestamps      │
+│   + transcript text)         │
 │  IAM-authenticated HTTP      │
 └──────────────┬───────────────┘
                │
-               │ 3. Fuzzy matching + anchor-based alignment
+               │ 3. speakerAssignment.ts
                ▼
 ┌──────────────────────────────┐
-│  HARDY 4-Level Alignment     │
-│  ├─ Level 1: Anchor Points   │
-│  ├─ Level 2: Region Segment  │
-│  ├─ Level 3: Regional Align  │
-│  └─ Level 4: Validation      │
+│  Timestamp-Overlap Assignment│
+│  ├─ For each WhisperX word:  │
+│  │  find Gemini diarization  │
+│  │  window with any overlap  │
+│  └─ Assign speaker from      │
+│     matching window           │
 └──────────────┬───────────────┘
                │
-       ┌───────┴───────┐
-       │               │
-       ▼               ▼
-  Success           Failure
-  alignmentStatus:  alignmentStatus:
-  'aligned'         'fallback'
-  (~50ms accuracy)  (uses scaled
-                    Gemini times)
+               ▼
+          Success or
+          Hard Failure
+          (no fallback)
 ```
 
 **Key Components:**
 
-- `functions/src/alignment.ts` - HARDY algorithm implementation
-- Uses `fuzzball` for fuzzy string matching
+- `functions/src/alignment.ts` - WhisperX Cloud Run GPU calls
+- `functions/src/speakerAssignment.ts` - Timestamp-overlap speaker assignment (copied to orchestrator's `_functions/` by `copy-functions-modules.sh`)
 - Calls WhisperX via IAM-authenticated HTTP to Cloud Run GPU service
 - `WHISPER_SERVICE_URL` stored as Firebase secret
 
-**Fallback Behavior:**
+**Failure Behavior:**
 
-- If WhisperX times out or fails for a chunk, the pipeline degrades to scaled Gemini timestamps
-- The `alignmentError` field stores the reason for fallback
-- Client displays "Fallback Sync" badge with tooltip explaining the issue
-- Partial alignment beats missing segments — some chunks may be aligned while others fall back
+- WhisperX is mandatory — if it is unavailable, the pipeline fails with `WHISPERX_UNAVAILABLE`
+- No fallback to scaled Gemini timestamps (Gemini's no-text prompt does not return transcript text)
+- The `alignmentError` field stores the failure reason
 
 ### Playback Flow
 
@@ -1114,7 +1113,7 @@ The application uses the `@google-cloud/vertexai` SDK for Gemini API calls (migr
 
 **WhisperX Cloud Run Integration:**
 
-- `alignTimestamps()` calls the WhisperX Cloud Run GPU service via IAM-authenticated HTTP
+- `alignTimestamps()` calls the WhisperX Cloud Run GPU service via IAM-authenticated HTTP for word-level timestamps and transcript text; `speakerAssignment.ts` then overlays Gemini diarization windows by timestamp overlap
 - Compute time tracked in `_metrics` documents for cost attribution
 - `WHISPER_SERVICE_URL` secret stores the Cloud Run service URL
 
@@ -1190,10 +1189,10 @@ When an audio file is uploaded to Storage, this event pipeline triggers transcri
                        └────────┬────────┘
                                 │
                                 ▼
-                        ┌──────────────────┐
-                        │  alignment.ts    │
-                        │  (HARDY match)   │
-                        └────────┬─────────┘
+                        ┌──────────────────────┐
+                        │  speakerAssignment   │
+                        │  (timestamp overlap) │
+                        └────────┬─────────────┘
                                  │
                                  ▼
                         ┌──────────────────┐
@@ -1281,7 +1280,7 @@ These are automatically created and managed by Google Cloud:
 │  Cloud Run (Frontend)   │  │  Firebase Functions     │
 │  - React SPA            │  │  - transcribeAudio      │
 │  - Static assets        │  │  - newPipeline.ts       │
-└─────────────────────────┘  │  - alignment.ts (HARDY) │
+└─────────────────────────┘  │  - alignment.ts          │
                              └─────────────────────────┘
 ```
 

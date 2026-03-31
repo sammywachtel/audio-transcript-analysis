@@ -2,21 +2,20 @@
  * Gemini Hybrid Pipeline Orchestrator
  *
  * The production transcription pipeline. Composes Gemini 3 Flash
- * (diarization + content analysis) with WhisperX (precise word-level
- * timestamps) via HARDY alignment.
+ * (diarization + content analysis) with WhisperX word-level timestamps
+ * + speaker assignment — no HARDY alignment.
  *
  * Pipeline:
  *   1. Gemini 3 Flash (WAV) → speakers, segments (drifted ts), terms, topics, persons
  *   2. Download MP3 separately — processWithGemini3Flash cleaned up its own copy
  *   3. Split MP3 into 10-min chunks
- *   4. Per chunk: scale Gemini timestamps → HARDY alignment → offset back to global time
+ *   4. Per chunk: call WhisperX for Word[] → assignSpeakersToWords → offset to global time
  *   5. Quality gates — reject bad output before it reaches Firestore
  *   6. assembleFirestoreData() → final Firestore-ready payload
  *   7. Write to Firestore, clean up temp files
  *
- * Failure modes (in escalating severity):
- *   - Chunk alignment fallback: use scaled Gemini timestamps, continue
- *   - Quality warning (needs_review): persist data but flag for human review
+ * Failure modes:
+ *   - WhisperX returns empty/unusable words: hard fail (no fallback, write 'failed')
  *   - Fatal (HybridPipelineFatalError): write 'failed' to Firestore, abort
  */
 
@@ -35,7 +34,8 @@ import {
   GeminiPipelineResult,
   AlignedSegment,
 } from './gemini3Pipeline';
-import { alignTimestamps } from './alignment';
+import { getWhisperXWords } from './alignment';
+import { assignSpeakersToWords } from './speakerAssignment';
 import { getAudioDuration } from './audioUtils';
 import { ProgressManager, ProcessingStep } from './progressManager';
 
@@ -72,9 +72,9 @@ export class HybridPipelineFatalError extends Error {
 // gets pulled.
 const PIPELINE_TIMEOUT_MS = 10 * 60 * 1000;
 
-// 2-minute ceiling per HARDY alignment chunk. WhisperX + HARDY on a 10-min
-// chunk rarely exceeds 60s, so 120s gives generous headroom without letting
-// a wedged call block the whole pipeline.
+// 2-minute ceiling per WhisperX chunk. A 10-min chunk rarely takes more than
+// 60s on the GPU service, so 120s gives headroom without letting a wedged
+// call block the whole pipeline.
 const CHUNK_ALIGNMENT_TIMEOUT_MS = 2 * 60 * 1000;
 
 // =============================================================================
@@ -167,8 +167,8 @@ async function splitIntoChunks(
     const chunkEndSec = Math.min((i + 1) * CHUNK_SEC, durationSec);
     const chunkPath = path.join(os.tmpdir(), `newpipeline-chunk-${i}-${Date.now()}.mp3`);
 
-    // Stream copy is fine here — WhisperX doesn't care about VBR seeking artifacts
-    // and we want speed over perfect timestamps (HARDY corrects those anyway)
+    // Stream copy is fine here — WhisperX is fine with VBR seeking artifacts
+    // and we want speed over perfect boundaries
     await execFileAsync(ffmpegPath, [
       '-y', '-i', mp3Path,
       '-ss', String(chunkStartSec),
@@ -300,29 +300,26 @@ export async function processWithNewPipeline(
     }
 
     // Gemini's timestamps are drifted (typically ~1.6x slow). Scale factor maps
-    // Gemini-time to real-audio-time for chunk assignment and local-ts calculation.
-    const geminiLastMs = geminiResult.segments[geminiResult.segments.length - 1].endMs;
+    // Gemini-time to real-audio-time for chunk overlap filtering.
+    // Use Math.max across all endMs — last segment isn't always the longest.
+    const geminiLastMs = Math.max(...geminiResult.segments.map(s => s.endMs));
     const scale = audioDurationMs / geminiLastMs;
 
     log.info(`Timestamp scale factor: ${scale.toFixed(3)} (Gemini last: ${geminiLastMs}ms, real: ${audioDurationMs}ms)`, ctx);
 
     const allAlignedSegments: AlignedSegment[] = [];
 
-    // Per-chunk quality tracking for post-loop quality gates
-    let fallbackChunkCount = 0;
-    let lowConfidenceChunkCount = 0;
-    let totalChunksProcessed = 0;
-
     for (const { chunkPath, chunkStartMs, chunkEndMs } of chunks) {
       const chunkLabel = `chunk ${chunkStartMs / 1000}s–${chunkEndMs / 1000}s`;
 
       checkPipelineTimeout(`before ${chunkLabel}`);
 
-      // Filter Gemini segments whose SCALED midpoint falls within this chunk's time range.
-      // Midpoint assignment avoids edge-case double-counting at chunk boundaries.
+      // Any-overlap assignment: include Gemini segments that overlap this chunk at all
+      // (not just midpoint-in-chunk). Avoids dropping cross-boundary segments.
       const chunkGeminiSegs = geminiResult.segments.filter(s => {
-        const scaledMid = ((s.startMs + s.endMs) / 2) * scale;
-        return scaledMid >= chunkStartMs && scaledMid < chunkEndMs;
+        const scaledStart = s.startMs * scale;
+        const scaledEnd = s.endMs * scale;
+        return scaledStart < chunkEndMs && scaledEnd > chunkStartMs;
       });
 
       if (chunkGeminiSegs.length === 0) {
@@ -330,84 +327,56 @@ export async function processWithNewPipeline(
         continue;
       }
 
-      log.info(`${chunkLabel}: ${chunkGeminiSegs.length} Gemini segments → HARDY alignment`, ctx);
+      log.info(`${chunkLabel}: ${chunkGeminiSegs.length} Gemini segments → WhisperX word timestamps`, ctx);
 
-      // Convert to chunk-local timestamps (subtract chunkStartMs after scaling)
-      const localSegs = chunkGeminiSegs.map(s => ({
-        speakerId: s.speaker,
-        text: s.text,
+      // Scale Gemini segments to chunk-local time for speaker assignment
+      const localGeminiSegs = chunkGeminiSegs.map(s => ({
+        speaker: s.speaker,
         startMs: Math.max(0, Math.round(s.startMs * scale - chunkStartMs)),
         endMs: Math.round(s.endMs * scale - chunkStartMs),
       }));
 
       const chunkBuffer = fs.readFileSync(chunkPath);
+      const chunkBase64 = chunkBuffer.toString('base64');
 
-      try {
-        // Wrap each chunk alignment with a 2-minute timeout so a wedged
-        // WhisperX call doesn't blow the entire pipeline budget.
-        const result = await withTimeout(
-          alignTimestamps(chunkBuffer, localSegs, whisperServiceUrl),
-          CHUNK_ALIGNMENT_TIMEOUT_MS,
-          `alignment ${chunkLabel}`,
+      // Hard fail if WhisperX is unreachable or returns nothing — no fallback.
+      // Drifted Gemini timestamps in the output would silently corrupt sync.
+      const rawWords = await withTimeout(
+        getWhisperXWords(chunkBase64, whisperServiceUrl),
+        CHUNK_ALIGNMENT_TIMEOUT_MS,
+        `whisperx ${chunkLabel}`,
+      );
+
+      if (!rawWords || rawWords.length === 0) {
+        throw new HybridPipelineFatalError(
+          `WhisperX returned no words for ${chunkLabel} — cannot assign speakers`,
+          'whisperx_empty',
         );
-
-        if (result.alignmentStatus === 'aligned') {
-          // Offset aligned timestamps back to global audio time
-          for (const seg of result.segments) {
-            allAlignedSegments.push({
-              speakerId: seg.speakerId,
-              text: seg.text,
-              startMs: seg.startMs + chunkStartMs,
-              endMs: seg.endMs + chunkStartMs,
-            });
-          }
-          log.info(`${chunkLabel}: aligned ${result.segments.length} segments`, ctx);
-
-          // Track low-confidence chunks for the post-loop quality gate
-          if (result.avgConfidence !== undefined && result.avgConfidence < 0.5) {
-            lowConfidenceChunkCount++;
-            log.warn(
-              `${chunkLabel}: low HARDY confidence ${result.avgConfidence.toFixed(3)}`,
-              ctx,
-            );
-          }
-        } else {
-          // HARDY fell back — use scaled Gemini timestamps as best-effort
-          fallbackChunkCount++;
-          log.warn(`${chunkLabel}: alignment fallback — ${result.alignmentError}`, ctx);
-          for (const seg of chunkGeminiSegs) {
-            allAlignedSegments.push({
-              speakerId: seg.speaker,
-              text: seg.text,
-              startMs: Math.round(seg.startMs * scale),
-              endMs: Math.round(seg.endMs * scale),
-            });
-          }
-        }
-      } catch (alignErr) {
-        // Alignment threw entirely — still use scaled timestamps so we don't lose content.
-        // Better to have drifted timestamps than missing segments.
-        fallbackChunkCount++;
-        const errMsg = alignErr instanceof Error ? alignErr.message : String(alignErr);
-        log.warn(`${chunkLabel}: alignment threw, using scaled fallback — ${errMsg}`, ctx);
-        for (const seg of chunkGeminiSegs) {
-          allAlignedSegments.push({
-            speakerId: seg.speaker,
-            text: seg.text,
-            startMs: Math.round(seg.startMs * scale),
-            endMs: Math.round(seg.endMs * scale),
-          });
-        }
       }
 
-      totalChunksProcessed++;
+      // Offset words to chunk-local time (Word.start/end are in seconds)
+      const localWords = rawWords.map(w => ({
+        ...w,
+        start: w.start - chunkStartMs / 1000,
+        end: w.end - chunkStartMs / 1000,
+      }));
+
+      const chunkSegments = assignSpeakersToWords(localWords, localGeminiSegs);
+
+      log.info(`${chunkLabel}: ${chunkSegments.length} segments from ${rawWords.length} words`, ctx);
+
+      // Offset chunk-local timestamps back to global audio time
+      for (const seg of chunkSegments) {
+        allAlignedSegments.push({
+          speakerId: seg.speakerId,
+          text: seg.text,
+          startMs: seg.startMs + chunkStartMs,
+          endMs: seg.endMs + chunkStartMs,
+        });
+      }
     }
 
-    log.info(
-      `Alignment complete: ${allAlignedSegments.length} total segments ` +
-      `(${fallbackChunkCount} fallback chunks, ${lowConfidenceChunkCount} low-confidence chunks)`,
-      ctx,
-    );
+    log.info(`Alignment complete: ${allAlignedSegments.length} total segments`, ctx);
 
     // =========================================================================
     // Step 3.5: Quality gates — catch bad output before it reaches Firestore
@@ -416,27 +385,13 @@ export async function processWithNewPipeline(
     checkPipelineTimeout('after alignment');
 
     // Gate: aligned segment count dropped too far below Gemini's output.
-    // This catches scenarios where HARDY ate segments silently or chunks
-    // produced no output. 50% is generous — anything below means we lost
-    // too much content to be useful.
+    // WhisperX returning words but assignSpeakersToWords producing nothing
+    // would be suspicious — 50% threshold catches silent data loss.
     if (allAlignedSegments.length < geminiResult.segments.length * 0.5) {
       throw new HybridPipelineFatalError(
         `Aligned segments (${allAlignedSegments.length}) dropped below 50% of ` +
         `Gemini segments (${geminiResult.segments.length}) — output too degraded`,
         'low_segment_count',
-      );
-    }
-
-    // Gate: warn if low-confidence HARDY output on >50% of chunks.
-    // We still persist data (it's usable, just noisy) but flag it for review.
-    const needsReview = totalChunksProcessed > 0 &&
-      lowConfidenceChunkCount > totalChunksProcessed * 0.5;
-
-    if (needsReview) {
-      log.warn(
-        `Quality gate: ${lowConfidenceChunkCount}/${totalChunksProcessed} chunks ` +
-        `had low HARDY confidence — marking needs_review`,
-        ctx,
       );
     }
 
@@ -457,10 +412,8 @@ export async function processWithNewPipeline(
     // =========================================================================
     await progress.setStep(ProcessingStep.SAVING);
 
-    const status = needsReview ? 'needs_review' : 'complete';
-
     await db.collection('conversations').doc(conversationId).update({
-      status,
+      status: 'complete',
       segments: assembled.segments,
       speakers: assembled.speakers,
       terms: assembled.terms,
@@ -470,17 +423,10 @@ export async function processWithNewPipeline(
       durationMs: assembled.durationMs,
       processingPipeline: 'gemini_hybrid',
       pipelineVersion: 'gemini_hybrid',
-      // Metadata for downstream consumers to distinguish outcome quality
-      ...(needsReview && {
-        processingError: `Low HARDY confidence on ${lowConfidenceChunkCount}/${totalChunksProcessed} chunks`,
-      }),
-      ...(fallbackChunkCount > 0 && {
-        alignmentStatus: 'fallback',
-      }),
       updatedAt: FieldValue.serverTimestamp(),
     });
 
-    log.info(`Firestore write complete (status: ${status})`, ctx);
+    log.info(`Firestore write complete (status: complete)`, ctx);
 
     await progress.setStep(ProcessingStep.COMPLETE);
     log.info('Gemini hybrid pipeline done', ctx);
