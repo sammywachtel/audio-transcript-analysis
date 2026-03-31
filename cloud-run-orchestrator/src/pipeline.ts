@@ -472,14 +472,9 @@ export async function runPipeline(
         );
       }
 
-      // Offset words to chunk-local time (Word.start/end are in seconds)
-      const localWords = rawWords.map(w => ({
-        ...w,
-        start: w.start - chunkStartMs / 1000,
-        end: w.end - chunkStartMs / 1000,
-      }));
-
-      const chunkSegments = assignSpeakersToWords(localWords, localGeminiSegs);
+      // WhisperX words are already chunk-local (each chunk is a separate audio
+      // file starting at 0s), so no offset needed here.
+      const chunkSegments = assignSpeakersToWords(rawWords, localGeminiSegs);
 
       console.log(`[Pipeline] ${chunkLabel}: ${chunkSegments.length} segments from ${rawWords.length} words`);
 
