@@ -32,8 +32,9 @@ COPY cloud-run-orchestrator/tsconfig.json ./
 RUN node scripts/generate-version.js \
     && mkdir -p src/_functions \
     && cp functions-src/gemini3Pipeline.ts functions-src/alignment.ts \
-       functions-src/audioUtils.ts functions-src/logger.ts \
-       functions-src/types.ts functions-src/firestoreUtils.ts \
+       functions-src/audioUtils.ts functions-src/speakerAssignment.ts \
+       functions-src/logger.ts functions-src/types.ts \
+       functions-src/firestoreUtils.ts \
        src/_functions/ \
     && npx tsc && npx tsc-alias
 
