@@ -822,7 +822,7 @@ export async function processWithGemini3Flash(
           ],
         }],
         config: {
-          temperature: 0.1,
+          temperature: 0.3,
           maxOutputTokens: 65536,
           // Let the model reason about speaker identity before committing.
           // 4096 tokens is enough for "Speaker 2 sounds like the person

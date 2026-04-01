@@ -175,6 +175,12 @@ export const transcribeAudio = onObjectFinalized(
       return;
     }
 
+    // Skip playback files created by the pipeline (CBR re-encode for browser seeking)
+    if (filePath.includes('_playback')) {
+      console.debug('[Transcribe] Skipping playback file:', filePath);
+      return;
+    }
+
     // Parse path: audio/{userId}/{conversationId}.{ext}
     const pathParts = filePath.split('/');
     if (pathParts.length !== 3) {
