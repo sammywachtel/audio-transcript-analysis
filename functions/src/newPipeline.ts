@@ -167,13 +167,17 @@ async function splitIntoChunks(
     const chunkEndSec = Math.min((i + 1) * CHUNK_SEC, durationSec);
     const chunkPath = path.join(os.tmpdir(), `newpipeline-chunk-${i}-${Date.now()}.mp3`);
 
-    // Stream copy is fine here — WhisperX is fine with VBR seeking artifacts
-    // and we want speed over perfect boundaries
+    // Re-encode instead of stream copy — -c copy can't seek to exact
+    // positions on VBR MP3, causing timestamp drift in downstream output.
+    // CBR 16kHz mono matches the old pipeline's proven ffmpeg args.
     await execFileAsync(ffmpegPath, [
       '-y', '-i', mp3Path,
       '-ss', String(chunkStartSec),
       '-t', String(chunkEndSec - chunkStartSec),
-      '-c', 'copy',
+      '-acodec', 'libmp3lame',
+      '-ar', '16000',
+      '-ac', '1',
+      '-ab', '64k',
       chunkPath,
     ], { timeout: 300_000 });
 
