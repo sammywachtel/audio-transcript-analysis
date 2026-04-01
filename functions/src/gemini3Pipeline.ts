@@ -309,7 +309,14 @@ export function parseGeminiJson(text: string): GeminiPipelineResult {
 
     try {
       const result = JSON.parse(repaired) as GeminiPipelineResult;
-      const segCount = (result.segments || []).length;
+      // Truncation likely killed everything after segments — backfill with
+      // empty arrays so downstream code doesn't crash on .length
+      result.speakers = result.speakers || [];
+      result.segments = result.segments || [];
+      result.terms = result.terms || [];
+      result.topics = result.topics || [];
+      result.persons = result.persons || [];
+      const segCount = result.segments.length;
       // Log warning but don't throw — partial data is better than none
       log.warn(`JSON truncation repaired — recovered ${segCount} segments (some tail data lost)`, {
         stage: 'gemini3-parse',
@@ -325,7 +332,13 @@ export function parseGeminiJson(text: string): GeminiPipelineResult {
   if (lastBrace !== -1) {
     try {
       const truncated = cleaned.substring(0, lastBrace + 1);
-      return JSON.parse(truncated) as GeminiPipelineResult;
+      const result = JSON.parse(truncated) as GeminiPipelineResult;
+      result.speakers = result.speakers || [];
+      result.segments = result.segments || [];
+      result.terms = result.terms || [];
+      result.topics = result.topics || [];
+      result.persons = result.persons || [];
+      return result;
     } catch (_) {
       // Give up
     }
