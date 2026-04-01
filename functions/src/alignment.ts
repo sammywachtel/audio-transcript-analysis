@@ -85,6 +85,8 @@ export interface Word {
   end: number;    // seconds
   index: number;
   score?: number; // WhisperX confidence score [0-1], if available
+  /** True when this word starts a new WhisperX segment (natural pause boundary) */
+  segmentBreak?: boolean;
 }
 
 export interface Segment {
@@ -1458,6 +1460,7 @@ async function getWhisperxTimestamps(
             const segObj = segment as Record<string, unknown>;
             if (Array.isArray(segObj.words)) {
               segmentsWithWords++;
+              let isFirstWordInSegment = true;
               for (const w of segObj.words) {
                 if (typeof w === 'object' && w !== null) {
                   const wordObj = w as Record<string, unknown>;
@@ -1465,8 +1468,12 @@ async function getWhisperxTimestamps(
                     word: typeof wordObj.word === 'string' ? wordObj.word : '',
                     start: typeof wordObj.start === 'number' ? wordObj.start : 0.0,
                     end: typeof wordObj.end === 'number' ? wordObj.end : 0.0,
-                    index: wordIdx
+                    index: wordIdx,
+                    // Mark the first word in each WhisperX segment so downstream
+                    // grouping can break here (preserves natural pause boundaries)
+                    segmentBreak: isFirstWordInSegment,
                   });
+                  isFirstWordInSegment = false;
                   wordIdx++;
                 }
               }
