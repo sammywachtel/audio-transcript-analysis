@@ -69,8 +69,8 @@ export const ConversationProvider: React.FC<{ children: ReactNode }> = ({ childr
       return conversation.audioUrl;
     }
 
-    // Get the URL from Storage
-    const storagePath = conversation.audioStoragePath;
+    // Prefer CBR playback file (accurate browser seeking) over original upload
+    const storagePath = conversation.playbackAudioPath || conversation.audioStoragePath;
     if (!storagePath) return null;
 
     // Check cache first
