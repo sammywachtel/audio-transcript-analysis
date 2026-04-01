@@ -129,7 +129,8 @@ export interface Conversation {
   updatedAt: string; // For sync conflict resolution and tracking
   durationMs: number;
   audioUrl?: string; // Ephemeral signed URL for audio playback (not stored in Firestore)
-  audioStoragePath?: string; // Firebase Storage path for audio file
+  audioStoragePath?: string; // Firebase Storage path for original uploaded audio
+  playbackAudioPath?: string; // CBR re-encoded MP3 for accurate browser seeking
   status: 'processing' | 'chunking' | 'merging' | 'reprocessing' | 'needs_review' | 'complete' | 'failed' | 'aborted';
   abortRequested?: boolean;  // Set to true to request abort, Cloud Function checks this
   speakers: Record<string, Speaker>;

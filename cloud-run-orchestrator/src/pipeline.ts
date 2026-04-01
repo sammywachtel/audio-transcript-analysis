@@ -396,13 +396,40 @@ export async function runPipeline(
     checkTimeout('after Gemini analysis');
 
     // =======================================================================
-    // Step 2: Download MP3 for WhisperX chunking
+    // Step 2: Download MP3 for WhisperX chunking + create playback file
     // =======================================================================
     mp3Path = await downloadMp3(audioStoragePath, conversationId);
     const durationSec = await getAudioDuration(mp3Path);
     const audioDurationMs = Math.round(durationSec * 1000);
 
     console.log(`[Pipeline] Audio: ${(audioDurationMs / 1000 / 60).toFixed(1)} min`);
+
+    // Re-encode the full audio to CBR MP3 for browser playback.
+    // VBR MP3 files have wildly inaccurate seek-by-byte-offset in browsers,
+    // causing click-to-play to land 5-10s away from the target. CBR with
+    // a proper Xing header fixes this. ~2-3s encoding time is worth it.
+    const ffmpegPath = await getFfmpegPath();
+    const playbackPath = path.join(os.tmpdir(), `playback-${conversationId}-${Date.now()}.mp3`);
+    await execFileAsync(ffmpegPath, [
+      '-y', '-i', mp3Path,
+      '-acodec', 'libmp3lame',
+      '-ab', '128k',     // CBR 128kbps — good quality for playback
+      '-ar', '44100',    // Keep original sample rate for playback quality
+      '-ac', '2',        // Keep stereo for playback
+      playbackPath,
+    ], { timeout: 300_000 });
+
+    // Upload playback file alongside the original
+    const playbackStoragePath = audioStoragePath.replace(/\.[^.]+$/, '_playback.mp3');
+    const bucketName = process.env.FIREBASE_STORAGE_BUCKET!;
+    const bucket = getStorage().bucket(bucketName);
+    await bucket.upload(playbackPath, {
+      destination: playbackStoragePath,
+      metadata: { contentType: 'audio/mpeg' },
+    });
+    // Clean up temp file immediately
+    try { fs.unlinkSync(playbackPath); } catch { /* best-effort */ }
+    console.log(`[Pipeline] Playback CBR MP3 uploaded: ${playbackStoragePath}`);
 
     // =======================================================================
     // Step 3: WhisperX alignment — chunk by chunk
@@ -535,6 +562,8 @@ export async function runPipeline(
       // Tells the client that timestamps are WhisperX-accurate and
       // drift correction should NOT be applied on top of them.
       alignmentStatus: 'aligned',
+      // CBR playback file for accurate browser seeking
+      playbackAudioPath: playbackStoragePath,
       processingPipeline: 'gemini_hybrid',
       pipelineVersion: 'gemini_hybrid',
       updatedAt: FieldValue.serverTimestamp(),
