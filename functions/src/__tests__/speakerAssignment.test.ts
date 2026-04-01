@@ -14,8 +14,8 @@ import { GeminiSegment } from '../gemini3Pipeline';
 // =============================================================================
 
 /** Build a Word. start/end are in SECONDS, as WhisperX produces them. */
-function word(text: string, startSec: number, endSec: number, idx: number): Word {
-  return { word: text, start: startSec, end: endSec, index: idx };
+function word(text: string, startSec: number, endSec: number, idx: number, segBreak?: boolean): Word {
+  return { word: text, start: startSec, end: endSec, index: idx, segmentBreak: segBreak };
 }
 
 /**
@@ -233,7 +233,7 @@ describe('assignSpeakersToWords', () => {
   // All words in one segment → single output segment
   // ---------------------------------------------------------------------------
 
-  it('produces one output segment when all words fall within a single diarization window', () => {
+  it('produces one output segment when all words fall within a single diarization window (no segment breaks)', () => {
     const words = [
       word('one',   0.5, 0.8, 0),
       word('two',   0.9, 1.2, 1),
@@ -251,5 +251,54 @@ describe('assignSpeakersToWords', () => {
     expect(result[0].text).toBe('one two three');
     expect(result[0].startMs).toBe(500);
     expect(result[0].endMs).toBe(1600);
+  });
+
+  // ---------------------------------------------------------------------------
+  // WhisperX segment boundary breaks
+  // ---------------------------------------------------------------------------
+
+  it('breaks same-speaker words at WhisperX segment boundaries', () => {
+    // Same speaker for all words, but a natural pause (segmentBreak) at word 3.
+    // Should produce two segments for readability, both attributed to Alice.
+    const words = [
+      word('first',    0.0, 0.3, 0, true),   // start of WhisperX segment 1
+      word('sentence', 0.3, 0.7, 1),
+      word('here',     0.7, 1.0, 2),
+      word('second',   2.0, 2.3, 3, true),   // start of WhisperX segment 2
+      word('sentence', 2.3, 2.6, 4),
+      word('there',    2.6, 3.0, 5),
+    ];
+    const segments = [seg('Alice', 0, 10000)];
+
+    const result = assignSpeakersToWords(words, segments);
+
+    expect(result).toHaveLength(2);
+    expect(result[0].speakerId).toBe('Alice');
+    expect(result[0].text).toBe('first sentence here');
+    expect(result[1].speakerId).toBe('Alice');
+    expect(result[1].text).toBe('second sentence there');
+  });
+
+  it('breaks on both speaker change and segment boundary', () => {
+    // Alice speaks two WhisperX segments, then Bob speaks one.
+    const words = [
+      word('alice1', 0.0, 0.5, 0, true),
+      word('alice2', 0.5, 1.0, 1),
+      word('alice3', 2.0, 2.5, 2, true),   // segment break, same speaker
+      word('alice4', 2.5, 3.0, 3),
+      word('bob1',   5.0, 5.5, 4, true),   // segment break + speaker change
+      word('bob2',   5.5, 6.0, 5),
+    ];
+    const segments = [
+      seg('Alice', 0, 4000),
+      seg('Bob', 4000, 8000),
+    ];
+
+    const result = assignSpeakersToWords(words, segments);
+
+    expect(result).toHaveLength(3);
+    expect(result[0]).toMatchObject({ speakerId: 'Alice', text: 'alice1 alice2' });
+    expect(result[1]).toMatchObject({ speakerId: 'Alice', text: 'alice3 alice4' });
+    expect(result[2]).toMatchObject({ speakerId: 'Bob', text: 'bob1 bob2' });
   });
 });

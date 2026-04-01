@@ -86,16 +86,20 @@ export function assignSpeakersToWords(words: Word[], segments: GeminiSegment[]):
     return nearestSeg.speaker;
   });
 
-  // Phase 2: group consecutive same-speaker words into segments.
-  // Walk the array, flush a segment whenever the speaker changes.
+  // Phase 2: group words into segments, breaking on:
+  //   - Speaker change (different Gemini diarization window)
+  //   - WhisperX segment boundary (natural pause in speech)
+  // This preserves the readable sentence-level chunking that WhisperX
+  // detects from pauses, while still assigning the correct speaker.
   const result: AlignedSegment[] = [];
   let groupStart = 0;
 
   for (let i = 1; i <= words.length; i++) {
-    // Flush on speaker change or at the end of the array.
-    const speakerChanged = i === words.length || wordSpeakers[i] !== wordSpeakers[groupStart];
+    const isEnd = i === words.length;
+    const speakerChanged = !isEnd && wordSpeakers[i] !== wordSpeakers[groupStart];
+    const segmentBoundary = !isEnd && words[i].segmentBreak === true;
 
-    if (speakerChanged) {
+    if (isEnd || speakerChanged || segmentBoundary) {
       const groupWords = words.slice(groupStart, i);
       result.push({
         speakerId: wordSpeakers[groupStart],
