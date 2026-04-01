@@ -416,6 +416,9 @@ export async function processWithNewPipeline(
       topics: assembled.topics,
       people: assembled.people,
       durationMs: assembled.durationMs,
+      // Tells the client that timestamps are WhisperX-accurate and
+      // drift correction should NOT be applied on top of them.
+      alignmentStatus: 'aligned',
       processingPipeline: 'gemini_hybrid',
       pipelineVersion: 'gemini_hybrid',
       updatedAt: FieldValue.serverTimestamp(),
