@@ -295,11 +295,19 @@ async function splitIntoChunks(
     const chunkEndSec = Math.min((i + 1) * CHUNK_SEC, durationSec);
     const chunkPath = path.join(os.tmpdir(), `orchestrator-chunk-${i}-${Date.now()}.mp3`);
 
+    // Re-encode instead of stream copy. -c copy preserves VBR encoding
+    // and can't seek to exact positions (nearest packet boundary only).
+    // Re-encoding guarantees the chunk starts at exactly chunkStartSec,
+    // and produces CBR output that WhisperX timestamps align to.
+    // Matches the old chunked pipeline's proven ffmpeg args.
     await execFileAsync(ffmpegPath, [
       '-y', '-i', mp3Path,
       '-ss', String(chunkStartSec),
       '-t', String(chunkEndSec - chunkStartSec),
-      '-c', 'copy',
+      '-acodec', 'libmp3lame',
+      '-ar', '16000',    // 16kHz — optimal for speech/WhisperX
+      '-ac', '1',         // mono — fine for speech, halves size
+      '-ab', '64k',       // CBR 64kbps — browser seek is accurate
       chunkPath,
     ], { timeout: 300_000 });
 
