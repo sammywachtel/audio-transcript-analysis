@@ -824,7 +824,10 @@ export async function processWithGemini3Flash(
         config: {
           temperature: 0.1,
           maxOutputTokens: 65536,
-          thinkingConfig: { thinkingBudget: 0 },
+          // Let the model reason about speaker identity before committing.
+          // 4096 tokens is enough for "Speaker 2 sounds like the person
+          // addressed as Sam at 3:42" type reasoning without blowing the budget.
+          thinkingConfig: { thinkingBudget: 4096 },
           responseMimeType: 'application/json',
           responseSchema: RESPONSE_SCHEMA,
         },
