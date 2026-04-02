@@ -853,7 +853,11 @@ export async function processWithGemini3Flash(
           config: {
             temperature: 0.1,
             maxOutputTokens: 65536,
-            thinkingConfig: { thinkingBudget: 4096 },
+            // Thinking disabled — the WhisperX transcript provides the
+            // contextual signal that thinking was meant to give (name-to-voice
+            // mapping, speaker change cues). With transcript + audio + thinking,
+            // 2.5 Flash times out on 45-min recordings.
+            thinkingConfig: { thinkingBudget: 0 },
             responseMimeType: 'application/json',
             responseSchema: schema,
           },
