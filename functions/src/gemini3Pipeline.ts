@@ -123,6 +123,8 @@ export interface GeminiPipelineOptions {
   model?: string;
   /** Conversation ID for logging context */
   conversationId?: string;
+  /** WhisperX transcript text to pass as context for diarization + content calls */
+  transcriptText?: string;
 }
 
 // =============================================================================
@@ -357,16 +359,20 @@ export function parseGeminiJson(text: string): GeminiPipelineResult {
 // =============================================================================
 // Call 1: Diarization — who spoke when
 // =============================================================================
-// No-text prompt is the key finding from the PoC: asking Gemini for verbatim
-// transcript text in segments drops speaker detection from 6/6 to 5/6. The theory
-// is that generating token-heavy transcript text crowds out speaker-discriminative
-// audio features in the model's attention budget. WhisperX handles the transcript;
-// Gemini handles who-spoke-when. Separation of concerns, separation of concerns.
+// The PoC showed that asking Gemini to GENERATE transcript text hurts diarization.
+// But PROVIDING WhisperX transcript as read-only context is the opposite — it helps
+// the model map names to voices ("the person who said 'Adam did most of that work'
+// is Sam, not Adam") without competing for output tokens.
 //
-// Splitting diarization into its own call gives it the full 65K output budget
-// and lets the model focus exclusively on speaker identification.
-const DIARIZATION_PROMPT = `You are an expert audio analyst. Listen to this entire recording carefully.
+// When transcript text is available (WhisperX ran first), it's included as context.
+// Gemini still only outputs diarization timestamps — no text generation.
+function buildDiarizationPrompt(transcriptText?: string): string {
+  const transcriptSection = transcriptText
+    ? `\n## Transcript Reference\nBelow is an automated transcript with approximate timestamps. Use this to help identify speakers by name (e.g., when someone is addressed directly) and to detect speaker changes. The transcript may have minor errors — trust the AUDIO for voice identification, but use the text for name/role clues.\n\n${transcriptText}\n`
+    : '';
 
+  return `You are an expert audio analyst. Listen to this entire recording carefully.
+${transcriptSection}
 ## Tasks
 
 ### 1. Speaker Identification
@@ -390,14 +396,20 @@ RULES:
 - Merge consecutive speech by the same speaker into one entry
 - For a 45-minute conversation, expect 100-400 entries
 - Do NOT include verbatim transcript text — timestamps and speaker labels only`;
+}
 
 // =============================================================================
 // Call 2: Content analysis — terms, topics, people
 // =============================================================================
-// Separate call so content extraction doesn't compete with diarization for
-// output tokens, and so truncation of a large segment list can't wipe out terms.
-const CONTENT_PROMPT = `You are an expert audio analyst. Listen to this entire recording carefully and extract the following content.
+// Also benefits from transcript context — terms and topics are much easier to
+// extract when the model can read the actual words spoken.
+function buildContentPrompt(transcriptText?: string): string {
+  const transcriptSection = transcriptText
+    ? `\n## Transcript Reference\nBelow is an automated transcript with approximate timestamps. Use this along with the audio to extract content.\n\n${transcriptText}\n`
+    : '';
 
+  return `You are an expert audio analyst. Listen to this entire recording carefully and extract the following content.
+${transcriptSection}
 ### 1. Terms
 Extract domain-specific or noteworthy terms/concepts discussed in this recording. For each:
 - "key": lowercase identifier
@@ -416,6 +428,7 @@ Identify major topics/segments of the conversation. For each:
 People mentioned in the conversation who are NOT speakers (i.e., people discussed but not present). For each:
 - "name": full name as mentioned
 - "affiliation": organization/role if mentioned`;
+}
 
 // =============================================================================
 // JSON Schema for Gemini structured output
@@ -829,6 +842,7 @@ export async function processWithGemini3Flash(
     log.info('File processing complete, calling Gemini...', ctx);
 
     const audioPart = createPartFromUri(uploadedFile.uri, uploadedFile.mimeType);
+    const transcriptText = options?.transcriptText;
 
     // Helper: call Gemini with error handling
     const callGemini = async (prompt: string, schema: object, label: string) => {
@@ -858,7 +872,7 @@ export async function processWithGemini3Flash(
     // Gets the full output budget — no competition with content extraction.
     // -----------------------------------------------------------------------
     const diarStart = Date.now();
-    const diarResponse = await callGemini(DIARIZATION_PROMPT, DIARIZATION_SCHEMA, 'diarization');
+    const diarResponse = await callGemini(buildDiarizationPrompt(transcriptText), DIARIZATION_SCHEMA, 'diarization');
     const diarDuration = Date.now() - diarStart;
     const diarUsage = diarResponse.usageMetadata;
 
@@ -873,7 +887,7 @@ export async function processWithGemini3Flash(
     // Separate call so truncation of segments can't wipe out content.
     // -----------------------------------------------------------------------
     const contentStart = Date.now();
-    const contentResponse = await callGemini(CONTENT_PROMPT, CONTENT_SCHEMA, 'content');
+    const contentResponse = await callGemini(buildContentPrompt(transcriptText), CONTENT_SCHEMA, 'content');
     const contentDuration = Date.now() - contentStart;
     const contentUsage = contentResponse.usageMetadata;
 

@@ -34,7 +34,7 @@ import {
   GeminiPipelineResult,
   AlignedSegment,
 } from '@functions/gemini3Pipeline';
-import { getWhisperXWords } from '@functions/alignment';
+import { getWhisperXWords, Word } from '@functions/alignment';
 import { assignSpeakersToWords } from '@functions/speakerAssignment';
 import { getAudioDuration } from '@functions/audioUtils';
 
@@ -358,19 +358,136 @@ export async function runPipeline(
 
   try {
     // =======================================================================
-    // Step 1: Gemini 3 Flash — diarization + content analysis
+    // Step 1: Download MP3 + create playback file
     // =======================================================================
-    console.log(`[Pipeline] Step 1a: writing progress to Firestore...`);
-    const t0 = Date.now();
-    await progress.setStep(ProcessingStep.GEMINI_ANALYSIS);
-    console.log(`[Pipeline] Step 1b: progress written (${Date.now() - t0}ms), checking abort...`);
-    const t1 = Date.now();
+    console.log(`[Pipeline] Step 1: downloading audio...`);
+    await progress.setStep(ProcessingStep.WHISPERX_ALIGNMENT);
+
+    mp3Path = await downloadMp3(audioStoragePath, conversationId);
+    const durationSec = await getAudioDuration(mp3Path);
+    const audioDurationMs = Math.round(durationSec * 1000);
+
+    console.log(`[Pipeline] Audio: ${(audioDurationMs / 1000 / 60).toFixed(1)} min`);
+
+    // Re-encode the full audio to CBR MP3 for browser playback.
+    // VBR MP3 files have wildly inaccurate seek-by-byte-offset in browsers.
+    const ffmpegPath = await getFfmpegPath();
+    const playbackPath = path.join(os.tmpdir(), `playback-${conversationId}-${Date.now()}.mp3`);
+    await execFileAsync(ffmpegPath, [
+      '-y', '-i', mp3Path,
+      '-acodec', 'libmp3lame',
+      '-ab', '128k',
+      '-ar', '44100',
+      '-ac', '2',
+      playbackPath,
+    ], { timeout: 300_000 });
+
+    const playbackStoragePath = audioStoragePath.replace(/\.[^.]+$/, '_playback.mp3');
+    const bucketName = process.env.FIREBASE_STORAGE_BUCKET!;
+    const bucket = getStorage().bucket(bucketName);
+    await bucket.upload(playbackPath, {
+      destination: playbackStoragePath,
+      metadata: { contentType: 'audio/mpeg' },
+    });
+    try { fs.unlinkSync(playbackPath); } catch { /* best-effort */ }
+    console.log(`[Pipeline] Playback CBR MP3 uploaded: ${playbackStoragePath}`);
+
+    // =======================================================================
+    // Step 2: WhisperX — get transcript text + word timestamps
+    // Runs BEFORE Gemini so we can pass transcript as context.
+    // =======================================================================
     await checkAbort(conversationId);
-    console.log(`[Pipeline] Step 1c: abort check done (${Date.now() - t1}ms), calling Gemini...`);
+
+    const whisperServiceUrl = process.env.WHISPER_SERVICE_URL;
+    if (!whisperServiceUrl) {
+      throw new PipelineFatalError(
+        'WHISPER_SERVICE_URL not set',
+        'WHISPERX_UNAVAILABLE',
+        'whisperx_timestamps',
+        false,
+      );
+    }
+
+    const chunks = await splitIntoChunks(mp3Path, audioDurationMs, conversationId);
+    for (const chunk of chunks) {
+      if (chunk.chunkPath !== mp3Path) {
+        chunkPaths.push(chunk.chunkPath);
+      }
+    }
+
+    // Collect all words (chunk-local) and build global transcript text
+    const allChunkWords: Array<{ words: Word[]; chunkStartMs: number; chunkEndMs: number }> = [];
+
+    for (const { chunkPath, chunkStartMs, chunkEndMs } of chunks) {
+      const chunkLabel = `chunk ${chunkStartMs / 1000}s–${chunkEndMs / 1000}s`;
+
+      checkTimeout(`before ${chunkLabel}`);
+      await checkAbort(conversationId);
+
+      const chunkBuffer = fs.readFileSync(chunkPath);
+      const chunkBase64 = chunkBuffer.toString('base64');
+
+      const rawWords = await withTimeout(
+        getWhisperXWords(chunkBase64, whisperServiceUrl),
+        CHUNK_ALIGNMENT_TIMEOUT_MS,
+        `whisperx ${chunkLabel}`,
+      );
+
+      if (!rawWords || rawWords.length === 0) {
+        throw new PipelineFatalError(
+          `WhisperX returned no words for ${chunkLabel} — cannot assign speakers`,
+          'WHISPERX_UNAVAILABLE',
+          'whisperx_timestamps',
+          false,
+        );
+      }
+
+      console.log(`[Pipeline] ${chunkLabel}: ${rawWords.length} words from WhisperX`);
+      allChunkWords.push({ words: rawWords, chunkStartMs, chunkEndMs });
+    }
+
+    // Build timestamped transcript for Gemini context.
+    // Format: "[MM:SS] text of this whisperx segment\n"
+    // Group by WhisperX segment breaks for readability.
+    const transcriptLines: string[] = [];
+    for (const { words, chunkStartMs } of allChunkWords) {
+      let currentLine: string[] = [];
+      let lineStartMs = -1;
+
+      for (const w of words) {
+        const globalMs = w.start * 1000 + chunkStartMs;
+        if (w.segmentBreak && currentLine.length > 0) {
+          // Flush previous segment
+          const mm = Math.floor(lineStartMs / 60000);
+          const ss = Math.floor((lineStartMs % 60000) / 1000);
+          transcriptLines.push(`[${mm}:${String(ss).padStart(2, '0')}] ${currentLine.join(' ').trim()}`);
+          currentLine = [];
+        }
+        if (currentLine.length === 0) lineStartMs = globalMs;
+        currentLine.push(w.word.trim());
+      }
+      // Flush final segment in chunk
+      if (currentLine.length > 0) {
+        const mm = Math.floor(lineStartMs / 60000);
+        const ss = Math.floor((lineStartMs % 60000) / 1000);
+        transcriptLines.push(`[${mm}:${String(ss).padStart(2, '0')}] ${currentLine.join(' ').trim()}`);
+      }
+    }
+
+    const transcriptText = transcriptLines.join('\n');
+    console.log(`[Pipeline] Transcript built: ${transcriptLines.length} lines, ${transcriptText.length} chars`);
+
+    checkTimeout('after WhisperX');
+
+    // =======================================================================
+    // Step 3: Gemini — diarization + content (with transcript context)
+    // =======================================================================
+    await progress.setStep(ProcessingStep.GEMINI_ANALYSIS);
+    await checkAbort(conversationId);
 
     const geminiResult: GeminiPipelineResult = await processWithGemini3Flash(
       audioStoragePath,
-      { conversationId },
+      { conversationId, transcriptText },
     );
 
     console.log(`[Pipeline] Gemini complete: ${geminiResult.speakers.length} speakers, ${geminiResult.segments.length} segments`);
@@ -396,79 +513,19 @@ export async function runPipeline(
     checkTimeout('after Gemini analysis');
 
     // =======================================================================
-    // Step 2: Download MP3 for WhisperX chunking + create playback file
-    // =======================================================================
-    mp3Path = await downloadMp3(audioStoragePath, conversationId);
-    const durationSec = await getAudioDuration(mp3Path);
-    const audioDurationMs = Math.round(durationSec * 1000);
-
-    console.log(`[Pipeline] Audio: ${(audioDurationMs / 1000 / 60).toFixed(1)} min`);
-
-    // Re-encode the full audio to CBR MP3 for browser playback.
-    // VBR MP3 files have wildly inaccurate seek-by-byte-offset in browsers,
-    // causing click-to-play to land 5-10s away from the target. CBR with
-    // a proper Xing header fixes this. ~2-3s encoding time is worth it.
-    const ffmpegPath = await getFfmpegPath();
-    const playbackPath = path.join(os.tmpdir(), `playback-${conversationId}-${Date.now()}.mp3`);
-    await execFileAsync(ffmpegPath, [
-      '-y', '-i', mp3Path,
-      '-acodec', 'libmp3lame',
-      '-ab', '128k',     // CBR 128kbps — good quality for playback
-      '-ar', '44100',    // Keep original sample rate for playback quality
-      '-ac', '2',        // Keep stereo for playback
-      playbackPath,
-    ], { timeout: 300_000 });
-
-    // Upload playback file alongside the original
-    const playbackStoragePath = audioStoragePath.replace(/\.[^.]+$/, '_playback.mp3');
-    const bucketName = process.env.FIREBASE_STORAGE_BUCKET!;
-    const bucket = getStorage().bucket(bucketName);
-    await bucket.upload(playbackPath, {
-      destination: playbackStoragePath,
-      metadata: { contentType: 'audio/mpeg' },
-    });
-    // Clean up temp file immediately
-    try { fs.unlinkSync(playbackPath); } catch { /* best-effort */ }
-    console.log(`[Pipeline] Playback CBR MP3 uploaded: ${playbackStoragePath}`);
-
-    // =======================================================================
-    // Step 3: WhisperX alignment — chunk by chunk
+    // Step 4: Speaker assignment — map Gemini diarization to WhisperX words
     // =======================================================================
     await progress.setStep(ProcessingStep.WHISPERX_ALIGNMENT);
-    await checkAbort(conversationId);
-
-    const whisperServiceUrl = process.env.WHISPER_SERVICE_URL;
-    if (!whisperServiceUrl) {
-      throw new PipelineFatalError(
-        'WHISPER_SERVICE_URL not set',
-        'WHISPERX_UNAVAILABLE',
-        'whisperx_timestamps',
-        false,
-      );
-    }
-
-    const chunks = await splitIntoChunks(mp3Path, audioDurationMs, conversationId);
-    for (const chunk of chunks) {
-      if (chunk.chunkPath !== mp3Path) {
-        chunkPaths.push(chunk.chunkPath);
-      }
-    }
 
     // Scale Gemini timestamps to real audio time.
-    // Use Math.max across all endMs — last segment isn't always the longest.
     const geminiLastMs = Math.max(...geminiResult.segments.map(s => s.endMs));
     const scale = audioDurationMs / geminiLastMs;
 
     const allAlignedSegments: AlignedSegment[] = [];
 
-    for (const { chunkPath, chunkStartMs, chunkEndMs } of chunks) {
+    for (const { words, chunkStartMs, chunkEndMs } of allChunkWords) {
       const chunkLabel = `chunk ${chunkStartMs / 1000}s–${chunkEndMs / 1000}s`;
 
-      checkTimeout(`before ${chunkLabel}`);
-      await checkAbort(conversationId);
-
-      // Any-overlap assignment: include Gemini segments that overlap this chunk at all
-      // (not just midpoint-in-chunk). Avoids dropping cross-boundary segments.
       const chunkGeminiSegs = geminiResult.segments.filter(s => {
         const scaledStart = s.startMs * scale;
         const scaledEnd = s.endMs * scale;
@@ -480,40 +537,16 @@ export async function runPipeline(
         continue;
       }
 
-      // Scale Gemini segments to chunk-local time for speaker assignment
       const localGeminiSegs = chunkGeminiSegs.map(s => ({
         speaker: s.speaker,
         startMs: Math.max(0, Math.round(s.startMs * scale - chunkStartMs)),
         endMs: Math.round(s.endMs * scale - chunkStartMs),
       }));
 
-      const chunkBuffer = fs.readFileSync(chunkPath);
-      const chunkBase64 = chunkBuffer.toString('base64');
+      const chunkSegments = assignSpeakersToWords(words, localGeminiSegs);
 
-      // Hard fail if WhisperX is unreachable or returns nothing — no fallback.
-      // Drifted Gemini timestamps in the output would silently corrupt sync.
-      const rawWords = await withTimeout(
-        getWhisperXWords(chunkBase64, whisperServiceUrl),
-        CHUNK_ALIGNMENT_TIMEOUT_MS,
-        `whisperx ${chunkLabel}`,
-      );
+      console.log(`[Pipeline] ${chunkLabel}: ${chunkSegments.length} segments from ${words.length} words`);
 
-      if (!rawWords || rawWords.length === 0) {
-        throw new PipelineFatalError(
-          `WhisperX returned no words for ${chunkLabel} — cannot assign speakers`,
-          'WHISPERX_UNAVAILABLE',
-          'whisperx_timestamps',
-          false,
-        );
-      }
-
-      // WhisperX words are already chunk-local (each chunk is a separate audio
-      // file starting at 0s), so no offset needed here.
-      const chunkSegments = assignSpeakersToWords(rawWords, localGeminiSegs);
-
-      console.log(`[Pipeline] ${chunkLabel}: ${chunkSegments.length} segments from ${rawWords.length} words`);
-
-      // Offset chunk-local timestamps back to global audio time
       for (const seg of chunkSegments) {
         allAlignedSegments.push({
           speakerId: seg.speakerId,
@@ -525,7 +558,7 @@ export async function runPipeline(
     }
 
     // =======================================================================
-    // Step 3.5: Quality gates
+    // Step 4.5: Quality gates
     // =======================================================================
     checkTimeout('after alignment');
 
@@ -539,7 +572,7 @@ export async function runPipeline(
     }
 
     // =======================================================================
-    // Step 4: Assembly
+    // Step 5: Assembly
     // =======================================================================
     await progress.setStep(ProcessingStep.ASSEMBLY);
 
