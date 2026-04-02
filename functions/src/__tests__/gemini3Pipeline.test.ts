@@ -112,7 +112,8 @@ import {
 // Test Fixtures
 // =============================================================================
 
-const VALID_GEMINI_RESPONSE = {
+// Split responses matching the two-call architecture
+const VALID_DIARIZATION_RESPONSE = {
   speakerCount: 2,
   speakers: [
     { label: 'Speaker 1', name: 'Alice', role: 'presenter', description: 'Confident presenter, drives the agenda' },
@@ -123,6 +124,9 @@ const VALID_GEMINI_RESPONSE = {
     { speaker: 'Speaker 2', startMs: 5000, endMs: 7000 },
     { speaker: 'Speaker 1', startMs: 7000, endMs: 15000 },
   ],
+};
+
+const VALID_CONTENT_RESPONSE = {
   terms: [
     { key: 'ai', display: 'AI', definition: 'Artificial Intelligence', aliases: ['artificial intelligence'] },
   ],
@@ -132,6 +136,12 @@ const VALID_GEMINI_RESPONSE = {
   persons: [
     { name: 'Charlie', affiliation: 'Acme Corp' },
   ],
+};
+
+// Combined for backward-compat in tests that check the merged result
+const VALID_GEMINI_RESPONSE = {
+  ...VALID_DIARIZATION_RESPONSE,
+  ...VALID_CONTENT_RESPONSE,
 };
 
 // =============================================================================
@@ -170,15 +180,16 @@ describe('gemini3Pipeline', () => {
     mockFilesGet.mockResolvedValue({ state: 'ACTIVE' });
     mockFilesDelete.mockResolvedValue(undefined);
 
-    // Default: successful generation
-    mockGenerateContent.mockResolvedValue({
-      text: JSON.stringify(VALID_GEMINI_RESPONSE),
-      usageMetadata: {
-        promptTokenCount: 1000,
-        candidatesTokenCount: 500,
-        totalTokenCount: 1500,
-      },
-    });
+    // Default: successful generation (two calls — diarization then content)
+    mockGenerateContent
+      .mockResolvedValueOnce({
+        text: JSON.stringify(VALID_DIARIZATION_RESPONSE),
+        usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 400, totalTokenCount: 1400 },
+      })
+      .mockResolvedValueOnce({
+        text: JSON.stringify(VALID_CONTENT_RESPONSE),
+        usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 100, totalTokenCount: 1100 },
+      });
   });
 
   afterEach(() => {
@@ -208,11 +219,11 @@ describe('gemini3Pipeline', () => {
       expect(result.segments[0].endMs).toBe(5000);
       expect(result.speakerCount).toBe(2);
 
-      // Verify metadata
+      // Verify metadata (summed from both diarization + content calls)
       expect(result.tokenUsage).toEqual({
-        promptTokens: 1000,
+        promptTokens: 2000,
         completionTokens: 500,
-        totalTokens: 1500,
+        totalTokens: 2500,
       });
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
     });
@@ -513,8 +524,8 @@ describe('gemini3Pipeline', () => {
         });
     });
 
-    it('throws PARSE_FAILED when response is unparseable', async () => {
-      mockGenerateContent.mockResolvedValue({
+    it('throws PARSE_FAILED when diarization response is unparseable', async () => {
+      mockGenerateContent.mockResolvedValueOnce({
         text: 'totally not json {{{',
         usageMetadata: {},
       });
@@ -532,10 +543,15 @@ describe('gemini3Pipeline', () => {
 
   describe('edge cases', () => {
     it('handles response with markdown fences', async () => {
-      mockGenerateContent.mockResolvedValue({
-        text: '```json\n' + JSON.stringify(VALID_GEMINI_RESPONSE) + '\n```',
-        usageMetadata: { totalTokenCount: 100 },
-      });
+      mockGenerateContent
+        .mockResolvedValueOnce({
+          text: '```json\n' + JSON.stringify(VALID_DIARIZATION_RESPONSE) + '\n```',
+          usageMetadata: { totalTokenCount: 100 },
+        })
+        .mockResolvedValueOnce({
+          text: '```json\n' + JSON.stringify(VALID_CONTENT_RESPONSE) + '\n```',
+          usageMetadata: { totalTokenCount: 50 },
+        });
 
       const result = await processWithGemini3Flash('users/123/audio/test.mp3');
 
@@ -543,10 +559,9 @@ describe('gemini3Pipeline', () => {
     });
 
     it('handles response without token metadata', async () => {
-      mockGenerateContent.mockResolvedValue({
-        text: JSON.stringify(VALID_GEMINI_RESPONSE),
-        // No usageMetadata
-      });
+      mockGenerateContent
+        .mockResolvedValueOnce({ text: JSON.stringify(VALID_DIARIZATION_RESPONSE) })
+        .mockResolvedValueOnce({ text: JSON.stringify(VALID_CONTENT_RESPONSE) });
 
       const result = await processWithGemini3Flash('users/123/audio/test.mp3');
 
@@ -558,18 +573,15 @@ describe('gemini3Pipeline', () => {
     });
 
     it('handles missing optional fields in response', async () => {
-      const minimalResponse = {
+      const minimalDiarization = {
         speakers: [{ label: 'Speaker 1', name: 'Test' }],
         segments: [],
-        terms: [],
-        topics: [],
-        persons: [],
       };
+      const minimalContent = { terms: [], topics: [], persons: [] };
 
-      mockGenerateContent.mockResolvedValue({
-        text: JSON.stringify(minimalResponse),
-        usageMetadata: {},
-      });
+      mockGenerateContent
+        .mockResolvedValueOnce({ text: JSON.stringify(minimalDiarization), usageMetadata: {} })
+        .mockResolvedValueOnce({ text: JSON.stringify(minimalContent), usageMetadata: {} });
 
       const result = await processWithGemini3Flash('users/123/audio/test.mp3');
 

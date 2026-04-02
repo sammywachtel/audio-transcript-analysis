@@ -354,12 +354,18 @@ export function parseGeminiJson(text: string): GeminiPipelineResult {
 // The Prompt (proven in PoC)
 // =============================================================================
 
+// =============================================================================
+// Call 1: Diarization — who spoke when
+// =============================================================================
 // No-text prompt is the key finding from the PoC: asking Gemini for verbatim
 // transcript text in segments drops speaker detection from 6/6 to 5/6. The theory
 // is that generating token-heavy transcript text crowds out speaker-discriminative
 // audio features in the model's attention budget. WhisperX handles the transcript;
 // Gemini handles who-spoke-when. Separation of concerns, separation of concerns.
-const GEMINI_PROMPT = `You are an expert audio analyst. Listen to this entire recording carefully.
+//
+// Splitting diarization into its own call gives it the full 65K output budget
+// and lets the model focus exclusively on speaker identification.
+const DIARIZATION_PROMPT = `You are an expert audio analyst. Listen to this entire recording carefully.
 
 ## Tasks
 
@@ -383,24 +389,31 @@ RULES:
 - Cover the FULL recording from start to finish — do not stop early
 - Merge consecutive speech by the same speaker into one entry
 - For a 45-minute conversation, expect 100-400 entries
-- Do NOT include verbatim transcript text — timestamps and speaker labels only
+- Do NOT include verbatim transcript text — timestamps and speaker labels only`;
 
-### 3. Terms
-Extract domain-specific or noteworthy terms/concepts. For each:
+// =============================================================================
+// Call 2: Content analysis — terms, topics, people
+// =============================================================================
+// Separate call so content extraction doesn't compete with diarization for
+// output tokens, and so truncation of a large segment list can't wipe out terms.
+const CONTENT_PROMPT = `You are an expert audio analyst. Listen to this entire recording carefully and extract the following content.
+
+### 1. Terms
+Extract domain-specific or noteworthy terms/concepts discussed in this recording. For each:
 - "key": lowercase identifier
 - "display": display version (capitalization preserved)
-- "definition": brief definition in context
-- "aliases": alternative names/abbreviations
+- "definition": brief definition in context of how it's used in this conversation
+- "aliases": alternative names/abbreviations used in the conversation
 
-### 4. Topics
-Identify major topics/segments. For each:
+### 2. Topics
+Identify major topics/segments of the conversation. For each:
 - "title": descriptive title
 - "startApproxMs": approximate start time in milliseconds
 - "endApproxMs": approximate end time in milliseconds
 - "type": "main" for primary topics, "tangent" for digressions
 
-### 5. Persons
-People mentioned who are NOT speakers. For each:
+### 3. Persons
+People mentioned in the conversation who are NOT speakers (i.e., people discussed but not present). For each:
 - "name": full name as mentioned
 - "affiliation": organization/role if mentioned`;
 
@@ -408,7 +421,7 @@ People mentioned who are NOT speakers. For each:
 // JSON Schema for Gemini structured output
 // =============================================================================
 
-const RESPONSE_SCHEMA = {
+const DIARIZATION_SCHEMA = {
   type: 'object' as const,
   properties: {
     speakerCount: { type: 'integer' as const },
@@ -439,6 +452,14 @@ const RESPONSE_SCHEMA = {
         propertyOrdering: ['speaker', 'startMs', 'endMs'],
       },
     },
+  },
+  required: ['speakerCount', 'speakers', 'segments'],
+  propertyOrdering: ['speakerCount', 'speakers', 'segments'],
+};
+
+const CONTENT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
     terms: {
       type: 'array' as const,
       items: {
@@ -480,8 +501,8 @@ const RESPONSE_SCHEMA = {
       },
     },
   },
-  required: ['speakerCount', 'speakers', 'segments', 'terms', 'topics', 'persons'],
-  propertyOrdering: ['speakerCount', 'speakers', 'segments', 'terms', 'topics', 'persons'],
+  required: ['terms', 'topics', 'persons'],
+  propertyOrdering: ['terms', 'topics', 'persons'],
 };
 
 // =============================================================================
@@ -807,70 +828,79 @@ export async function processWithGemini3Flash(
 
     log.info('File processing complete, calling Gemini...', ctx);
 
-    // Step 5: Generate content
-    const apiStart = Date.now();
-    let response;
+    const audioPart = createPartFromUri(uploadedFile.uri, uploadedFile.mimeType);
 
-    try {
-      response = await ai.models.generateContent({
-        model,
-        contents: [{
-          role: 'user',
-          parts: [
-            createPartFromUri(uploadedFile.uri, uploadedFile.mimeType),
-            { text: GEMINI_PROMPT },
-          ],
-        }],
-        config: {
-          temperature: 0.3,
-          maxOutputTokens: 65536,
-          // Let the model reason about speaker identity before committing.
-          // 4096 tokens is enough for "Speaker 2 sounds like the person
-          // addressed as Sam at 3:42" type reasoning without blowing the budget.
-          thinkingConfig: { thinkingBudget: 4096 },
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-        },
-      });
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-
-      // Check for quota errors
-      if (errMsg.includes('quota') || errMsg.includes('RESOURCE_EXHAUSTED')) {
-        throw new GeminiPipelineError(
-          'Gemini API quota exceeded',
-          'QUOTA_EXCEEDED',
-          err instanceof Error ? err : new Error(errMsg)
-        );
+    // Helper: call Gemini with error handling
+    const callGemini = async (prompt: string, schema: object, label: string) => {
+      try {
+        return await ai!.models.generateContent({
+          model,
+          contents: [{ role: 'user', parts: [audioPart, { text: prompt }] }],
+          config: {
+            temperature: 0.1,
+            maxOutputTokens: 65536,
+            thinkingConfig: { thinkingBudget: 4096 },
+            responseMimeType: 'application/json',
+            responseSchema: schema,
+          },
+        });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (errMsg.includes('quota') || errMsg.includes('RESOURCE_EXHAUSTED')) {
+          throw new GeminiPipelineError(`Gemini API quota exceeded (${label})`, 'QUOTA_EXCEEDED', err instanceof Error ? err : new Error(errMsg));
+        }
+        throw new GeminiPipelineError(`Gemini ${label} failed: ${errMsg}`, 'GENERATION_FAILED', err instanceof Error ? err : new Error(errMsg));
       }
-
-      throw new GeminiPipelineError(
-        `Gemini generation failed: ${errMsg}`,
-        'GENERATION_FAILED',
-        err instanceof Error ? err : new Error(errMsg)
-      );
-    }
-
-    const apiDuration = Date.now() - apiStart;
-    const usage = response.usageMetadata;
-
-    log.info(`Gemini response received in ${(apiDuration / 1000).toFixed(1)}s`, ctx);
-    log.info(`Tokens: prompt=${usage?.promptTokenCount ?? '?'}, completion=${usage?.candidatesTokenCount ?? '?'}`, ctx);
-
-    // Step 6: Parse response (with truncation repair)
-    const rawText = response.text ?? '';
-    const result = parseGeminiJson(rawText);
-
-    log.info(`Parsed: ${result.speakers.length} speakers, ${result.segments.length} segments`, ctx);
-    log.info(`Terms: ${result.terms.length}, Topics: ${result.topics.length}, Persons: ${result.persons.length}`, ctx);
-
-    // Add metadata
-    result.tokenUsage = {
-      promptTokens: usage?.promptTokenCount ?? 0,
-      completionTokens: usage?.candidatesTokenCount ?? 0,
-      totalTokens: usage?.totalTokenCount ?? 0,
     };
-    result.durationMs = apiDuration;
+
+    // -----------------------------------------------------------------------
+    // Call 1: Diarization (speakers + segments)
+    // Gets the full output budget — no competition with content extraction.
+    // -----------------------------------------------------------------------
+    const diarStart = Date.now();
+    const diarResponse = await callGemini(DIARIZATION_PROMPT, DIARIZATION_SCHEMA, 'diarization');
+    const diarDuration = Date.now() - diarStart;
+    const diarUsage = diarResponse.usageMetadata;
+
+    log.info(`Diarization response in ${(diarDuration / 1000).toFixed(1)}s`, ctx);
+    log.info(`Diarization tokens: prompt=${diarUsage?.promptTokenCount ?? '?'}, completion=${diarUsage?.candidatesTokenCount ?? '?'}`, ctx);
+
+    const diarResult = parseGeminiJson(diarResponse.text ?? '');
+    log.info(`Parsed: ${diarResult.speakers.length} speakers, ${diarResult.segments.length} segments`, ctx);
+
+    // -----------------------------------------------------------------------
+    // Call 2: Content analysis (terms + topics + persons)
+    // Separate call so truncation of segments can't wipe out content.
+    // -----------------------------------------------------------------------
+    const contentStart = Date.now();
+    const contentResponse = await callGemini(CONTENT_PROMPT, CONTENT_SCHEMA, 'content');
+    const contentDuration = Date.now() - contentStart;
+    const contentUsage = contentResponse.usageMetadata;
+
+    log.info(`Content response in ${(contentDuration / 1000).toFixed(1)}s`, ctx);
+    log.info(`Content tokens: prompt=${contentUsage?.promptTokenCount ?? '?'}, completion=${contentUsage?.candidatesTokenCount ?? '?'}`, ctx);
+
+    const contentResult = parseGeminiJson(contentResponse.text ?? '');
+    log.info(`Terms: ${contentResult.terms.length}, Topics: ${contentResult.topics.length}, Persons: ${contentResult.persons.length}`, ctx);
+
+    // -----------------------------------------------------------------------
+    // Merge results
+    // -----------------------------------------------------------------------
+    const totalDuration = diarDuration + contentDuration;
+    const result: GeminiPipelineResult = {
+      speakers: diarResult.speakers,
+      speakerCount: diarResult.speakerCount,
+      segments: diarResult.segments,
+      terms: contentResult.terms,
+      topics: contentResult.topics,
+      persons: contentResult.persons,
+      tokenUsage: {
+        promptTokens: (diarUsage?.promptTokenCount ?? 0) + (contentUsage?.promptTokenCount ?? 0),
+        completionTokens: (diarUsage?.candidatesTokenCount ?? 0) + (contentUsage?.candidatesTokenCount ?? 0),
+        totalTokens: (diarUsage?.totalTokenCount ?? 0) + (contentUsage?.totalTokenCount ?? 0),
+      },
+      durationMs: totalDuration,
+    };
 
     return result;
 
