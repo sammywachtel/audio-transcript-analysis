@@ -148,7 +148,7 @@ export class GeminiPipelineError extends Error {
 // Configuration
 // =============================================================================
 
-const DEFAULT_MODEL = 'gemini-2.5-pro-preview-05-06';
+const DEFAULT_MODEL = 'gemini-2.5-pro';
 const MAX_PROCESSING_WAIT_ATTEMPTS = 60; // 60 * 2s = 2 minutes max wait
 const PROCESSING_POLL_INTERVAL_MS = 2000;
 
