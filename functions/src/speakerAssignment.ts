@@ -37,11 +37,44 @@ function overlapMs(wordStartMs: number, wordEndMs: number, seg: GeminiSegment): 
  * Unit note: Word.start/end are seconds (float). GeminiSegment times are ms.
  * Convert words to ms before any comparison — don't get clever and skip it.
  */
+/**
+ * Filter out WhisperX hallucination loops. When the model hits noisy audio
+ * it sometimes gets stuck repeating the same word ("uh, uh, uh, uh...")
+ * dozens of times. Collapse runs of 3+ identical words down to 1.
+ */
+function deduplicateHallucinatedWords(words: Word[]): Word[] {
+  if (words.length < 3) return words;
+
+  const result: Word[] = [words[0]];
+  let runLength = 1;
+
+  for (let i = 1; i < words.length; i++) {
+    const same = words[i].word.trim().toLowerCase() === words[i - 1].word.trim().toLowerCase();
+    if (same) {
+      runLength++;
+      // Keep the first 2 of any run, drop the rest
+      if (runLength <= 2) result.push(words[i]);
+    } else {
+      runLength = 1;
+      result.push(words[i]);
+    }
+  }
+
+  const dropped = words.length - result.length;
+  if (dropped > 0) {
+    console.log(`[SpeakerAssignment] Filtered ${dropped} hallucinated repeat words`);
+  }
+  return result;
+}
+
 export function assignSpeakersToWords(words: Word[], segments: GeminiSegment[]): AlignedSegment[] {
   // Nothing to do — bail early to keep the rest of the logic simple.
   if (words.length === 0 || segments.length === 0) {
     return [];
   }
+
+  // Phase 0: strip WhisperX hallucination loops before any processing.
+  words = deduplicateHallucinatedWords(words);
 
   // Phase 1: assign each word a speaker label.
   const wordSpeakers: string[] = words.map((word) => {
