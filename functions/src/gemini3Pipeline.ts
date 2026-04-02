@@ -771,7 +771,7 @@ export async function processWithGemini3Flash(
 
     ai = new GoogleGenAI({
       apiKey,
-      httpOptions: { timeout: 300_000 }, // 5 minute budget — hybrid orchestrator enforces this limit
+      httpOptions: { timeout: 600_000 }, // 10 min per Gemini call — orchestrator's 900s budget is the real ceiling
     });
 
     // Step 1: Download audio from Storage
