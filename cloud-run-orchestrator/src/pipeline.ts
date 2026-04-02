@@ -104,9 +104,10 @@ enum ProcessingStep {
   FAILED = 'failed',
 }
 
+// Percentages match the new pipeline order: WhisperX → Gemini → Assembly → Save
 const STEP_PERCENTAGES: Record<ProcessingStep, number> = {
-  [ProcessingStep.GEMINI_ANALYSIS]: 20,
-  [ProcessingStep.WHISPERX_ALIGNMENT]: 60,
+  [ProcessingStep.WHISPERX_ALIGNMENT]: 15,
+  [ProcessingStep.GEMINI_ANALYSIS]: 55,
   [ProcessingStep.ASSEMBLY]: 85,
   [ProcessingStep.SAVING]: 95,
   [ProcessingStep.COMPLETE]: 100,
@@ -114,8 +115,8 @@ const STEP_PERCENTAGES: Record<ProcessingStep, number> = {
 };
 
 const STEP_LABELS: Record<ProcessingStep, string> = {
+  [ProcessingStep.WHISPERX_ALIGNMENT]: 'Transcribing Audio',
   [ProcessingStep.GEMINI_ANALYSIS]: 'Analyzing with Gemini',
-  [ProcessingStep.WHISPERX_ALIGNMENT]: 'Aligning Timestamps',
   [ProcessingStep.ASSEMBLY]: 'Assembling Results',
   [ProcessingStep.SAVING]: 'Saving',
   [ProcessingStep.COMPLETE]: 'Complete',
@@ -514,8 +515,8 @@ export async function runPipeline(
 
     // =======================================================================
     // Step 4: Speaker assignment — map Gemini diarization to WhisperX words
+    // (fast — no separate progress step needed, stays at 55% from Gemini)
     // =======================================================================
-    await progress.setStep(ProcessingStep.WHISPERX_ALIGNMENT);
 
     // Scale Gemini timestamps to real audio time.
     const geminiLastMs = Math.max(...geminiResult.segments.map(s => s.endMs));
