@@ -845,7 +845,7 @@ export async function processWithGemini3Flash(
     const transcriptText = options?.transcriptText;
 
     // Helper: call Gemini with error handling
-    const callGemini = async (prompt: string, schema: object, label: string) => {
+    const callGemini = async (prompt: string, schema: object, label: string, thinkingBudget = 0) => {
       try {
         return await ai!.models.generateContent({
           model,
@@ -853,11 +853,7 @@ export async function processWithGemini3Flash(
           config: {
             temperature: 0.1,
             maxOutputTokens: 65536,
-            // Thinking disabled — the WhisperX transcript provides the
-            // contextual signal that thinking was meant to give (name-to-voice
-            // mapping, speaker change cues). With transcript + audio + thinking,
-            // 2.5 Flash times out on 45-min recordings.
-            thinkingConfig: { thinkingBudget: 0 },
+            thinkingConfig: { thinkingBudget },
             responseMimeType: 'application/json',
             responseSchema: schema,
           },
@@ -876,7 +872,9 @@ export async function processWithGemini3Flash(
     // Gets the full output budget — no competition with content extraction.
     // -----------------------------------------------------------------------
     const diarStart = Date.now();
-    const diarResponse = await callGemini(buildDiarizationPrompt(transcriptText), DIARIZATION_SCHEMA, 'diarization');
+    // Diarization: audio-only + thinking. No transcript — adding 41K chars
+    // causes 2.5 Flash to time out. Thinking budget gives it reasoning room.
+    const diarResponse = await callGemini(buildDiarizationPrompt(), DIARIZATION_SCHEMA, 'diarization', 4096);
     const diarDuration = Date.now() - diarStart;
     const diarUsage = diarResponse.usageMetadata;
 
