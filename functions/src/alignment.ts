@@ -1464,8 +1464,11 @@ async function getWhisperxTimestamps(
               for (const w of segObj.words) {
                 if (typeof w === 'object' && w !== null) {
                   const wordObj = w as Record<string, unknown>;
+                  const wordText = typeof wordObj.word === 'string' ? wordObj.word.trim() : '';
+                  // Skip empty words (WhisperX sometimes emits whitespace-only entries)
+                  if (!wordText) continue;
                   words.push({
-                    word: typeof wordObj.word === 'string' ? wordObj.word : '',
+                    word: wordText,
                     start: typeof wordObj.start === 'number' ? wordObj.start : 0.0,
                     end: typeof wordObj.end === 'number' ? wordObj.end : 0.0,
                     index: wordIdx,
