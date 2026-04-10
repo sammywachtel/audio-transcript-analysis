@@ -357,6 +357,26 @@ export function parseGeminiJson(text: string): GeminiPipelineResult {
 // =============================================================================
 
 // =============================================================================
+// =============================================================================
+// Transcript truncation for diarization context
+// =============================================================================
+// Full transcripts (40K+ chars) cause fetch failures when combined with audio.
+// Truncating to first N + last M chars captures speaker introductions and names
+// without overwhelming the request. The ellipsis helps Gemini understand it's partial.
+function truncateForDiarization(
+  text: string | undefined,
+  headChars: number,
+  tailChars: number
+): string | undefined {
+  if (!text) return undefined;
+  const totalLimit = headChars + tailChars;
+  if (text.length <= totalLimit) return text;
+
+  const head = text.slice(0, headChars);
+  const tail = text.slice(-tailChars);
+  return `${head}\n\n[... transcript truncated for context — ${text.length - totalLimit} chars omitted ...]\n\n${tail}`;
+}
+
 // Call 1: Diarization — who spoke when
 // =============================================================================
 // The PoC showed that asking Gemini to GENERATE transcript text hurts diarization.
@@ -872,10 +892,13 @@ export async function processWithGemini3Flash(
     // Gets the full output budget — no competition with content extraction.
     // -----------------------------------------------------------------------
     const diarStart = Date.now();
-    // Diarization: audio-only. Transcript context causes failures even with
-    // gemini-3-flash-preview — the 41K chars overwhelm the audio+text combo.
-    // Content extraction still gets transcript context (works there).
-    const diarResponse = await callGemini(buildDiarizationPrompt(), DIARIZATION_SCHEMA, 'diarization', 4096);
+    // Truncate transcript for diarization context — full 41K chars causes fetch
+    // failures, but first 8K + last 2K captures intros/names without overload.
+    const truncatedTranscript = truncateForDiarization(transcriptText, 8000, 2000);
+    if (truncatedTranscript && transcriptText) {
+      log.info(`Diarization context: ${truncatedTranscript.length} chars (truncated from ${transcriptText.length})`, ctx);
+    }
+    const diarResponse = await callGemini(buildDiarizationPrompt(truncatedTranscript), DIARIZATION_SCHEMA, 'diarization', 4096);
     const diarDuration = Date.now() - diarStart;
     const diarUsage = diarResponse.usageMetadata;
 
