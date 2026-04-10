@@ -126,12 +126,13 @@ async function getFirestoreSegments(conversationId: string): Promise<{
 
   const data = doc.data()!;
   const rawSegments = Array.isArray(data.segments) ? data.segments : [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Firestore untyped doc data
   const segments: FirestoreSegment[] = rawSegments.map((s: any, i: number) => ({
-    segmentId: s.segmentId || `seg_${i}`,
-    speakerId: s.speakerId,
-    startMs: s.startMs,
-    endMs: s.endMs,
-    text: s.text || ''
+    segmentId: (s.segmentId as string) || `seg_${i}`,
+    speakerId: s.speakerId as string,
+    startMs: s.startMs as number,
+    endMs: s.endMs as number,
+    text: (s.text as string) || ''
   }));
 
   // Build speaker display name map
@@ -148,8 +149,9 @@ async function getFirestoreSegments(conversationId: string): Promise<{
   // If no speakers found, try object/map format
   if (speakers.size === 0 && data.speakers && typeof data.speakers === 'object') {
     for (const [key, val] of Object.entries(data.speakers)) {
-      if (val && typeof val === 'object' && 'displayName' in (val as any)) {
-        speakers.set(key, (val as any).displayName || key);
+      const spkObj = val as { displayName?: string } | null;
+      if (spkObj && typeof spkObj === 'object' && 'displayName' in spkObj) {
+        speakers.set(key, spkObj.displayName || key);
       }
     }
   }
@@ -163,12 +165,31 @@ async function getFirestoreSegments(conversationId: string): Promise<{
     }
   }
 
-  // Fetch corrections subcollection and apply renames
+  // Fetch speakerCorrections subcollection and apply renames
+  // (canonical subcollection per functions/src/speakerCorrections.ts)
   const correctionsSnap = await db
     .collection('conversations')
     .doc(conversationId)
-    .collection('corrections')
+    .collection('speakerCorrections')
     .get();
+
+  // Diagnostic: log correction document presence
+  const activeCorrections = correctionsSnap.docs.filter(d => !d.data().undoneAt);
+  console.log(`\n=== CORRECTION DOCUMENTS ===`);
+  console.log(`Total correction docs: ${correctionsSnap.size}`);
+  console.log(`Active (not undone): ${activeCorrections.length}`);
+  if (activeCorrections.length > 0) {
+    console.log('Active corrections:');
+    for (const doc of activeCorrections) {
+      const c = doc.data();
+      console.log(`  [${doc.id}] type="${c.type}" — ${JSON.stringify({
+        speakerId: c.speakerId,
+        newDisplayName: c.newDisplayName,
+        sourceSpeakerId: c.sourceSpeakerId,
+        targetSpeakerId: c.targetSpeakerId
+      })}`);
+    }
+  }
 
   // Apply rename corrections to speakers map
   for (const corrDoc of correctionsSnap.docs) {
@@ -271,6 +292,12 @@ function inferSpeakerMapping(
       mapping.set(gtSpk, bestFs);
       usedFsSpeakers.add(bestFs);
       console.log(`MAPPING: "${gtSpk}" -> "${bestFs}" (${speakers.get(bestFs) || bestFs}) with ${bestOverlap}ms overlap`);
+    } else {
+      // Diagnostic: GT speaker with no usable Firestore mapping
+      const candidateOverlaps = [...fsCounts.entries()]
+        .map(([fsSpk, overlap]) => `${fsSpk}:${overlap}ms${usedFsSpeakers.has(fsSpk) ? ' (taken)' : ''}`)
+        .join(', ');
+      console.log(`UNMAPPED: "${gtSpk}" — candidates: [${candidateOverlaps || 'none'}]`);
     }
   }
 
@@ -320,7 +347,21 @@ async function evaluate(conversationId: string, gtFilePath: string) {
   let incorrect = 0;
   let skipped = 0;
 
-  for (const gt of gtWithEnds) {
+  // Diagnostic accumulators
+  const skipReasons: Array<{
+    gtSegmentIndex: number;
+    startMs: number;
+    endMs: number;
+    speaker: string;
+    reason: string;
+    overlapRatio: number;
+    gapMs: number;
+    wordCount: number;
+  }> = [];
+  let totalGapWordCount = 0;
+
+  for (let gtIdx = 0; gtIdx < gtWithEnds.length; gtIdx++) {
+    const gt = gtWithEnds[gtIdx];
     // Find Firestore segments with >50% overlap
     const gtDuration = gt.endMs - gt.startMs;
     let totalOverlap = 0;
@@ -337,8 +378,26 @@ async function evaluate(conversationId: string, gtFilePath: string) {
       }
     }
 
+    // Calculate gap duration (GT time not covered by any Firestore segment)
+    const gapMs = Math.max(0, gtDuration - totalOverlap);
+    // Estimate word count in this GT segment (rough: ~150 wpm = 2.5 words/sec)
+    const wordCount = gt.text.split(/\s+/).filter((w: string) => w.length > 0).length;
+    // Estimate words in gap proportionally
+    const gapWordCount = gtDuration > 0 ? Math.round(wordCount * (gapMs / gtDuration)) : 0;
+
     if (totalOverlap < gtDuration * 0.5) {
       skipped++;
+      totalGapWordCount += gapWordCount;
+      skipReasons.push({
+        gtSegmentIndex: gtIdx,
+        startMs: gt.startMs,
+        endMs: gt.endMs,
+        speaker: gt.speaker,
+        reason: `overlap ${(totalOverlap / gtDuration * 100).toFixed(0)}% < 50% threshold`,
+        overlapRatio: totalOverlap / gtDuration,
+        gapMs,
+        wordCount
+      });
       continue;
     }
 
@@ -367,6 +426,29 @@ async function evaluate(conversationId: string, gtFilePath: string) {
     ? (durationMs / fsSegments.length / 1000).toFixed(1)
     : '0.0';
 
+  // === DIAGNOSTICS: Per-segment skip reasons ===
+  if (skipReasons.length > 0) {
+    console.log('\n=== SKIP DIAGNOSTICS ===');
+    console.log(`Skipped segments: ${skipReasons.length}`);
+    console.log(`Estimated words in gaps: ${totalGapWordCount}`);
+    console.log('\nPer-segment skip reasons (first 10):');
+    for (const sr of skipReasons.slice(0, 10)) {
+      console.log(`  [${sr.startMs}ms-${sr.endMs}ms] "${sr.speaker}" — ${sr.reason} (gap: ${sr.gapMs}ms, ~${sr.wordCount} words)`);
+    }
+    if (skipReasons.length > 10) {
+      console.log(`  ... and ${skipReasons.length - 10} more skipped segments`);
+    }
+  }
+
+  // === DIAGNOSTICS: Unmapped GT speakers summary ===
+  const unmappedGtSpeakers = [...gtSpeakerSet].filter(spk => !speakerMapping.has(spk));
+  if (unmappedGtSpeakers.length > 0) {
+    console.log('\n=== UNMAPPED GT SPEAKERS ===');
+    for (const spk of unmappedGtSpeakers) {
+      console.log(`  "${spk}" — no Firestore speaker assigned`);
+    }
+  }
+
   console.log('\n=== RESULTS ===');
   console.log(`Correct: ${correct}`);
   console.log(`Incorrect: ${incorrect}`);
@@ -376,6 +458,7 @@ async function evaluate(conversationId: string, gtFilePath: string) {
   console.log(`Avg Segment Duration: ${avgDuration}s`);
   console.log(`Speaker Count (Firestore): ${speakers.size}`);
   console.log(`Speaker Count (GT): ${gtSpeakerSet.size}`);
+  console.log(`Estimated gap words: ${totalGapWordCount}`);
 
   return {
     conversationId,
@@ -385,6 +468,7 @@ async function evaluate(conversationId: string, gtFilePath: string) {
     avgSegmentDuration: parseFloat(avgDuration),
     segmentsEvaluated: total,
     segmentsSkipped: skipped,
+    gapWordCount: totalGapWordCount,
     durationMs
   };
 }
