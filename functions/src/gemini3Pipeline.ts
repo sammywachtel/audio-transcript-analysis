@@ -872,9 +872,10 @@ export async function processWithGemini3Flash(
     // Gets the full output budget — no competition with content extraction.
     // -----------------------------------------------------------------------
     const diarStart = Date.now();
-    // Diarization with transcript context: gemini-3-flash-preview handles the
-    // full transcript without the timeout issues that plagued 2.5-flash.
-    const diarResponse = await callGemini(buildDiarizationPrompt(transcriptText), DIARIZATION_SCHEMA, 'diarization', 4096);
+    // Diarization: audio-only. Transcript context causes failures even with
+    // gemini-3-flash-preview — the 41K chars overwhelm the audio+text combo.
+    // Content extraction still gets transcript context (works there).
+    const diarResponse = await callGemini(buildDiarizationPrompt(), DIARIZATION_SCHEMA, 'diarization', 4096);
     const diarDuration = Date.now() - diarStart;
     const diarUsage = diarResponse.usageMetadata;
 
