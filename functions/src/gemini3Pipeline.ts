@@ -148,7 +148,7 @@ export class GeminiPipelineError extends Error {
 // Configuration
 // =============================================================================
 
-const DEFAULT_MODEL = 'gemini-2.5-flash';
+const DEFAULT_MODEL = 'gemini-3-flash-preview';
 const MAX_PROCESSING_WAIT_ATTEMPTS = 60; // 60 * 2s = 2 minutes max wait
 const PROCESSING_POLL_INTERVAL_MS = 2000;
 
@@ -872,9 +872,9 @@ export async function processWithGemini3Flash(
     // Gets the full output budget — no competition with content extraction.
     // -----------------------------------------------------------------------
     const diarStart = Date.now();
-    // Diarization: audio-only + thinking. No transcript — adding 41K chars
-    // causes 2.5 Flash to time out. Thinking budget gives it reasoning room.
-    const diarResponse = await callGemini(buildDiarizationPrompt(), DIARIZATION_SCHEMA, 'diarization', 4096);
+    // Diarization with transcript context: gemini-3-flash-preview handles the
+    // full transcript without the timeout issues that plagued 2.5-flash.
+    const diarResponse = await callGemini(buildDiarizationPrompt(transcriptText), DIARIZATION_SCHEMA, 'diarization', 4096);
     const diarDuration = Date.now() - diarStart;
     const diarUsage = diarResponse.usageMetadata;
 

@@ -69,3 +69,16 @@ The orchestrator preserves every PoC-validated parameter: `MAX_MATCH_ITERATIONS`
 ## Implementation Details
 
 For the full pipeline sequence, idempotency mechanics, progress contract, error handling, and Cloud Run service configuration, see [Pipeline Flow Reference](../reference/pipeline-flow.md) (`docs/reference/pipeline-flow.md`).
+
+## PoC2 Baseline Decision (2026-04)
+
+The `fix/transcript-content-only` branch was evaluated against ground truth to determine if the no-text diarization prompt alone could restore speaker discrimination. Result: **catastrophic single-speaker collapse** — all 540 segments assigned to `SPEAKER_00` on the benchmark conversation `c_1773188486911`.
+
+**Decision:** Proceed to PoC2.
+
+The 0% speaker accuracy confirms that prompt structure changes alone cannot fix the regression. The remaining PoC2 investigation (AssemblyAI spike, hybrid architecture comparison) is justified to find an alternative diarization path.
+
+**Canonical artifacts:**
+- Baseline benchmark: `.agent_process/brainstorms/transcript_pipeline_poc2/.run/01-baseline-benchmark.md`
+- Failure triage: `.agent_process/brainstorms/transcript_pipeline_poc2/.run/01b-c_1773188486911-failure-triage.md`
+- Requirement: `.agent_process/requirements_docs/architecture-refactor/transcript_pipeline_poc2-01.md`

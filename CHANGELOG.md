@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Expanded frozen benchmark set from 1 to 3 ground-truth conversations (`c_1773188486911`, `c_1768513883941`, `c_1769793736247`) with per-conversation speaker accuracy, segment duration, and speaker count metrics (#165)
+- Documented segment-level majority-vote evaluation methodology (>50% overlap threshold) for scoring pipeline output against ground truth (#165)
+- Recorded no-text prompt regression validation: complete diarization collapse on `c_1773188486911` (0% accuracy, single speaker detected vs 6 GT speakers) (#165)
+- Recorded PoC2 proceed/stop decision using accuracy gate (>= 80%) and duration gate (< 30s); outcome is PROCEED — accuracy gate FAIL, duration gate PASS (#165)
+- Added `scripts/quick-gt-eval.ts` — developer utility for comparing Firestore segments against ground-truth files using the majority-vote methodology (#165)
+
 ### Changed
 - Speaker diarization now uses a no-text analysis mode with Gemini, improving speaker detection reliability (5 speakers consistently identified vs. 3 previously)
 - Transcript text and timestamps are now sourced exclusively from WhisperX, replacing the HARDY text-alignment step for more accurate word-level timing
