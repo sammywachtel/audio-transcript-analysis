@@ -64,16 +64,21 @@ Technical architecture of the Audio Transcript Analysis App.
 └───────────────────────────────────────────────────────────────────┘
               │
               ▼
-┌─────────────────────────────────────┐
-│  transcription-orchestrator         │
-│  (Cloud Run — 2 CPU / 2Gi / 900s)  │
-│                                     │
-│  No-text pipeline:                  │
-│  ├── Gemini 3 Flash (diarization)   │
-│  ├── WhisperX (timestamps + text)   │
-│  ├── speakerAssignment (overlap)    │
-│  └── Writes results to Firestore    │
-└──────────────┬──────────────────────┘
+┌─────────────────────────────────────────┐
+│  transcription-orchestrator             │
+│  (Cloud Run — 2 CPU / 2Gi / 900s)      │
+│                                         │
+│  Two-pass Gemini + WhisperX pipeline:   │
+│  ├── WhisperX (timestamps + text)       │
+│  ├── Gemini Pass 1 (text-only)          │
+│  │     speaker intelligence extraction  │
+│  ├── Gemini Pass 2 (audio + context)    │
+│  │     diarization with injected intel  │
+│  ├── Gemini Pass 3 (audio)              │
+│  │     content analysis (terms/topics)  │
+│  ├── speakerAssignment (overlap)        │
+│  └── Writes results to Firestore        │
+└──────────────┬──────────────────────────┘
                │
        ┌───────┴───────┐
        ▼               ▼
@@ -232,11 +237,17 @@ audio-transcript-analysis-app/
    ├── Firestore transaction deduplication (orchestratorClaimed)
    └── Runs pipeline asynchronously — dispatcher is already done
         ↓
-6. Gemini 3 Flash (WAV, no-text prompt) — diarization + content analysis
-   ├── Full-audio diarization (speakers by name, with time windows)
-   ├── No transcript text returned (better speaker detection, lower tokens)
-   ├── Content analysis (terms, topics, persons)
-   └── Returns speaker diarization windows with approximate timestamps
+6. Gemini 3 Flash — two-pass speaker intelligence + diarization + content
+   ├── Pass 1 (text-only, no audio): extractSpeakerIntelligence()
+   │   ├── Parses WhisperX transcript for speaker names and anchor points
+   │   ├── Encodes direct-address inversion rule (e.g. "Hey Chris" → NOT Chris speaking)
+   │   ├── Produces compact SpeakerIntelligence context (capped at 20 anchor points)
+   │   └── On failure → degrades silently to truncated transcript fallback
+   ├── Pass 2 (audio + context): diarization with injected speaker intelligence
+   │   ├── Full-audio diarization (speakers by name, with time windows)
+   │   ├── No transcript text returned (better speaker detection, lower tokens)
+   │   └── Returns speaker diarization windows with approximate timestamps
+   └── Pass 3 (audio): content analysis (terms, topics, persons)
         ↓
 7. WhisperX timestamps + speaker assignment (per 10-min chunk)
    ├── Download MP3 from Storage
@@ -313,16 +324,8 @@ The pipeline includes a speaker assignment module that combines Gemini's diariza
 ```
 cloud-run-orchestrator/src/pipeline.ts (runPipeline)
         │
-        │ 1. Gemini 3 Flash (no-text prompt: diarization + content)
+        │ 1. WhisperX (timestamps + transcript text)
         ▼
-┌──────────────────────────────┐
-│  Speaker diarization windows │
-│  with approximate timestamps │
-│  (no transcript text)        │
-└──────────────┬───────────────┘
-               │
-               │ 2. alignment.ts → WhisperX
-               ▼
 ┌──────────────────────────────┐
 │  Cloud Run GPU WhisperX      │
 │  (word-level timestamps      │
@@ -330,7 +333,30 @@ cloud-run-orchestrator/src/pipeline.ts (runPipeline)
 │  IAM-authenticated HTTP      │
 └──────────────┬───────────────┘
                │
-               │ 3. speakerAssignment.ts
+               │ 2. Gemini Pass 1 (text-only)
+               ▼
+┌──────────────────────────────┐
+│  extractSpeakerIntelligence  │
+│  ├─ Parses WhisperX text     │
+│  ├─ Extracts names + anchors │
+│  ├─ Encodes address inversion│
+│  └─ Returns SpeakerIntel or  │
+│     null (graceful fallback) │
+└──────────────┬───────────────┘
+               │
+               │ 3. Gemini Pass 2 (audio + context)
+               ▼
+┌──────────────────────────────┐
+│  Speaker diarization windows │
+│  ├─ Injected SpeakerIntel    │
+│  │  context (or truncated    │
+│  │  transcript if Pass 1     │
+│  │  failed)                  │
+│  └─ Approximate timestamps   │
+│     (no transcript text)     │
+└──────────────┬───────────────┘
+               │
+               │ 4. speakerAssignment.ts
                ▼
 ┌──────────────────────────────┐
 │  Timestamp-Overlap Assignment│

@@ -481,17 +481,26 @@ export async function runPipeline(
     checkTimeout('after WhisperX');
 
     // =======================================================================
-    // Step 3: Gemini — diarization + content (with transcript context)
+    // Step 3: Gemini — two-pass diarization + content (with transcript context)
+    // Pass 1 (text-only): extractSpeakerIntelligence() inside gemini3Pipeline
+    // Pass 2 (audio+context): diarization with injected speaker intelligence
+    // Pass 3 (audio): content analysis (terms, topics, persons)
     // =======================================================================
     await progress.setStep(ProcessingStep.GEMINI_ANALYSIS);
     await checkAbort(conversationId);
 
+    const geminiCallStart = Date.now();
     const geminiResult: GeminiPipelineResult = await processWithGemini3Flash(
       audioStoragePath,
       { conversationId, transcriptText },
     );
+    const geminiCallDuration = Date.now() - geminiCallStart;
 
-    console.log(`[Pipeline] Gemini complete: ${geminiResult.speakers.length} speakers, ${geminiResult.segments.length} segments`);
+    console.log(
+      `[Pipeline] Gemini complete in ${(geminiCallDuration / 1000).toFixed(1)}s: ` +
+      `${geminiResult.speakers.length} speakers, ${geminiResult.segments.length} segments, ` +
+      `${geminiResult.tokenUsage?.totalTokens ?? '?'} total tokens`,
+    );
 
     if (geminiResult.speakers.length === 0) {
       throw new PipelineFatalError(
