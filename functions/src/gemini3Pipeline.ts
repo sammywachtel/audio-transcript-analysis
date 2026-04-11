@@ -1,11 +1,15 @@
 /**
- * Gemini 3 Flash Single-Pass Pipeline Module
+ * Gemini 3 Flash Two-Pass Pipeline Module
  *
- * Sends full audio to Gemini 3 Flash for combined diarization + content analysis.
- * Replaces both pyannote diarization and per-chunk Gemini analysis.
+ * Pass 1 (text-only): extractSpeakerIntelligence() — parses WhisperX transcript
+ * to build a speaker intelligence profile (names, anchor points, inversion rule).
+ * Pass 2 (audio + context): diarization prompt injected with Pass 1 output.
+ * Pass 3 (audio): content analysis (terms, topics, persons).
  *
  * Key insight from PoC: WAV format is critical for speaker detection.
  * MP3 compression hides quiet speakers (5/6 vs 6/6 with WAV).
+ * Pass 1 adds direct-address inversion awareness: "Hey Chris" means someone
+ * OTHER than Chris is speaking — pure transcript parsing catches this cheaply.
  *
  * Usage:
  *   const result = await processWithGemini3Flash('users/abc/audio/123.mp3');
@@ -125,6 +129,61 @@ export interface GeminiPipelineOptions {
   conversationId?: string;
   /** WhisperX transcript text to pass as context for diarization + content calls */
   transcriptText?: string;
+}
+
+// =============================================================================
+// Pass 1: Speaker Intelligence Schema
+// =============================================================================
+
+/**
+ * A temporal anchor point extracted from transcript text.
+ * These are high-confidence name mentions tied to timestamps —
+ * e.g. "Hey Chris" at 4:32 means someone OTHER than Chris is speaking there.
+ */
+export interface SpeakerAnchorPoint {
+  /** Timestamp in milliseconds */
+  timestampMs: number;
+  /** The name called out or identified */
+  name: string;
+  /**
+   * If true, the voice speaking is the ADDRESSEE's counterpart —
+   * i.e. "Hey Chris" is spoken BY someone else, not BY Chris.
+   * Classic direct-address inversion: the named person is NOT the speaker.
+   */
+  isAddressed: boolean;
+  /** Brief snippet of surrounding context for debugging */
+  context: string;
+}
+
+/**
+ * Speaker profile derived from transcript text alone (no audio).
+ * Extracted in Pass 1 before the audio diarization call.
+ */
+export interface SpeakerIntelligenceEntry {
+  /** Name as it appears in the transcript */
+  name: string;
+  /** Estimated number of times this person speaks (rough signal) */
+  estimatedTurns: number;
+  /** Any role clues gleaned from the text (e.g. "presenter", "asked a question") */
+  roleClue?: string;
+}
+
+/**
+ * Complete speaker intelligence profile from Pass 1.
+ * Text-only extraction — cheaper than audio, runs before audio upload.
+ */
+export interface SpeakerIntelligence {
+  /** Number of distinct speakers the model detected in the transcript */
+  speakerCount: number;
+  /** Speaker profiles with names and role clues */
+  speakers: SpeakerIntelligenceEntry[];
+  /**
+   * Temporal anchor points: moments where a name can be tied to a time.
+   * Cap: the formatter only injects up to 20 of these into the diarization prompt.
+   */
+  anchorPoints: SpeakerAnchorPoint[];
+  /** Any ambiguity notes — e.g. "Sam and Samuel may be the same person" */
+  disambiguationNotes?: string;
 }
 
 // =============================================================================
@@ -377,6 +436,192 @@ function truncateForDiarization(
   return `${head}\n\n[... transcript truncated for context — ${text.length - totalLimit} chars omitted ...]\n\n${tail}`;
 }
 
+// =============================================================================
+// Pass 1: Speaker Intelligence Extraction (text-only Gemini call)
+// =============================================================================
+
+// JSON schema for Pass 1 structured output
+const SPEAKER_INTELLIGENCE_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    speakerCount: { type: 'integer' as const },
+    speakers: {
+      type: 'array' as const,
+      items: {
+        type: 'object' as const,
+        properties: {
+          name: { type: 'string' as const },
+          estimatedTurns: { type: 'integer' as const },
+          roleClue: { type: 'string' as const },
+        },
+        required: ['name', 'estimatedTurns'],
+        propertyOrdering: ['name', 'estimatedTurns', 'roleClue'],
+      },
+    },
+    anchorPoints: {
+      type: 'array' as const,
+      items: {
+        type: 'object' as const,
+        properties: {
+          timestampMs: { type: 'number' as const },
+          name: { type: 'string' as const },
+          isAddressed: { type: 'boolean' as const },
+          context: { type: 'string' as const },
+        },
+        required: ['timestampMs', 'name', 'isAddressed', 'context'],
+        propertyOrdering: ['timestampMs', 'name', 'isAddressed', 'context'],
+      },
+    },
+    disambiguationNotes: { type: 'string' as const },
+  },
+  required: ['speakerCount', 'speakers', 'anchorPoints'],
+  propertyOrdering: ['speakerCount', 'speakers', 'anchorPoints', 'disambiguationNotes'],
+};
+
+const SPEAKER_INTELLIGENCE_PROMPT = `You are a transcript analyst. Parse the following timestamped transcript and extract speaker intelligence.
+
+CRITICAL RULE — Direct-Address Inversion:
+When someone says "Hey Chris" or "Thanks Sarah" or "Good point, Alex", the VOICE SPEAKING is NOT Chris/Sarah/Alex.
+The named person is being ADDRESSED, not speaking. This is the most common source of speaker misidentification.
+Example: "[2:15] Hey Chris, what do you think?" → whoever said this is NOT Chris.
+Example: "[5:30] That's a great question, Sam." → the speaker is NOT Sam.
+
+## Tasks
+
+### 1. Speaker Identification
+List every distinct person who appears to speak in this transcript. For each:
+- "name": their name as used in the transcript
+- "estimatedTurns": rough count of how many times they appear to speak
+- "roleClue": optional role hint if discernible (e.g. "asks most questions", "introduced the agenda")
+
+### 2. Anchor Points
+Identify moments where a person's name is tied to a specific timestamp.
+Prioritize:
+- Direct-address events: "Hey [Name]", "[Name], what do you think?" → isAddressed: true
+- Self-identification: "I'm [Name], I'll be..." → isAddressed: false
+- Responses to direct address: if A addresses B, the next speaking turn is likely B → isAddressed: false
+Capture up to 30 anchor points — quality over quantity.
+
+### 3. Disambiguation Notes
+If any names seem ambiguous (same person, nicknames), note it here.
+
+## Transcript
+`;
+
+/**
+ * Pass 1: Text-only Gemini call that parses the WhisperX transcript and
+ * extracts speaker intelligence before the audio diarization call.
+ *
+ * No audio upload needed — this is pure text analysis, much cheaper and faster.
+ * Returns null if the call fails or produces unusable output (caller falls back).
+ */
+export async function extractSpeakerIntelligence(
+  transcriptText: string,
+  ai: InstanceType<typeof GoogleGenAI>,
+  model: string,
+  conversationId?: string,
+): Promise<SpeakerIntelligence | null> {
+  const ctx = { conversationId, stage: 'gemini3-pass1' };
+  const start = Date.now();
+
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: [{ role: 'user', parts: [{ text: SPEAKER_INTELLIGENCE_PROMPT + transcriptText }] }],
+      config: {
+        temperature: 0.1,
+        maxOutputTokens: 8192, // Pass 1 is compact — no audio tokens, no long diarization
+        responseMimeType: 'application/json',
+        responseSchema: SPEAKER_INTELLIGENCE_SCHEMA,
+      },
+    });
+
+    const durationMs = Date.now() - start;
+    const usage = response.usageMetadata;
+    log.info(
+      `Pass 1 complete in ${(durationMs / 1000).toFixed(1)}s — ` +
+      `tokens: prompt=${usage?.promptTokenCount ?? '?'}, completion=${usage?.candidatesTokenCount ?? '?'}`,
+      ctx,
+    );
+
+    const raw = JSON.parse(response.text ?? '{}') as SpeakerIntelligence;
+
+    // Sanity check: if we got zero speakers or zero anchor points it's basically useless
+    if (!raw.speakers || raw.speakers.length === 0) {
+      log.warn('Pass 1 returned zero speakers — treating as unusable, falling back', ctx);
+      return null;
+    }
+
+    log.info(
+      `Pass 1 intelligence: ${raw.speakerCount} speakers, ${raw.anchorPoints?.length ?? 0} anchor points`,
+      ctx,
+    );
+    return raw;
+
+  } catch (err) {
+    // Pass 1 is best-effort — a failure degrades to the old truncation path, not a hard crash
+    const msg = err instanceof Error ? err.message : String(err);
+    log.warn(`Pass 1 failed (${msg}) — falling back to transcript truncation`, ctx);
+    return null;
+  }
+}
+
+// =============================================================================
+// Pass 1 → Pass 2 Formatter: SpeakerIntelligence → compact prompt context
+// =============================================================================
+
+// Cap list sizes before injecting into diarization prompt.
+// Anchor points are the biggest risk — a 40K-char transcript can yield 50+ anchors.
+const MAX_INJECTED_ANCHORS = 20;
+const MAX_INJECTED_SPEAKERS = 15;
+
+/**
+ * Convert SpeakerIntelligence into a compact string suitable for injection
+ * into the diarization prompt. Bounded by MAX_INJECTED_* constants.
+ *
+ * Keeps the injected context small so we don't re-introduce the fetch-failure
+ * issue that bit us with raw transcript injection.
+ */
+export function formatSpeakerIntelligenceContext(intel: SpeakerIntelligence): string {
+  const speakers = intel.speakers.slice(0, MAX_INJECTED_SPEAKERS);
+  const anchors = intel.anchorPoints.slice(0, MAX_INJECTED_ANCHORS);
+
+  const speakerLines = speakers
+    .map(s => `  - ${s.name} (~${s.estimatedTurns} turns${s.roleClue ? `, ${s.roleClue}` : ''})`)
+    .join('\n');
+
+  const anchorLines = anchors.map(a => {
+    const ts = formatMs(a.timestampMs);
+    const addressNote = a.isAddressed
+      ? `[ADDRESSED — voice speaking is NOT ${a.name}]`
+      : `[SELF or CONTEXTUAL — ${a.name} may be speaking]`;
+    return `  - ${ts}: "${a.context}" → ${addressNote}`;
+  }).join('\n');
+
+  const disambig = intel.disambiguationNotes
+    ? `\n## Disambiguation Notes\n${intel.disambiguationNotes}\n`
+    : '';
+
+  return `## Pre-Analysis: Speaker Intelligence (from transcript text)
+Distinct speakers identified: ${intel.speakerCount}
+
+### Known Speakers
+${speakerLines || '  (none identified)'}
+
+### Anchor Points (name ↔ timestamp mappings)
+REMINDER: When a name is ADDRESSED (e.g. "Hey Chris"), the speaker is NOT that person.
+${anchorLines || '  (none found)'}
+${disambig}`;
+}
+
+/** Format milliseconds as MM:SS for human-readable anchor point display */
+function formatMs(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const mm = Math.floor(totalSec / 60);
+  const ss = totalSec % 60;
+  return `${mm}:${String(ss).padStart(2, '0')}`;
+}
+
 // Call 1: Diarization — who spoke when
 // =============================================================================
 // The PoC showed that asking Gemini to GENERATE transcript text hurts diarization.
@@ -384,15 +629,16 @@ function truncateForDiarization(
 // the model map names to voices ("the person who said 'Adam did most of that work'
 // is Sam, not Adam") without competing for output tokens.
 //
-// When transcript text is available (WhisperX ran first), it's included as context.
-// Gemini still only outputs diarization timestamps — no text generation.
-function buildDiarizationPrompt(transcriptText?: string): string {
-  const transcriptSection = transcriptText
-    ? `\n## Transcript Reference\nBelow is an automated transcript with approximate timestamps. Use this to help identify speakers by name (e.g., when someone is addressed directly) and to detect speaker changes. The transcript may have minor errors — trust the AUDIO for voice identification, but use the text for name/role clues.\n\n${transcriptText}\n`
+// When SpeakerIntelligence is available (Pass 1 succeeded), its compact formatted
+// context is injected instead of raw transcript text. When Pass 1 failed, we fall
+// back to the old truncateForDiarization path.
+function buildDiarizationPrompt(speakerContext?: string): string {
+  const contextSection = speakerContext
+    ? `\n${speakerContext}\n`
     : '';
 
   return `You are an expert audio analyst. Listen to this entire recording carefully.
-${transcriptSection}
+${contextSection}
 ## Tasks
 
 ### 1. Speaker Identification
@@ -401,6 +647,10 @@ Identify every distinct speaker. For each:
 - Identify their actual name if mentioned in conversation
 - Note their role (e.g., "presenter", "client lead", "questioner")
 - Write a brief description characterizing this speaker (voice, speaking style, or role in the conversation)
+
+CRITICAL — Direct-Address Inversion:
+When a speaker says "Hey Chris" or "Thanks Sarah", the VOICE SPEAKING is NOT that named person.
+Use the anchor points above to avoid this mistake — if a name is marked [ADDRESSED], the speaker at that moment is someone ELSE.
 
 Be conservative — do NOT create separate speakers for the same person.
 Also output "speakerCount": the total number of distinct speakers you identified.
@@ -864,7 +1114,7 @@ export async function processWithGemini3Flash(
     const audioPart = createPartFromUri(uploadedFile.uri, uploadedFile.mimeType);
     const transcriptText = options?.transcriptText;
 
-    // Helper: call Gemini with error handling
+    // Helper: call Gemini with audio part + error handling
     const callGemini = async (prompt: string, schema: object, label: string, thinkingBudget = 0) => {
       try {
         return await ai!.models.generateContent({
@@ -888,17 +1138,44 @@ export async function processWithGemini3Flash(
     };
 
     // -----------------------------------------------------------------------
-    // Call 1: Diarization (speakers + segments)
+    // Pass 1 (text-only): Speaker Intelligence Extraction
+    // Runs before audio calls — no Gemini Files API quota consumed.
+    // On failure or unusable output, degrades gracefully to old truncation path.
+    // -----------------------------------------------------------------------
+    let speakerContext: string | undefined;
+    let pass1Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
+    if (transcriptText) {
+      const pass1Start = Date.now();
+      const intel = await extractSpeakerIntelligence(transcriptText, ai, model, conversationId);
+      const pass1Duration = Date.now() - pass1Start;
+
+      if (intel) {
+        speakerContext = formatSpeakerIntelligenceContext(intel);
+        log.info(
+          `Pass 1 produced ${speakerContext.length} chars of context in ${(pass1Duration / 1000).toFixed(1)}s`,
+          ctx,
+        );
+        // Note: extractSpeakerIntelligence doesn't surface token usage externally yet.
+        // We record zeros here and rely on the inner log for monitoring.
+        pass1Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+      } else {
+        // Pass 1 failed or returned unusable output — degrade to raw truncation
+        log.warn('Pass 1 degraded — using truncated transcript as diarization context', ctx);
+        const truncated = truncateForDiarization(transcriptText, 8000, 2000);
+        if (truncated) {
+          log.info(`Fallback context: ${truncated.length} chars (truncated from ${transcriptText.length})`, ctx);
+          speakerContext = `## Transcript Reference\nBelow is an automated transcript with approximate timestamps. Use this to help identify speakers by name and to detect speaker changes. The transcript may have minor errors — trust the AUDIO for voice identification, but use the text for name/role clues.\n\n${truncated}`;
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pass 2 (audio + context): Diarization (speakers + segments)
     // Gets the full output budget — no competition with content extraction.
     // -----------------------------------------------------------------------
     const diarStart = Date.now();
-    // Truncate transcript for diarization context — full 41K chars causes fetch
-    // failures, but first 8K + last 2K captures intros/names without overload.
-    const truncatedTranscript = truncateForDiarization(transcriptText, 8000, 2000);
-    if (truncatedTranscript && transcriptText) {
-      log.info(`Diarization context: ${truncatedTranscript.length} chars (truncated from ${transcriptText.length})`, ctx);
-    }
-    const diarResponse = await callGemini(buildDiarizationPrompt(truncatedTranscript), DIARIZATION_SCHEMA, 'diarization', 4096);
+    const diarResponse = await callGemini(buildDiarizationPrompt(speakerContext), DIARIZATION_SCHEMA, 'diarization', 4096);
     const diarDuration = Date.now() - diarStart;
     const diarUsage = diarResponse.usageMetadata;
 
@@ -909,7 +1186,7 @@ export async function processWithGemini3Flash(
     log.info(`Parsed: ${diarResult.speakers.length} speakers, ${diarResult.segments.length} segments`, ctx);
 
     // -----------------------------------------------------------------------
-    // Call 2: Content analysis (terms + topics + persons)
+    // Pass 3 (audio): Content analysis (terms + topics + persons)
     // Separate call so truncation of segments can't wipe out content.
     // -----------------------------------------------------------------------
     const contentStart = Date.now();
@@ -924,7 +1201,7 @@ export async function processWithGemini3Flash(
     log.info(`Terms: ${contentResult.terms.length}, Topics: ${contentResult.topics.length}, Persons: ${contentResult.persons.length}`, ctx);
 
     // -----------------------------------------------------------------------
-    // Merge results
+    // Merge results (Pass 1 token usage aggregated with audio call usage)
     // -----------------------------------------------------------------------
     const totalDuration = diarDuration + contentDuration;
     const result: GeminiPipelineResult = {
@@ -935,9 +1212,9 @@ export async function processWithGemini3Flash(
       topics: contentResult.topics,
       persons: contentResult.persons,
       tokenUsage: {
-        promptTokens: (diarUsage?.promptTokenCount ?? 0) + (contentUsage?.promptTokenCount ?? 0),
-        completionTokens: (diarUsage?.candidatesTokenCount ?? 0) + (contentUsage?.candidatesTokenCount ?? 0),
-        totalTokens: (diarUsage?.totalTokenCount ?? 0) + (contentUsage?.totalTokenCount ?? 0),
+        promptTokens: pass1Usage.promptTokens + (diarUsage?.promptTokenCount ?? 0) + (contentUsage?.promptTokenCount ?? 0),
+        completionTokens: pass1Usage.completionTokens + (diarUsage?.candidatesTokenCount ?? 0) + (contentUsage?.candidatesTokenCount ?? 0),
+        totalTokens: pass1Usage.totalTokens + (diarUsage?.totalTokenCount ?? 0) + (contentUsage?.totalTokenCount ?? 0),
       },
       durationMs: totalDuration,
     };

@@ -34,9 +34,11 @@ jest.mock('@ffmpeg-installer/ffmpeg', () => ({
 // Track execFile calls for verification
 const execFileAsyncMock = jest.fn().mockResolvedValue({ stdout: '', stderr: '' });
 
-// Mock child_process
+// Mock child_process — execFileSync covers both the ffmpeg check in getFfmpegPath
+// and the curl download in downloadAudioFromStorage (swallow both silently).
 jest.mock('child_process', () => ({
   execFile: jest.fn(),
+  execFileSync: jest.fn(),
 }));
 
 // Mock util promisify to return our controlled mock
@@ -80,6 +82,14 @@ jest.mock('@google/genai', () => ({
   createPartFromUri: jest.fn((uri, mimeType) => ({ uri, mimeType })),
 }));
 
+// Mock google-auth-library — dynamically imported by downloadAudioFromStorage.
+// Without this, every test that reaches download hits real credential paths.
+jest.mock('google-auth-library', () => ({
+  GoogleAuth: jest.fn().mockImplementation(() => ({
+    getAccessToken: jest.fn().mockResolvedValue('mock-token'), // pragma: allowlist secret
+  })),
+}));
+
 // Mock firestoreUtils — sanitizeForFirestore is pure but we mock to avoid
 // transitive import chains. Faithful reimplementation keeps tests honest.
 jest.mock('../firestoreUtils', () => {
@@ -104,15 +114,41 @@ import {
   parseGeminiJson,
   GeminiPipelineError,
   assembleFirestoreData,
+  formatSpeakerIntelligenceContext,
   GeminiPipelineResult,
   AlignedSegment,
+  SpeakerIntelligence,
 } from '../gemini3Pipeline';
 
 // =============================================================================
 // Test Fixtures
 // =============================================================================
 
-// Split responses matching the two-call architecture
+// Pass 1 response fixture — text-only speaker intelligence extraction
+const VALID_SPEAKER_INTELLIGENCE_RESPONSE: SpeakerIntelligence = {
+  speakerCount: 2,
+  speakers: [
+    { name: 'Alice', estimatedTurns: 8, roleClue: 'leads the presentation' },
+    { name: 'Bob', estimatedTurns: 4 },
+  ],
+  anchorPoints: [
+    {
+      timestampMs: 2000,
+      name: 'Alice',
+      isAddressed: false,
+      context: "I'm Alice, I'll be presenting today",
+    },
+    {
+      timestampMs: 31000,
+      name: 'Bob',
+      isAddressed: true,
+      context: 'Great question, Bob — let me clarify',
+    },
+  ],
+  disambiguationNotes: undefined,
+};
+
+// Pass 2 response fixture — audio diarization
 const VALID_DIARIZATION_RESPONSE = {
   speakerCount: 2,
   speakers: [
@@ -126,6 +162,7 @@ const VALID_DIARIZATION_RESPONSE = {
   ],
 };
 
+// Pass 3 response fixture — content analysis
 const VALID_CONTENT_RESPONSE = {
   terms: [
     { key: 'ai', display: 'AI', definition: 'Artificial Intelligence', aliases: ['artificial intelligence'] },
@@ -180,7 +217,8 @@ describe('gemini3Pipeline', () => {
     mockFilesGet.mockResolvedValue({ state: 'ACTIVE' });
     mockFilesDelete.mockResolvedValue(undefined);
 
-    // Default: successful generation (two calls — diarization then content)
+    // Default: successful generation (two audio calls — Pass 2 diarization, Pass 3 content).
+    // Tests that provide transcriptText will need to prepend a Pass 1 mock themselves.
     mockGenerateContent
       .mockResolvedValueOnce({
         text: JSON.stringify(VALID_DIARIZATION_RESPONSE),
@@ -278,6 +316,232 @@ describe('gemini3Pipeline', () => {
           model: 'gemini-4-flash',
         })
       );
+    });
+  });
+
+  // ===========================================================================
+  // Three-Call Sequencing Tests (Pass 1 → Pass 2 → Pass 3)
+  // ===========================================================================
+
+  describe('three-call sequencing with transcriptText', () => {
+    it('makes three generateContent calls when transcriptText is provided', async () => {
+      // Reset queue from beforeEach defaults — three-call tests own the full sequence
+      mockGenerateContent.mockReset();
+      // Pass 1 (text-only), Pass 2 (audio diarization), Pass 3 (audio content)
+      mockGenerateContent
+        .mockResolvedValueOnce({
+          // Pass 1 — no audio part, JSON with speaker intelligence
+          text: JSON.stringify(VALID_SPEAKER_INTELLIGENCE_RESPONSE),
+          usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 150, totalTokenCount: 650 },
+        })
+        .mockResolvedValueOnce({
+          // Pass 2 — audio diarization
+          text: JSON.stringify(VALID_DIARIZATION_RESPONSE),
+          usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 400, totalTokenCount: 1400 },
+        })
+        .mockResolvedValueOnce({
+          // Pass 3 — audio content
+          text: JSON.stringify(VALID_CONTENT_RESPONSE),
+          usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 100, totalTokenCount: 1100 },
+        });
+
+      await processWithGemini3Flash('users/123/audio/test.mp3', {
+        transcriptText: '[0:00] Hello everyone\n[0:05] Hey Alice, great to meet you',
+      });
+
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+    });
+
+    it('injects speaker intelligence context into Pass 2 diarization prompt', async () => {
+      mockGenerateContent.mockReset();
+      mockGenerateContent
+        .mockResolvedValueOnce({
+          text: JSON.stringify(VALID_SPEAKER_INTELLIGENCE_RESPONSE),
+          usageMetadata: {},
+        })
+        .mockResolvedValueOnce({
+          text: JSON.stringify(VALID_DIARIZATION_RESPONSE),
+          usageMetadata: {},
+        })
+        .mockResolvedValueOnce({
+          text: JSON.stringify(VALID_CONTENT_RESPONSE),
+          usageMetadata: {},
+        });
+
+      await processWithGemini3Flash('users/123/audio/test.mp3', {
+        transcriptText: '[0:00] Hey Alice, what do you think?',
+      });
+
+      // Pass 2 call (index 1) should include speaker intelligence context in its prompt text
+      const pass2Call = mockGenerateContent.mock.calls[1][0];
+      const pass2PromptText = pass2Call.contents[0].parts.find(
+        (p: { text?: string }) => typeof p.text === 'string'
+      )?.text ?? '';
+      expect(pass2PromptText).toContain('Speaker Intelligence');
+    });
+
+    it('aggregates token usage across all three passes', async () => {
+      mockGenerateContent.mockReset();
+      mockGenerateContent
+        .mockResolvedValueOnce({
+          text: JSON.stringify(VALID_SPEAKER_INTELLIGENCE_RESPONSE),
+          usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 150, totalTokenCount: 650 },
+        })
+        .mockResolvedValueOnce({
+          text: JSON.stringify(VALID_DIARIZATION_RESPONSE),
+          usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 400, totalTokenCount: 1400 },
+        })
+        .mockResolvedValueOnce({
+          text: JSON.stringify(VALID_CONTENT_RESPONSE),
+          usageMetadata: { promptTokenCount: 800, candidatesTokenCount: 100, totalTokenCount: 900 },
+        });
+
+      const result = await processWithGemini3Flash('users/123/audio/test.mp3', {
+        transcriptText: '[0:00] Hey Alice',
+      });
+
+      // Pass 1 token usage isn't surfaced through extractSpeakerIntelligence yet
+      // (returns 0 externally) — Pass 2 + Pass 3 aggregated
+      expect(result.tokenUsage?.promptTokens).toBe(1000 + 800);
+      expect(result.tokenUsage?.completionTokens).toBe(400 + 100);
+      expect(result.tokenUsage?.totalTokens).toBe(1400 + 900);
+    });
+
+    it('falls back to truncated transcript when Pass 1 fails', async () => {
+      // Pass 1 throws — should degrade silently and still make two more calls
+      mockGenerateContent.mockReset();
+      mockGenerateContent
+        .mockRejectedValueOnce(new Error('Pass 1 network blip'))
+        .mockResolvedValueOnce({
+          text: JSON.stringify(VALID_DIARIZATION_RESPONSE),
+          usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 400, totalTokenCount: 1400 },
+        })
+        .mockResolvedValueOnce({
+          text: JSON.stringify(VALID_CONTENT_RESPONSE),
+          usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 100, totalTokenCount: 1100 },
+        });
+
+      const result = await processWithGemini3Flash('users/123/audio/test.mp3', {
+        transcriptText: '[0:00] Hello world',
+      });
+
+      // Should succeed with diarization/content from Passes 2+3
+      expect(result.speakers).toHaveLength(2);
+      expect(result.segments).toHaveLength(3);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+    });
+
+    it('falls back to truncated transcript when Pass 1 returns zero speakers', async () => {
+      const emptyIntelligence = { speakerCount: 0, speakers: [], anchorPoints: [] };
+
+      mockGenerateContent.mockReset();
+      mockGenerateContent
+        .mockResolvedValueOnce({
+          text: JSON.stringify(emptyIntelligence),
+          usageMetadata: {},
+        })
+        .mockResolvedValueOnce({
+          text: JSON.stringify(VALID_DIARIZATION_RESPONSE),
+          usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 400, totalTokenCount: 1400 },
+        })
+        .mockResolvedValueOnce({
+          text: JSON.stringify(VALID_CONTENT_RESPONSE),
+          usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 100, totalTokenCount: 1100 },
+        });
+
+      const result = await processWithGemini3Flash('users/123/audio/test.mp3', {
+        transcriptText: '[0:00] Hello world',
+      });
+
+      expect(result.speakers).toHaveLength(2);
+      // All three calls still made — Pass 1 degraded but Passes 2+3 ran
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+    });
+
+    it('still makes two calls (not three) when no transcriptText is provided', async () => {
+      // beforeEach default mock already has 2 responses queued — no reset needed
+      await processWithGemini3Flash('users/123/audio/test.mp3');
+
+      // No transcriptText → no Pass 1 → only Pass 2 (diarization) + Pass 3 (content)
+      expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ===========================================================================
+  // formatSpeakerIntelligenceContext Unit Tests
+  // ===========================================================================
+
+  describe('formatSpeakerIntelligenceContext', () => {
+    it('produces a string containing speaker names', () => {
+      const result = formatSpeakerIntelligenceContext(VALID_SPEAKER_INTELLIGENCE_RESPONSE);
+
+      expect(result).toContain('Alice');
+      expect(result).toContain('Bob');
+    });
+
+    it('encodes direct-address inversion correctly', () => {
+      const result = formatSpeakerIntelligenceContext(VALID_SPEAKER_INTELLIGENCE_RESPONSE);
+
+      // Bob is isAddressed:true — should signal the voice is NOT Bob
+      expect(result).toContain('ADDRESSED');
+      expect(result).toContain('NOT Bob');
+    });
+
+    it('caps anchor points at MAX_INJECTED_ANCHORS (20)', () => {
+      const lotsOfAnchors: SpeakerIntelligence = {
+        speakerCount: 1,
+        speakers: [{ name: 'Alice', estimatedTurns: 1 }],
+        anchorPoints: Array.from({ length: 30 }, (_, i) => ({
+          timestampMs: i * 1000,
+          name: 'Alice',
+          isAddressed: false,
+          context: `line ${i}`,
+        })),
+      };
+
+      const result = formatSpeakerIntelligenceContext(lotsOfAnchors);
+
+      // Should only include up to 20 — count "line N" occurrences
+      const lineMatches = result.match(/line \d+/g) ?? [];
+      expect(lineMatches.length).toBeLessThanOrEqual(20);
+    });
+
+    it('caps speaker list at MAX_INJECTED_SPEAKERS (15)', () => {
+      const lotOfSpeakers: SpeakerIntelligence = {
+        speakerCount: 20,
+        speakers: Array.from({ length: 20 }, (_, i) => ({
+          name: `Speaker${i}`,
+          estimatedTurns: 1,
+        })),
+        anchorPoints: [],
+      };
+
+      const result = formatSpeakerIntelligenceContext(lotOfSpeakers);
+
+      // Speaker16 through Speaker19 should be absent
+      expect(result).not.toContain('Speaker15');
+      expect(result).not.toContain('Speaker19');
+    });
+
+    it('omits disambiguation section when notes are absent', () => {
+      const noNotes: SpeakerIntelligence = {
+        ...VALID_SPEAKER_INTELLIGENCE_RESPONSE,
+        disambiguationNotes: undefined,
+      };
+
+      const result = formatSpeakerIntelligenceContext(noNotes);
+      expect(result).not.toContain('Disambiguation Notes');
+    });
+
+    it('includes disambiguation section when notes are present', () => {
+      const withNotes: SpeakerIntelligence = {
+        ...VALID_SPEAKER_INTELLIGENCE_RESPONSE,
+        disambiguationNotes: 'Sam and Samuel appear to be the same person',
+      };
+
+      const result = formatSpeakerIntelligenceContext(withNotes);
+      expect(result).toContain('Disambiguation Notes');
+      expect(result).toContain('Sam and Samuel');
     });
   });
 

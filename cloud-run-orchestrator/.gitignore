@@ -1,6 +1,9 @@
 lib/
 node_modules/
 
+# Auto-generated at build time by scripts/generate-version.js
+src/version.ts
+
 # Copied from functions/src/ at build time by scripts/copy-functions-modules.sh
 # These are NOT sources of truth — edit the originals in functions/src/ instead.
 src/_functions/
