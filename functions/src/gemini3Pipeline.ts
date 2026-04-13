@@ -480,7 +480,18 @@ const SPEAKER_INTELLIGENCE_SCHEMA = {
 
 const SPEAKER_INTELLIGENCE_PROMPT = `You are a transcript analyst. Parse the following timestamped transcript and extract speaker intelligence.
 
-CRITICAL RULE — Direct-Address Inversion:
+## CRITICAL: Identify ALL Speakers — Including Brief Ones
+
+**Do NOT skip speakers who only speak once or twice.** A person who says a single sentence is still a unique speaker and MUST be included in your output. Brief speakers are just as important as frequent speakers.
+
+Look carefully for:
+- Speakers who only have 1-2 utterances in the entire transcript
+- Speakers who are addressed by name but speak briefly
+- Speakers who ask a single question then stay quiet
+- Facilitators or observers who speak rarely
+
+## CRITICAL: Direct-Address Inversion Rule
+
 When someone says "Hey Chris" or "Thanks Sarah" or "Good point, Alex", the VOICE SPEAKING is NOT Chris/Sarah/Alex.
 The named person is being ADDRESSED, not speaking. This is the most common source of speaker misidentification.
 Example: "[2:15] Hey Chris, what do you think?" → whoever said this is NOT Chris.
@@ -489,7 +500,7 @@ Example: "[5:30] That's a great question, Sam." → the speaker is NOT Sam.
 ## Tasks
 
 ### 1. Speaker Identification
-List every distinct person who appears to speak in this transcript. For each:
+List EVERY distinct person who speaks in this transcript — even those with only 1-2 turns. For each:
 - "name": their name as used in the transcript
 - "estimatedTurns": rough count of how many times they appear to speak
 - "roleClue": optional role hint if discernible (e.g. "asks most questions", "introduced the agenda")

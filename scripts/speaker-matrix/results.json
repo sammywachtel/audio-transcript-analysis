@@ -1,0 +1,190 @@
+[
+  {
+    "caseId": "baseline_2speaker",
+    "challenge": "baseline",
+    "passed": true,
+    "expected": {
+      "speakerCount": 2,
+      "speakers": [
+        "Speaker 1",
+        "Speaker 2"
+      ]
+    },
+    "actual": {
+      "speakerCount": 2,
+      "speakers": [
+        "Unknown Speaker 1",
+        "Unknown Speaker 2"
+      ]
+    },
+    "speakersFound": [
+      "Speaker 1",
+      "Speaker 2"
+    ],
+    "speakersMissed": [],
+    "speakersExtra": [],
+    "durationMs": 7809
+  },
+  {
+    "caseId": "brief_speaker",
+    "challenge": "brief_speaker",
+    "passed": true,
+    "expected": {
+      "speakerCount": 4,
+      "speakers": [
+        "Sanjay",
+        "Sammy",
+        "Adam",
+        "Dhaval"
+      ]
+    },
+    "actual": {
+      "speakerCount": 4,
+      "speakers": [
+        "Sanjay",
+        "Sammy",
+        "Adam",
+        "Dhaval"
+      ]
+    },
+    "speakersFound": [
+      "Sanjay",
+      "Sammy",
+      "Adam",
+      "Dhaval"
+    ],
+    "speakersMissed": [],
+    "speakersExtra": [],
+    "durationMs": 13198
+  },
+  {
+    "caseId": "direct_address_inversion",
+    "challenge": "direct_address",
+    "passed": true,
+    "expected": {
+      "speakerCount": 3,
+      "speakers": [
+        "Speaker 1",
+        "Chris",
+        "Adam"
+      ]
+    },
+    "actual": {
+      "speakerCount": 3,
+      "speakers": [
+        "Unknown Speaker 1",
+        "Chris",
+        "Adam"
+      ]
+    },
+    "speakersFound": [
+      "Speaker 1",
+      "Chris",
+      "Adam"
+    ],
+    "speakersMissed": [],
+    "speakersExtra": [],
+    "anchorPointsChecked": 2,
+    "anchorPointsCorrect": 2,
+    "durationMs": 4464
+  },
+  {
+    "caseId": "similar_names",
+    "challenge": "similar_names",
+    "passed": true,
+    "expected": {
+      "speakerCount": 3,
+      "speakers": [
+        "Chris",
+        "Chris Savage",
+        "Sanjay"
+      ]
+    },
+    "actual": {
+      "speakerCount": 3,
+      "speakers": [
+        "Chris",
+        "Sanjay",
+        "Chris Savage"
+      ]
+    },
+    "speakersFound": [
+      "Chris",
+      "Chris Savage",
+      "Sanjay"
+    ],
+    "speakersMissed": [],
+    "speakersExtra": [],
+    "durationMs": 6878
+  },
+  {
+    "caseId": "rapid_exchange",
+    "challenge": "rapid_exchange",
+    "passed": true,
+    "expected": {
+      "speakerCount": 4,
+      "speakers": [
+        "JJ",
+        "Sanjay",
+        "Adam",
+        "Chris"
+      ]
+    },
+    "actual": {
+      "speakerCount": 4,
+      "speakers": [
+        "JJ",
+        "Sanjay",
+        "Adam",
+        "Chris"
+      ]
+    },
+    "speakersFound": [
+      "JJ",
+      "Sanjay",
+      "Adam",
+      "Chris"
+    ],
+    "speakersMissed": [],
+    "speakersExtra": [],
+    "durationMs": 12313
+  },
+  {
+    "caseId": "six_speakers",
+    "challenge": "many_speakers",
+    "passed": true,
+    "expected": {
+      "speakerCount": 6,
+      "speakers": [
+        "Sanjay",
+        "Sammy",
+        "Chris Savage",
+        "Adam",
+        "Dhaval",
+        "JJ"
+      ]
+    },
+    "actual": {
+      "speakerCount": 6,
+      "speakers": [
+        "Sanjay",
+        "Sammy",
+        "Chris Savage",
+        "Adam",
+        "Dhaval",
+        "JJ"
+      ]
+    },
+    "speakersFound": [
+      "Sanjay",
+      "Sammy",
+      "Chris Savage",
+      "Adam",
+      "Dhaval",
+      "JJ"
+    ],
+    "speakersMissed": [],
+    "speakersExtra": [],
+    "durationMs": 8841
+  }
+]
