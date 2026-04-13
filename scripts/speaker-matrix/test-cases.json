@@ -1,0 +1,76 @@
+{
+  "version": "1.0",
+  "description": "Speaker detection test matrix - Pass 1 isolation tests",
+  "cases": [
+    {
+      "id": "baseline_2speaker",
+      "description": "Simple 2-speaker conversation with clear turn-taking",
+      "challenge": "baseline",
+      "transcript": "[0:00] So I've been looking at the data and I think we need to reconsider our approach.\n[0:05] What specifically concerns you about the current methodology?\n[0:10] Well, the sample sizes are too small. We're seeing a lot of variance.\n[0:15] That's a fair point. Sarah mentioned the same thing yesterday.\n[0:20] Did she? I should follow up with her then.\n[0:25] Yeah, Sarah had some good ideas about stratification.",
+      "expected": {
+        "speakerCount": 2,
+        "speakers": ["Speaker 1", "Speaker 2"],
+        "notes": "Basic turn-taking, names mentioned (Sarah) but she's not present"
+      }
+    },
+    {
+      "id": "brief_speaker",
+      "description": "One speaker has only a single brief utterance (the Dhaval problem)",
+      "challenge": "brief_speaker",
+      "transcript": "[0:00] Sanjay: We've done some exceptional work in terms of helping our operations folks.\n[0:10] Sammy: Don't give me too much credit because Adam did most of that work.\n[0:15] Sanjay: Yeah, well, yeah.\n[0:18] Adam: I like that because he'll keep trying.\n[0:22] Dhaval: So, Adam, Sam, where do you guys want to go next?\n[0:28] Sanjay: Let me just, so what I would suggest, right, because I think Adam and Sam and JJ and Chris, if we had a chance to look at our assumptions...",
+      "expected": {
+        "speakerCount": 4,
+        "speakers": ["Sanjay", "Sammy", "Adam", "Dhaval"],
+        "notes": "Dhaval speaks only once - must not be missed"
+      }
+    },
+    {
+      "id": "direct_address_inversion",
+      "description": "Direct address patterns where 'Hey X' means NOT X is speaking",
+      "challenge": "direct_address",
+      "transcript": "[0:00] Hey Chris, can you pull up that spreadsheet?\n[0:05] Sure thing, give me a second.\n[0:10] Chris, while you're doing that, what did you think of the proposal?\n[0:15] I thought it was solid. The numbers make sense.\n[0:20] Great. Hey Adam, you had concerns about the timeline?\n[0:25] Yeah, I think we're being too aggressive with Q2.",
+      "expected": {
+        "speakerCount": 3,
+        "speakers": ["Speaker 1", "Chris", "Adam"],
+        "anchorPoints": [
+          {"text": "Hey Chris", "speakerIsNot": "Chris"},
+          {"text": "Hey Adam", "speakerIsNot": "Adam"}
+        ],
+        "notes": "The person saying 'Hey Chris' is NOT Chris"
+      }
+    },
+    {
+      "id": "similar_names",
+      "description": "Two people with similar names that must stay distinct",
+      "challenge": "similar_names",
+      "transcript": "[0:00] Chris: I've reviewed the vendor proposals.\n[0:05] Sanjay: Great, what does Chris Savage think about pricing?\n[0:10] Chris Savage: The pricing is competitive but we need to negotiate the support terms.\n[0:15] Chris: I agree with Chris Savage on that point.\n[0:20] Sanjay: So both Chrises are aligned then?\n[0:25] Chris Savage: Yes, we're on the same page.",
+      "expected": {
+        "speakerCount": 3,
+        "speakers": ["Chris", "Chris Savage", "Sanjay"],
+        "notes": "Chris and Chris Savage must remain distinct speakers"
+      }
+    },
+    {
+      "id": "rapid_exchange",
+      "description": "Fast back-and-forth with multiple speakers",
+      "challenge": "rapid_exchange",
+      "transcript": "[0:00] JJ: So the model uses a bottoms-up approach.\n[0:02] Sanjay: Right.\n[0:03] JJ: We define patient types first.\n[0:05] Adam: Makes sense.\n[0:06] JJ: Then we map HCPs to patients.\n[0:08] Sanjay: Can you show that?\n[0:09] JJ: Sure, let me scroll down.\n[0:11] Chris: While you do that, quick question.\n[0:13] JJ: Go ahead.\n[0:14] Chris: How do you handle overlapping segments?",
+      "expected": {
+        "speakerCount": 4,
+        "speakers": ["JJ", "Sanjay", "Adam", "Chris"],
+        "notes": "Very short utterances, must not merge speakers"
+      }
+    },
+    {
+      "id": "six_speakers",
+      "description": "Full commercial analytics scenario - 6 distinct speakers",
+      "challenge": "many_speakers",
+      "transcript": "[0:00] Sanjay: We've done some exceptional work helping our operations folks.\n[0:10] Sammy: Don't give me too much credit, Adam did most of that work.\n[0:15] Sanjay: Yeah, well, yeah.\n[0:18] Chris Savage: I like that because he'll keep trying.\n[0:22] Adam: Keep that bar up there.\n[0:25] Dhaval: So, Adam, Sam, where do you guys want to go next?\n[0:30] Sanjay: What I would suggest is let's have JJ and Chris look at our assumptions.\n[0:40] JJ: Cool. Do you want me to give a quick overview?\n[0:45] Sanjay: Yeah, let's go through the Excel file tab by tab.\n[0:50] JJ: I don't have the model open right now.\n[0:55] Chris Savage: Takes a minute to load here.\n[1:00] Adam: It's loaded, I just need to reorganize some tabs.",
+      "expected": {
+        "speakerCount": 6,
+        "speakers": ["Sanjay", "Sammy", "Chris Savage", "Adam", "Dhaval", "JJ"],
+        "notes": "Full scenario - Dhaval has one line, Chris Savage must be distinct from any 'Chris'"
+      }
+    }
+  ]
+}
